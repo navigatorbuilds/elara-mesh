@@ -1,0 +1,64 @@
+[package]
+name = "elara-verify-wasm"
+version = "0.1.0"
+edition = "2021"
+description = "Elara Protocol — offline record verifier as WASM. Verify-only: no wallet, no secret keys, no signing, no network."
+license = "AGPL-3.0-only"
+# Ships as a wasm artifact (demo page + public mirror), never to crates.io — the
+# versionless path dep on elara-runtime is unpublishable by construction, and
+# cargo-deny's allow-wildcard-paths only applies to crates marked unpublished.
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# Minimal wasm-binding surface. NOTE the deliberate absence of the wallet stack
+# the full `browser-node` crate pulls in (web-sys/WebSocket, ml-kem, x25519,
+# chacha20poly1305, qrcode/rqrr, the PQ-handshake driver): a verifier needs none
+# of it. The only thing this crate can do is read a record JSON and return a
+# tri-state verdict — there is no code path here that touches a secret key.
+wasm-bindgen = "0.2"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde-wasm-bindgen = "0.6"
+
+# Verify never draws randomness, but crypto crates transitively in the runtime
+# reference `getrandom`; selecting the browser backend lets the wasm32 build link
+# (the same shim `browser-node` uses — feature-unified, not a called path).
+getrandom = { version = "0.2", features = ["js"] }
+getrandom_03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
+
+# The verification LOGIC — the shared, node-free, drift-proof `verify_core` that
+# the `elara-verify` CLI also calls, so this browser verdict can never diverge
+# from the CLI verdict. `default-features = false` keeps node/tokio/network out.
+# `verify-anchor` adds the anchor legs (drand BLS against the pinned LoE key +
+# the OTS→Bitcoin walk; pure-Rust bls12_381/sha2, wasm32-clean) plus the shared
+# receipt-grading module — full-chain parity with `elara-verify --receipt`
+# (verifier-flagship audit 2026-07-06, step 4). Still no wallet, no network.
+elara-runtime = { path = "..", default-features = false, features = ["verify-anchor"] }
+
+[dev-dependencies]
+# Native-target receipt fixtures hex-encode wire legs (the envelope convention).
+hex = "0.4"
+
+[profile.release]
+opt-level = "s"
+lto = true
+
+# wasm-pack's post-build wasm-opt pass: DISABLED on purpose. `opt-level = "s" +
+# lto` above already does the size win at the LLVM level, so wasm-opt is only a
+# marginal extra pass — and it is NOT correctness-load-bearing (the verdict is
+# deterministic `elara_runtime::verify_core`, shared with the CLI). Leaving it on
+# makes wasm-pack fetch the binaryen `wasm-opt` binary from the GitHub releases
+# API at build time; that API is rate-limited for shared CI IPs and returns a JSON
+# error object wasm-pack mis-parses ("invalid type: sequence, expected a string"),
+# which would flake the launch-gating pages.yml Pages deploy of the verify demo.
+# Skipping wasm-opt removes that network dependency entirely.
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
+
+# Standalone workspace — same rationale as `browser-node/Cargo.toml`: this wasm
+# crate builds on its own (its own target dir) and is NOT a member of the root
+# elara-runtime workspace, whose [workspace] lists neither it nor an exclude.
+[workspace]

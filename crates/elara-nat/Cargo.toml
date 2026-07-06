@@ -1,0 +1,15 @@
+[package]
+name = "elara-nat"
+version = "0.1.0"
+edition = "2021"
+description = "NAT traversal for peer-to-peer nodes: STUN-based external-address and NAT-type detection plus UPnP/IGD port mapping. Extracted from the Elara Protocol node."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/navigatorbuilds/elara-mesh"
+readme = "README.md"
+keywords = ["nat", "stun", "upnp", "p2p", "hole-punching"]
+categories = ["network-programming"]
+
+[dependencies]
+tracing = "0.1"
+tokio = { version = "1", features = ["rt", "time"] }
+getrandom = "0.2"

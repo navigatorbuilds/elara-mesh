@@ -1,0 +1,36 @@
+{
+  "name": "@elara/sdk",
+  "version": "0.1.0",
+  "description": "TypeScript SDK for the Elara mesh network. Three-line integration: Agent.create() / agent.record() / agent.prove(). Wraps the public REST API.",
+  "license": "MIT OR Apache-2.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "node --test --import tsx test/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "typecheck:examples": "tsc --noEmit -p tsconfig.examples.json",
+    "example:quickstart": "tsx examples/quickstart.ts",
+    "example:light-verify": "tsx examples/light_verify.ts"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^20",
+    "tsx": "^4",
+    "typescript": "^5"
+  }
+}

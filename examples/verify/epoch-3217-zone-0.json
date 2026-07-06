@@ -1,0 +1,17 @@
+{
+ "v": 1,
+ "purpose": "elara epoch anchor artifact (outbound existed-by leg)",
+ "stamped_at_utc": "2026-06-14T16:20:03.441376+00:00",
+ "zone": "0",
+ "epoch": 3217,
+ "seal_hash": "c2bc324cabe8c997efa47e58652a091d54f60112c709950244fe98c8eb2aaab3",
+ "drand_round": 6200766,
+ "drand_randomness": "fe7b181e423bccd78c3cdb5f7e98cf54ec2e670065acf38a8b537d0764a1f3d1",
+ "drand_signature": "b9714afc05c304e3373612cbb104ff45a7bff3b5104e8b6671e3d5080888496affea1869e01e950e05916aa119f33e1b051e6945c1eda79f773c791dd9e6872d350893ae5a74ea4c09eae7fd045ed4423de8a028b83bdaa53de9250148c68fae",
+ "drand_previous_signature": "8793e2549876e9acdd3058296888098df27ae237982bcf09cf8f732e26e952601d2cdefe890801e30a0314a3c2f76c0f0aa9f97f255c5ca19670467e4ccc5938de991ed094786b84d2bec79780f6490e6aad72ce4dfd95ad0ab70c69db5072fe",
+ "drand_public_key": "868f005eb8e6e4ca0a47c8a77ceaa5309a47978a7c71bc5cce96366b5d7a569937c529eeda66c7293784a9402801af31",
+ "drand_scheme": "pedersen-bls-chained",
+ "drand_genesis_unix": 1595431050,
+ "drand_period_secs": 30,
+ "drand_chain_hash": "8990e7a9aaed2ffed73dbd7092123d6f289930540d7651336225dc172e51b2ce"
+}

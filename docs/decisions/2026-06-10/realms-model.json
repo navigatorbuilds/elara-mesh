@@ -1,0 +1,11 @@
+{
+ "kind": "design_decision",
+ "project": "elara-protocol",
+ "date": "2026-06-10",
+ "decision": "realms-model",
+ "statement": "Three-realm membership architecture adopted: OPEN (public self-assembling mesh), FEDERATED (credential-gated consortia), SOVEREIGN (isolated, own root of trust). Load-bearing invariant: realm = exposure policy chosen by the operator, NEVER power \u2014 no tier confers public-mesh advantage.",
+ "decided_by": "Nenad Vasic (idea) + Elara (design)",
+ "refs": [
+  "docs/REALMS-SELF-ASSEMBLY.md"
+ ]
+}

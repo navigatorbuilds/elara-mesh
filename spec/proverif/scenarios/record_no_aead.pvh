@@ -1,0 +1,20 @@
+(* record_no_aead — NON-VACUITY twin (the both_broken analogue). Strip the AEAD:
+   records travel as plaintext. The attacker forges arbitrary records (injective
+   AND non-injective agreement FAIL) and reads the payload (secrecy FAILS). This
+   proves the aenc/adec abstraction is not vacuous — record_baseline's two TRUEs
+   are not artifacts of unreachable events. *)
+free n1: nonce.
+free n2: nonce.
+free probe: bitstring [private].
+event Send(key, nonce, bitstring).
+event Recv(key, nonce, bitstring).
+let session =
+  new k: key; new s2: bitstring;
+  ( event Send(k, n1, probe); out(net, (TYPE_DATA, probe));
+    event Send(k, n2, s2);    out(net, (TYPE_DATA, s2)) )            (* PLAINTEXT — no AEAD *)
+  |
+  ( in(net, (t1: bitstring, c1: bitstring)); event Recv(k, n1, c1);
+    in(net, (t2: bitstring, c2: bitstring)); event Recv(k, n2, c2) ).
+query k: key, n: nonce, m: bitstring; inj-event(Recv(k,n,m)) ==> inj-event(Send(k,n,m)).
+query attacker(probe).
+process ( !session )

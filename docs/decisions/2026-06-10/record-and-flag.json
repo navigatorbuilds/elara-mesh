@@ -1,0 +1,11 @@
+{
+ "kind": "design_decision",
+ "project": "elara-protocol",
+ "date": "2026-06-10",
+ "decision": "record-and-flag",
+ "statement": "Out-of-mandate agent records are RECORDED AND FLAGGED, never silently rejected; flagged records carry zero weight (no trust, consensus, or reputation effect). A truth ledger records what happened, including violations \u2014 rejection blinds the victim.",
+ "decided_by": "Nenad Vasic (decision)",
+ "refs": [
+  "docs/AGENT-DELEGATION.md"
+ ]
+}

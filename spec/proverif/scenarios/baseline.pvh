@@ -1,0 +1,23 @@
+(* SCENARIO: baseline — both primitives intact.
+   EXPECT: session-key secrecy holds, AND mutual injective authentication holds
+   in both directions.
+   run-proverif.sh asserts all three RESULTs are "true".
+   ------------------------------------------------------------------------- *)
+
+(* (1) session-key secrecy: the attacker never learns the probe. *)
+query attacker(probe).
+
+(* (2) initiator authenticates responder: if the honest initiator accepts the
+   honest responder's identity over transcript t, the honest responder really
+   committed to t — injectively (no replay). *)
+query t:bitstring;
+  inj-event(InitAcceptResp(spk(skR), t)) ==> inj-event(RespCommit(spk(skR), t)).
+
+(* (3) responder authenticates initiator: symmetric. Captures the accept-any
+   responder honestly — agreement comes from the msg3 signature over t3. *)
+query t:bitstring;
+  inj-event(RespAcceptInit(spk(skI), t)) ==> inj-event(InitCommit(spk(skI), t)).
+
+process
+  out(c, spk(skI)); out(c, spk(skR));            (* long-term public keys are public *)
+  ( !P_init(skI, spk(skR)) | !P_resp(skR) )

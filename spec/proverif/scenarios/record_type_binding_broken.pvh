@@ -1,0 +1,20 @@
+(* record_type_binding_broken — NON-VACUITY twin for record_type_binding. The
+   PRE-FIX design: empty AD (senc0 ignores the frame type). The attacker reads
+   the Data frame off the wire and re-injects it with the type byte flipped to
+   Admission; with no AD binding the ciphertext opens regardless of type, so the
+   receiver dispatches a genuine application payload into the admission handler —
+   AdmissionDispatched fires with no AdmissionSent. Agreement FAILS, proving the
+   AD binding in record_type_binding is load-bearing (= the stream.rs fix). *)
+fun senc0(bitstring, key, nonce): bitstring.                       (* empty-AD AEAD: type NOT bound *)
+reduc forall m: bitstring, k: key, n: nonce; sdec0(senc0(m,k,n), k, n) = m.
+free n1: nonce.
+event AdmissionSent(bitstring).
+event AdmissionDispatched(bitstring).
+let session =
+  new k: key; new appdata: bitstring;
+  ( out(net, (TYPE_DATA, senc0(appdata, k, n1))) )
+  |
+  ( in(net, (t: bitstring, c: bitstring));
+    if t = TYPE_ADMISSION then ( let m = sdec0(c, k, n1) in event AdmissionDispatched(m) ) ).
+query m: bitstring; event(AdmissionDispatched(m)) ==> event(AdmissionSent(m)).
+process ( !session )

@@ -1,0 +1,241 @@
+(* ===========================================================================
+   Elara PQ transport — FULL-COMPOSITION symbolic model (SHARED CORE)
+   ---------------------------------------------------------------------------
+   This file is NOT run directly. run-proverif.sh concatenates it with one
+   scenario header from scenarios/composed_*.pvh (which adds the queries + the
+   top-level `process`).
+
+   WHAT THIS ADDS over the two standalone cores:
+     elara_handshake_core.pvi proves the 3-message hybrid handshake derives a
+     session key that is secret + transcript-bound. elara_record_core.pvi proves
+     the post-handshake record layer is sound GIVEN a good per-session key — but
+     it models that key as `new k: key`, which is secret BY CONSTRUCTION (a fresh
+     name the Dolev-Yao attacker can never derive). So the record proofs are
+     conditional on an idealized key.
+
+     This core CLOSES that seam: the record-layer key is the GENUINE handshake
+     output `kdf_send(dh_ss, kem_ss, t2)` — the exact term the handshake derives —
+     not a fresh name. The honest initiator runs the real handshake, then sends
+     the secret `probe` as a post-handshake RECORD frame under its derived
+     `ksend`; the responder runs the real handshake, then receives that frame
+     under its derived `krecvR` (= the same key, by the two-label HKDF crossing).
+     ONE Dolev-Yao attacker observes the entire transcript AND the record frame.
+
+     Record payload secrecy therefore rests on HANDSHAKE key secrecy. The
+     non-vacuity twin composed_broken bridges both ephemeral-secret leak channels
+     (X25519 + ML-KEM broken): the attacker reconstructs the handshake key and
+     the record `probe` LEAKS — a dependency the fresh-key record model can never
+     exhibit. composed_baseline (primitives intact) shows the same record stays
+     secret, the record accept is injective (anti-replay) under the genuine key,
+     and the handshake's mutual authentication is unaffected by the record tail.
+
+   WHY STANDALONE (not an include of the two cores): ProVerif has no #include;
+   run-proverif.sh simulates one by `cat`-ing a single core ahead of the header.
+   The handshake AEAD is 3-arg `adec(ad,ct,k)` (transcript-AD, no nonce) while the
+   record AEAD is 4-arg `adec(ad,ct,k,nonce)` (frame-type AD + counter nonce);
+   concatenating both cores would redeclare `adec` at two arities — a ProVerif
+   error. So the record AEAD is renamed here to `raenc`/`radec`, and the handshake
+   primitives + roles are mirrored from elara_handshake_core.pvi (P_init/P_resp).
+   The handshake message flow below MUST stay in sync with that core; it is a
+   verbatim mirror except the trailing standalone-probe emission is replaced by
+   the record-layer continuation (marked >>> RECORD LAYER <<< below).
+
+   Code under analysis:
+     crates/elara-pq-transport/src/handshake.rs  — 3-message hybrid handshake.
+     crates/elara-pq-transport/src/crypto.rs     — HKDF k_send/k_recv (distinct
+       labels), ChaCha20-Poly1305, 96-bit counter nonce.
+     src/network/pq_transport/stream.rs          — PqStream: handshake consumes
+       counter 0 in each direction; the record layer starts at counter 1
+       (next_recv_counter: 1), send_typed binds the 1-byte frame TYPE into the AD.
+
+   SOUNDNESS of the two-AEAD split: `aead(ad,m,k)` (handshake) and
+   `raenc(ad,m,k,n)` (record) are distinct symbolic constructors over the SAME
+   `key`. A handshake-framed ciphertext cannot open with `radec` and vice-versa —
+   modelling that the two wire framings are distinguishable (they are: the record
+   frame carries a counter-nonce header the handshake messages do not). This
+   grants no false cross-layer property. Symbolic AEAD does not model keystream /
+   nonce-reuse (a computational property), so the counter-0-vs-1 boundary is
+   verified by code-reading (stream.rs:606 "Starts at 1") + the symbolic
+   record_nonce_reuse scenario, NOT mechanically here; this core's contribution is
+   KEY GENUINENESS, not nonce arithmetic.
+
+   Design audited before authoring (2026-06-29). Dolev-Yao attacker controls c.
+   =========================================================================== *)
+
+(* ---- types (mirror handshake core + record `nonce`) -------------------- *)
+type sskey.    (* Dilithium3 / ML-DSA-65 long-term signing secret key        *)
+type spkey.    (* Dilithium3 long-term public key                            *)
+type dhsec.    (* X25519 ephemeral scalar                                    *)
+type G.        (* X25519 group element                                       *)
+type kemsec.   (* ML-KEM-768 ephemeral decapsulation key                     *)
+type kempub.   (* ML-KEM-768 ephemeral encapsulation (public) key            *)
+type key.      (* ChaCha20-Poly1305 AEAD session key                         *)
+type nonce.    (* record-layer 96-bit counter nonce                          *)
+
+(* ---- channels ---------------------------------------------------------- *)
+free c:channel.                       (* public network (attacker-controlled) *)
+free leak_dh:channel  [private].      (* X25519 shared secret leak hook       *)
+free leak_kem:channel [private].      (* ML-KEM shared secret leak hook       *)
+
+(* ---- long-term identities (honest initiator I, honest responder R) ------ *)
+free skI:sskey [private].
+free skR:sskey [private].
+
+(* ---- secrecy probe — carried as the FIRST post-handshake RECORD payload -- *)
+(* Reachable by the attacker IFF the genuine handshake send-key is computable.
+   This is the whole point: the probe is no longer sealed by an idealized fresh
+   key but by kdf_send(dh_ss, kem_ss, t2). *)
+free probe:bitstring [private].
+
+(* ---- record counter nonce (post-handshake; counter = 1 in stream.rs) ----- *)
+(* A distinct PUBLIC name: the attacker knows record counters. The handshake
+   AEAD has no nonce arg, so no handshake/record nonce can collide symbolically. *)
+free rn1:nonce.
+
+(* ---- timestamp (public, contributes no freshness) ----------------------- *)
+free ts0:bitstring.
+
+(* ---- Dilithium3 signatures --------------------------------------------- *)
+fun spk(sskey):spkey.
+fun sign(bitstring, sskey):bitstring.
+reduc forall m:bitstring, k:sskey; checksig(spk(k), m, sign(m,k)) = true.
+
+(* ---- X25519 ------------------------------------------------------------- *)
+const g:G [data].
+fun exp(G, dhsec):G.
+equation forall x:dhsec, y:dhsec; exp(exp(g,x),y) = exp(exp(g,y),x).
+fun GtoB(G):bitstring [typeConverter].
+
+(* ---- ML-KEM-768 generic IND-CCA KEM (no false ct-binding equation) ------- *)
+fun kempk(kemsec):kempub.
+fun encap(kempub, bitstring):bitstring.
+fun kemss(kempub, bitstring):bitstring.
+reduc forall sk:kemsec, coins:bitstring;
+  decap(sk, encap(kempk(sk), coins)) = kemss(kempk(sk), coins).
+
+(* ---- hash / running transcript (SHA3-256) ------------------------------- *)
+fun h(bitstring):bitstring.
+
+(* ---- HKDF: two PUBLIC constructors over (x25519_ss, ml_kem_ss, transcript) *)
+fun kdf_send(bitstring, bitstring, bitstring):key.
+fun kdf_recv(bitstring, bitstring, bitstring):key.
+
+(* ---- handshake AEAD (3-arg, transcript-AD; msg2 / msg3) ----------------- *)
+fun aead(bitstring, bitstring, key):bitstring.            (* aead(ad, pt, k)  *)
+reduc forall ad:bitstring, m:bitstring, k:key;
+  adec(ad, aead(ad, m, k), k) = m.
+
+(* ---- record AEAD (4-arg, frame-type AD + counter nonce; renamed) -------- *)
+(* radec reduces ONLY when ad, key AND nonce all match what raenc sealed under:
+   models Poly1305 integrity + the 1-byte frame-type AD binding (stream.rs
+   send_typed / decrypt_frame) + the per-direction counter nonce. *)
+fun raenc(bitstring, bitstring, key, nonce):bitstring.    (* raenc(ad, m, k, n) *)
+reduc forall ad:bitstring, m:bitstring, k:key, n:nonce;
+  radec(ad, raenc(ad, m, k, n), k, n) = m.
+
+(* ---- identity hash = SHA3-256(dil_pk) ----------------------------------- *)
+fun idh(spkey):bitstring.
+
+(* ---- cleartext wire frame-type tags (attacker may rewrite in transit) --- *)
+free TYPE_DATA: bitstring.
+free TYPE_STREAM: bitstring.
+free TYPE_ADMISSION: bitstring.
+
+(* ---- handshake authentication events ------------------------------------ *)
+event RespCommit(spkey, bitstring).
+event InitAcceptResp(spkey, bitstring).
+event InitCommit(spkey, bitstring).
+event RespAcceptInit(spkey, bitstring).
+
+(* ---- record-layer agreement events (anti-replay), R->I direction --------- *)
+(* The attributable record direction is R->I: the INITIATOR pins the responder,
+   so a record the initiator accepts under its derived krecv can only come from
+   the genuine honest responder (the sole co-holder of that key). The reverse
+   (I->R) is NOT attributable — the accept-any responder can co-hold a key with
+   the attacker — so the I->R frame below carries only the secrecy `probe`, no
+   agreement event, mirroring the handshake core's pinned-side-only probe. *)
+event RtoI_Send(key, nonce, bitstring).
+event RtoI_Recv(key, nonce, bitstring).
+
+(* ===========================================================================
+   Initiator role — handshake mirror of P_init, then RECORD-LAYER send.
+   Pinned to the honest responder identity pkRexp.
+   =========================================================================== *)
+let P_init_composed(myskI:sskey, pkRexp:spkey) =
+  new xi:dhsec;
+  new ikem:kemsec;
+  let epk_x = exp(g, xi) in
+  let epk_kem = kempk(ikem) in
+  let msg1 = (ts0, epk_x, epk_kem) in
+  out(c, msg1);
+  in(c, (repk_x:G, ct:bitstring, aead2:bitstring));
+  let dh_ss  = GtoB(exp(repk_x, xi)) in
+  let kem_ss = decap(ikem, ct) in
+  ( out(leak_dh, dh_ss) | out(leak_kem, kem_ss) |
+    ( let t1  = h((ts0, epk_x, epk_kem)) in
+      let t2  = h((t1, (repk_x, ct))) in
+      let ksend = kdf_send(dh_ss, kem_ss, t2) in       (* I.k_send = k1 *)
+      let krecv = kdf_recv(dh_ss, kem_ss, t2) in       (* I.k_recv = k2 *)
+      let (rpk:spkey, rsig:bitstring) = adec(t2, aead2, krecv) in
+      if idh(rpk) = idh(pkRexp) then
+      if checksig(rpk, t2, rsig) = true then
+      event InitAcceptResp(rpk, t2);
+      let t3 = h((t2, aead2)) in
+      let isig = sign(t3, myskI) in
+      event InitCommit(spk(myskI), t3);
+      out(c, aead(t3, (spk(myskI), isig), ksend));     (* msg3 (handshake counter 0) *)
+      (* >>> RECORD LAYER <<< — first post-handshake frames (counter 1),
+         full-duplex: the two directions are CONCURRENT branches so each record
+         output is terminal in its own thread (mirrors the code's independent
+         send/recv paths, and keeps the secrecy emission a clean terminal output
+         for trace reconstruction). *)
+      ( (* RECORD A (I->R): seal the secret `probe` under the GENUINE ksend with
+           the frame TYPE as AD. Secrecy of `probe` rests on
+           ksend = kdf_send(dh_ss,kem_ss,t2). No agreement event — the accept-any
+           responder is not an attributable receiver (see event block above). *)
+        out(c, (TYPE_DATA, raenc(TYPE_DATA, probe, ksend, rn1)))
+      | (* RECORD B (R->I): receive the responder's record under the GENUINE krecv,
+           re-binding the OBSERVED frame type as AD. The initiator PINS R, so krecv
+           is shared only with the honest responder ⇒ this accept is attributable
+           (the anti-replay query lives on this event). *)
+        ( in(c, (brt:bitstring, brc:bitstring));
+          let bm = radec(brt, brc, krecv, rn1) in
+          event RtoI_Recv(krecv, rn1, bm) ) ) ) ).
+
+(* ===========================================================================
+   Responder role — handshake mirror of P_resp, then RECORD-LAYER receive.
+   Accepts ANY initiator (no pin); auth rests on the msg3 signature over t3.
+   =========================================================================== *)
+let P_resp_composed(myskR:sskey) =
+  in(c, (rts:bitstring, iepk_x:G, iepk_kem:kempub));
+  new yr:dhsec;
+  new coins:bitstring;
+  let repk_x = exp(g, yr) in
+  let ct     = encap(iepk_kem, coins) in
+  let kem_ss = kemss(iepk_kem, coins) in
+  let dh_ss  = GtoB(exp(iepk_x, yr)) in
+  ( out(leak_dh, dh_ss) | out(leak_kem, kem_ss) |
+    ( let t1 = h((rts, iepk_x, iepk_kem)) in
+      let t2 = h((t1, (repk_x, ct))) in
+      let ksendR = kdf_recv(dh_ss, kem_ss, t2) in      (* R.k_send = k2 *)
+      let krecvR = kdf_send(dh_ss, kem_ss, t2) in      (* R.k_recv = k1 = I.k_send *)
+      let rsig = sign(t2, myskR) in
+      event RespCommit(spk(myskR), t2);
+      let aead2 = aead(t2, (spk(myskR), rsig), ksendR) in
+      out(c, (repk_x, ct, aead2));
+      in(c, aead3:bitstring);
+      let t3 = h((t2, aead2)) in
+      let (ipk:spkey, isig:bitstring) = adec(t3, aead3, krecvR) in
+      if checksig(ipk, t3, isig) = true then
+      event RespAcceptInit(ipk, t3);
+      (* >>> RECORD LAYER <<< — RECORD B (R->I): send a fresh per-session record
+         under the GENUINE ksendR (= I.krecv) with the frame TYPE as AD. The
+         pinned initiator receives it (event RtoI_Recv) and the anti-replay query
+         attributes that accept back to this RtoI_Send. (The accept-any responder
+         does NOT receive RECORD A: an honest sender on the wire under a key it
+         may co-hold with the attacker is not an attributable receiver, so no
+         R-side record-accept event is emitted — mirrors the pinned-side-only
+         secrecy probe.) *)
+      new bmsg:bitstring;
+      event RtoI_Send(ksendR, rn1, bmsg);
+      out(c, (TYPE_DATA, raenc(TYPE_DATA, bmsg, ksendR, rn1))) ) ).

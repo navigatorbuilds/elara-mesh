@@ -1,0 +1,91 @@
+name: Deploy site + verify demo to Pages
+
+# Publishes the WHOLE public site to GitHub Pages — the static marketing landing
+# (site/) at the root, and the in-browser "verify it yourself" demo one level down
+# at /verify/. This is why the Pages SOURCE must be "GitHub Actions" (not the
+# classic branch/dir source): a single producer serves the whole tree, so the
+# landing page and the live-verify demo never fight over the Pages root.
+#
+# The verify WASM is NEVER committed — it is compiled here from verify-wasm/ on
+# every deploy instead. Building from source in CI keeps the live in-browser
+# verdict from ever drifting from the published source, and avoids checking a
+# build artifact into the tree.
+#
+# Inert on the private elara-runtime repo: the `if:` guard skips both jobs at 0
+# Actions minutes. Runs only on the public mirror navigatorbuilds/elara-mesh,
+# which is the same repo this Pages site is built from — so the page's AGPL §13
+# "corresponding source" offer is satisfied by the repo itself (verify-wasm/ +
+# src/verify_core ship in the mirror).
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+# Least privilege: read the source, write the Pages deployment, and mint the OIDC
+# token actions/deploy-pages needs. No repo write, no secrets beyond GITHUB_TOKEN.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One publish at a time; never cancel an in-flight deploy.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.repository == 'navigatorbuilds/elara-mesh'
+    name: build verify-only wasm + assemble site
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      # The documented wasm-pack installer action. wasm-pack auto-fetches the
+      # matching wasm-bindgen, but NOT wasm-opt: that pass is disabled in
+      # verify-wasm/Cargo.toml ([package.metadata.wasm-pack.profile.release]
+      # wasm-opt = false), so wasm-pack never hits the rate-limited binaryen
+      # GitHub releases API mid-build (a flake that mis-parses as "invalid type:
+      # sequence, expected a string" and would fail this launch-gating deploy).
+      # wasm-opt is pure size optimization and not correctness-load-bearing: the
+      # verdict is elara_runtime::verify_core (deterministic Rust, shared with the
+      # elara-verify CLI), so dropping it never affects the verification result —
+      # only +~75KB of unoptimized wasm (opt-level="s"+lto already do the size win).
+      - uses: jetli/wasm-pack-action@v0.4.0
+      # --out-dir is resolved relative to the CRATE dir (verify-wasm/), hence ../ —
+      # this writes browser-node/verify-demo/pkg/{elara_verify_wasm.js,_bg.wasm}.
+      - name: Build verify-only wasm (fresh, never committed)
+        run: wasm-pack build --target web -d ../browser-node/verify-demo/pkg verify-wasm
+      # Assemble the published tree: site/ (marketing landing) at the Pages root,
+      # the verify demo at /verify/. Both ship in the mirror (allowlist: site/ +
+      # verify-demo/{index.html,sample-record.json}; pkg/ is the gitignored wasm
+      # built one step above). The demo's asset refs are relative (./pkg/,
+      # ./sample-record.json) so it works unchanged at the subpath.
+      - name: Assemble Pages site (landing at root + verify demo at /verify/)
+        run: |
+          mkdir -p _site/verify
+          cp -R site/. _site/
+          cp -R browser-node/verify-demo/. _site/verify/
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          # The whole assembled site (landing at root + verify demo at /verify/),
+          # NOT just the demo dir — see the assemble step above.
+          path: _site
+
+  deploy:
+    if: github.repository == 'navigatorbuilds/elara-mesh'
+    name: deploy to GitHub Pages
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

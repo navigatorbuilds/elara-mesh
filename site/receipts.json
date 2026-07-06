@@ -1,0 +1,8 @@
+{
+ "acts": [],
+ "authoritative_complete": false,
+ "count": 0,
+ "generated_at_utc": null,
+ "mandate_id": null,
+ "note": "No public receipts yet: the maintainer identity + mandate are minted at public genesis. The machinery is already in the repo — scripts/refresh-receipts-snapshot.sh, scripts/install-receipt-hooks.sh, tools/agent_emit.sh."
+}

@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>How it works — Elara</title>
+<meta name="description" content="From a signature on a device to sealed, verifiable history: the Elara pipeline — record, gossip, witness, seal, verify — animated.">
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='38' fill='none' stroke='%2336e2c4' stroke-width='9'/><circle cx='50' cy='50' r='10' fill='%2336e2c4'/></svg>">
+<script src="anim.js" defer></script>
+<script src="reveal.js" defer></script>
+</head>
+<body>
+
+<header class="nav">
+  <a class="nav-brand" href="index.html">ELARA</a>
+  <nav class="nav-links">
+    <a href="index.html#why">Why</a>
+    <a href="how.html" class="nav-on">How it works</a>
+    <a href="usecases.html">Use cases</a>
+    <a href="verify/">Verify</a>
+    <a href="receipts.html">Receipts</a>
+    <a href="index.html#papers">Papers</a>
+    <a class="nav-gh" href="https://github.com/navigatorbuilds/elara-mesh" rel="noopener">GitHub →</a>
+  </nav>
+</header>
+
+<main class="page">
+
+<header class="page-head">
+  <canvas id="mesh" class="page-mesh" aria-hidden="true"></canvas>
+  <p class="hero-kicker">How it works</p>
+  <h1>From a signature to sealed history.</h1>
+  <p class="hero-sub">One record's journey through the mesh — five stages, seconds to an
+  optimistic seal (finality in minutes), post-quantum at every step.</p>
+</header>
+
+<!-- ════════════ PIPELINE ════════════ -->
+<section class="uc-anim pipeline-wrap">
+  <svg viewBox="0 0 1000 360" role="img" aria-label="Animation: a record is signed on a device, gossips across the mesh, is attested by a witness committee, sealed into an epoch, and verified by a phone">
+    <style>
+      .p-lbl { font: 600 12px/1 Inter, system-ui, sans-serif; letter-spacing: .14em; fill: #93a1b0; }
+      .p-cap { font: 700 13px/1 Inter, system-ui, sans-serif; letter-spacing: .1em; fill: #5d6b7a; }
+      .p-mono { font: 700 11px/1 ui-monospace, Menlo, monospace; fill: #9ff5e4; }
+
+      .p-stage { animation: p-stage 14s infinite; }
+      .p-c2 { animation-delay: 2.8s; } .p-c3 { animation-delay: 5.6s; }
+      .p-c4 { animation-delay: 8.4s; } .p-c5 { animation-delay: 11.2s; }
+      @keyframes p-stage {
+        0% { fill: #5d6b7a; } 2% { fill: #36e2c4; } 20% { fill: #36e2c4; } 24%, 100% { fill: #5d6b7a; }
+      }
+
+      .p-rec { opacity: 0; animation: p-rec 14s infinite; }
+      @keyframes p-rec {
+        0% { opacity: 0; transform: translate(0,6px) ; }
+        3% { opacity: 1; transform: translate(0,0); }
+        18% { opacity: 1; transform: translate(0,0); }
+        22% { opacity: 1; transform: translate(96px,-38px); }
+        28% { opacity: 1; transform: translate(178px,18px); }
+        34% { opacity: 1; transform: translate(262px,-30px); }
+        40% { opacity: 1; transform: translate(354px,0); }
+        58% { opacity: 1; transform: translate(354px,0); }
+        64% { opacity: 1; transform: translate(560px,0); }
+        70% { opacity: 0; transform: translate(560px,0); }
+        100% { opacity: 0; }
+      }
+      .p-hop { opacity: .25; transform-origin: center; transform-box: fill-box; }
+      .p-h1 { animation: p-hop 14s infinite; animation-delay: 2.9s; }
+      .p-h2 { animation: p-hop 14s infinite; animation-delay: 3.8s; }
+      .p-h3 { animation: p-hop 14s infinite; animation-delay: 4.6s; }
+      @keyframes p-hop {
+        0% { opacity: .25; transform: scale(1); }
+        2% { opacity: 1; transform: scale(1.6); }
+        6%, 100% { opacity: .25; transform: scale(1); }
+      }
+      .p-wit { transform-origin: center; transform-box: fill-box; opacity: .3; animation: p-wit 14s infinite; }
+      .p-w2 { animation-delay: .35s; } .p-w3 { animation-delay: .7s; }
+      .p-w4 { animation-delay: 1.05s; } .p-w5 { animation-delay: 1.4s; }
+      @keyframes p-wit {
+        0%, 44% { opacity: .3; transform: scale(1); }
+        48% { opacity: 1; transform: scale(1.4); }
+        54%, 100% { opacity: .3; transform: scale(1); }
+      }
+      .p-meter { animation: p-meter 14s infinite; }
+      @keyframes p-meter {
+        0%, 44% { width: 0; } 58% { width: 96px; } 78% { width: 96px; } 84%, 100% { width: 0; }
+      }
+      .p-seal { animation: p-seal 14s infinite; }
+      @keyframes p-seal {
+        0%, 60% { stroke: #1a2330; } 66%, 92% { stroke: #36e2c4; } 98%, 100% { stroke: #1a2330; }
+      }
+      .p-root { opacity: 0; animation: p-root 14s infinite; }
+      @keyframes p-root { 0%, 62% { opacity: 0; } 68%, 92% { opacity: 1; } 98%, 100% { opacity: 0; } }
+      .p-proof { stroke-dasharray: 200; stroke-dashoffset: 200; animation: p-proof 14s infinite; }
+      @keyframes p-proof {
+        0%, 78% { stroke-dashoffset: 200; } 86% { stroke-dashoffset: 0; }
+        94% { stroke-dashoffset: 0; opacity: 1; } 100% { stroke-dashoffset: 200; opacity: 0; }
+      }
+      .p-ok { opacity: 0; transform-origin: center; transform-box: fill-box; animation: p-ok 14s infinite; }
+      @keyframes p-ok { 0%, 86% { opacity: 0; transform: scale(.5);} 90% { opacity: 1; transform: scale(1.2);} 94% { opacity: 1; transform: scale(1);} 100% { opacity: 0; } }
+      .p-dev { stroke: url(#gP); stroke-width: 2; }
+      .p-rec, .p-wit, .p-ok, .p-proof, .p-meter, .p-root { filter: url(#fP); }
+    </style>
+    <defs>
+      <linearGradient id="gP" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0" stop-color="#36e2c4"/><stop offset="1" stop-color="#57c8ff"/>
+      </linearGradient>
+      <filter id="fP" x="-80%" y="-80%" width="260%" height="260%">
+        <feGaussianBlur stdDeviation="2.4" result="b"/>
+        <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+      </filter>
+    </defs>
+
+    <!-- stage captions -->
+    <text class="p-cap p-stage"      x="40"  y="344">1 · RECORD</text>
+    <text class="p-cap p-stage p-c2" x="230" y="344">2 · GOSSIP</text>
+    <text class="p-cap p-stage p-c3" x="470" y="344">3 · WITNESS</text>
+    <text class="p-cap p-stage p-c4" x="660" y="344">4 · SEAL</text>
+    <text class="p-cap p-stage p-c5" x="860" y="344">5 · VERIFY</text>
+
+    <!-- 1 device -->
+    <rect class="p-dev" x="30" y="130" width="90" height="58" rx="8" fill="rgba(232,237,242,.03)"/>
+    <circle cx="56" cy="159" r="8" fill="none" stroke="#36e2c4" stroke-width="1.5"/>
+    <circle cx="56" cy="159" r="2.6" fill="#36e2c4"/>
+    <text class="p-lbl" x="32" y="120">ANY DEVICE</text>
+    <text class="p-mono" x="74" y="163">sign()</text>
+
+    <!-- the record -->
+    <g class="p-rec">
+      <rect x="138" y="148" width="64" height="22" rx="11" fill="rgba(54,226,196,.14)" stroke="#36e2c4" stroke-width="1.2"/>
+      <text class="p-mono" x="151" y="163">record</text>
+    </g>
+
+    <!-- 2 gossip hops -->
+    <circle class="p-hop p-h1" cx="266" cy="118" r="7" fill="#93a1b0"/>
+    <circle class="p-hop p-h2" cx="348" cy="176" r="7" fill="#93a1b0"/>
+    <circle class="p-hop p-h3" cx="432" cy="126" r="7" fill="#93a1b0"/>
+    <line x1="138" y1="158" x2="266" y2="120" stroke="#1a2330" stroke-width="1.2"/>
+    <line x1="266" y1="118" x2="348" y2="176" stroke="#1a2330" stroke-width="1.2"/>
+    <line x1="348" y1="176" x2="432" y2="126" stroke="#1a2330" stroke-width="1.2"/>
+    <line x1="432" y1="126" x2="524" y2="158" stroke="#1a2330" stroke-width="1.2"/>
+
+    <!-- 3 witness zone -->
+    <circle cx="524" cy="158" r="56" fill="none" stroke="#1a2330" stroke-width="1.4" stroke-dasharray="4 5"/>
+    <text class="p-lbl" x="478" y="84">ZONE COMMITTEE</text>
+    <g class="p-wit"><circle cx="492" cy="120" r="9" fill="none" stroke="#36e2c4" stroke-width="1.5"/><path d="M488 120l3 3 5-6" fill="none" stroke="#36e2c4" stroke-width="1.4"/></g>
+    <g class="p-wit p-w2"><circle cx="556" cy="120" r="9" fill="none" stroke="#36e2c4" stroke-width="1.5"/><path d="M552 120l3 3 5-6" fill="none" stroke="#36e2c4" stroke-width="1.4"/></g>
+    <g class="p-wit p-w3"><circle cx="472" cy="172" r="9" fill="none" stroke="#36e2c4" stroke-width="1.5"/><path d="M468 172l3 3 5-6" fill="none" stroke="#36e2c4" stroke-width="1.4"/></g>
+    <g class="p-wit p-w4"><circle cx="576" cy="172" r="9" fill="none" stroke="#36e2c4" stroke-width="1.5"/><path d="M572 172l3 3 5-6" fill="none" stroke="#36e2c4" stroke-width="1.4"/></g>
+    <g class="p-wit p-w5"><circle cx="524" cy="206" r="9" fill="none" stroke="#36e2c4" stroke-width="1.5"/><path d="M520 206l3 3 5-6" fill="none" stroke="#36e2c4" stroke-width="1.4"/></g>
+    <!-- stake meter -->
+    <rect x="476" y="238" width="96" height="8" rx="4" fill="rgba(232,237,242,.06)"/>
+    <rect class="p-meter" x="476" y="238" height="8" rx="4" fill="#36e2c4"/>
+    <text class="p-lbl" x="478" y="262" fill="#5d6b7a">⅔ INDEPENDENT STAKE</text>
+
+    <!-- 4 epoch seal -->
+    <rect class="p-seal" x="650" y="112" width="130" height="92" rx="8" fill="rgba(232,237,242,.02)" stroke-width="1.6"/>
+    <path class="p-seal" d="M702 152v-9a13 13 0 0 1 26 0v9" fill="none" stroke-width="1.6"/>
+    <rect class="p-seal" x="696" y="152" width="38" height="28" rx="5" fill="none" stroke-width="1.6"/>
+    <text class="p-lbl" x="652" y="100">EPOCH SEAL</text>
+    <text class="p-root p-mono" x="652" y="226">merkle: 0x4ad1…</text>
+
+    <!-- 5 verify -->
+    <rect class="p-dev" x="876" y="116" width="52" height="92" rx="10" fill="rgba(232,237,242,.03)"/>
+    <line x1="894" y1="198" x2="910" y2="198" stroke="#36e2c4" stroke-width="1.5"/>
+    <text class="p-lbl" x="858" y="104">LIGHT CLIENT</text>
+    <path class="p-proof" d="M782 158 C 820 158, 836 162, 874 162" fill="none" stroke="#36e2c4" stroke-width="1.5"/>
+    <g class="p-ok">
+      <circle cx="902" cy="156" r="14" fill="none" stroke="#36e2c4" stroke-width="2"/>
+      <path d="M895 156l5 5 9-11" fill="none" stroke="#36e2c4" stroke-width="2"/>
+    </g>
+  </svg>
+  <div class="fig-cap"><span>FIG. 01</span> RECORD LIFECYCLE — SIGN / GOSSIP / ATTEST / SEAL / PROVE</div>
+</section>
+
+<section class="stat-band">
+  <div><strong>Seconds</strong><span>optimistic seal on a healthy zone</span></div>
+  <div><strong>&#8532; stake</strong><span>independence-weighted finality threshold</span></div>
+  <div><strong>64-level</strong><span>record-inclusion proofs verifiable on a phone</span></div>
+  <div><strong>100%</strong><span>offline-capable record creation</span></div>
+</section>
+
+<!-- ════════════ STAGES TEXT ════════════ -->
+<section class="block">
+  <div class="stage-rows">
+    <div class="stage-row"><span class="step-n">1</span><div>
+      <h3>Record — on any device, online or not</h3>
+      <p>The work is hashed (SHA3-256), signed with post-quantum keys (Dilithium3, with
+      SPHINCS+ available for high-assurance profiles), and stamped with an interval tree
+      clock — causal time that needs no synchronized clocks and no connection.</p>
+    </div></div>
+    <div class="stage-row"><span class="step-n">2</span><div>
+      <h3>Gossip — the mesh moves it</h3>
+      <p>Records travel a peer-to-peer mesh over ElaraPQ, a post-quantum transport
+      (ML-KEM-768 key exchange, Dilithium3 authentication). Content-routed DHT delivery
+      keeps it efficient as the network grows; flood-gossip covers small networks.</p>
+    </div></div>
+    <div class="stage-row"><span class="step-n">3</span><div>
+      <h3>Witness — independence is what counts</h3>
+      <p>Each zone draws a witness committee by verifiable random sortition, weighted by
+      stake <em>and discounted by correlation</em>: witnesses sharing an organization or
+      subnet count less. A thousand clones of one operator cannot settle a record —
+      that is MESH-BFT's diversity theorem, enforced in the hot path.</p>
+    </div></div>
+    <div class="stage-row"><span class="step-n">4</span><div>
+      <h3>Seal — history becomes immutable</h3>
+      <p>Epochs close over attested records with Merkle roots, chained seal-to-seal and
+      periodically consolidated into super-seals and checkpoints. Rewriting one record
+      means rewriting every seal after it, across independent witnesses — there is no
+      quiet edit.</p>
+    </div></div>
+    <div class="stage-row"><span class="step-n">5</span><div>
+      <h3>Verify — on a phone, against math</h3>
+      <p>A light client downloads headers, not history: checkpoint skip-sync means no
+      genesis replay. Any record's existence and position is verified with a Merkle
+      proof against a sealed root — milliseconds of work, phone-class hardware,
+      post-quantum end to end.</p>
+      <p class="stage-cta"><a href="verify/">Verify a real record in your browser →</a></p>
+    </div></div>
+  </div>
+</section>
+
+<!-- ════════════ DIVERSITY ════════════ -->
+<section class="block block-alt">
+  <h2><span class="sec-n">+</span> Why clone armies fail here</h2>
+  <div class="cols">
+    <div class="col">
+      <p>Classical BFT counts <em>weight</em>. Elara counts <em>independent</em> weight.
+      Witnesses that share an organization, a subnet, or a geography are correlation-penalized
+      before their stake is summed — the committee on the left has 100% of the raw stake and
+      still cannot settle, while the diverse committee settles with the same total.</p>
+      <p class="uc-punch">Sybil resistance isn't a CAPTCHA here. It's arithmetic.</p>
+    </div>
+    <div class="col uc-anim">
+    <svg viewBox="0 0 480 240" role="img" aria-label="Animation: a correlated committee of clones is blocked while a diverse committee settles">
+      <style>
+        .d-lbl { font: 600 11px/1 Inter, system-ui, sans-serif; letter-spacing: .12em; fill: #93a1b0; }
+        .d-no { animation: d-no 6s infinite; opacity: 0; transform-origin: center; transform-box: fill-box; }
+        @keyframes d-no { 0%, 40% { opacity: 0; transform: scale(.5);} 48%, 88% { opacity: 1; transform: scale(1);} 96%, 100% { opacity: 0; } }
+        .d-yes { animation: d-yes 6s infinite; opacity: 0; transform-origin: center; transform-box: fill-box; }
+        @keyframes d-yes { 0%, 52% { opacity: 0; transform: scale(.5);} 60%, 88% { opacity: 1; transform: scale(1);} 96%, 100% { opacity: 0; } }
+        .d-pulse { transform-origin: center; transform-box: fill-box; animation: d-pulse 6s infinite; }
+        @keyframes d-pulse { 0%, 16% { transform: scale(1);} 22% { transform: scale(1.3);} 28%, 100% { transform: scale(1);} }
+        .d-no, .d-yes, .d-pulse { filter: url(#fD); }
+      </style>
+      <defs>
+        <filter id="fD" x="-80%" y="-80%" width="260%" height="260%">
+          <feGaussianBlur stdDeviation="2.2" result="b"/>
+          <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+        </filter>
+      </defs>
+      <!-- clones -->
+      <text class="d-lbl" x="34" y="30">SAME ORG · SAME SUBNET</text>
+      <g class="d-pulse"><circle cx="60"  cy="70" r="11" fill="rgba(255,93,108,.12)" stroke="#ff5d6c"/></g>
+      <g class="d-pulse"><circle cx="100" cy="70" r="11" fill="rgba(255,93,108,.12)" stroke="#ff5d6c"/></g>
+      <g class="d-pulse"><circle cx="140" cy="70" r="11" fill="rgba(255,93,108,.12)" stroke="#ff5d6c"/></g>
+      <line x1="60" y1="70" x2="100" y2="70" stroke="#ff5d6c" stroke-width="1" opacity=".5"/>
+      <line x1="100" y1="70" x2="140" y2="70" stroke="#ff5d6c" stroke-width="1" opacity=".5"/>
+      <text class="d-lbl" x="42" y="118" fill="#5d6b7a">raw stake 300 → effective ~115</text>
+      <g class="d-no">
+        <rect x="40" y="136" width="130" height="30" rx="6" fill="rgba(255,93,108,.08)" stroke="#ff5d6c"/>
+        <text x="58" y="156" font-family="Inter,system-ui,sans-serif" font-size="12" font-weight="800" letter-spacing=".1em" fill="#ff5d6c">BLOCKED</text>
+      </g>
+      <!-- diverse -->
+      <text class="d-lbl" x="290" y="30">THREE INDEPENDENT ORGS</text>
+      <g class="d-pulse"><circle cx="320" cy="70" r="11" fill="rgba(54,226,196,.12)" stroke="#36e2c4"/></g>
+      <g class="d-pulse"><circle cx="372" cy="56" r="11" fill="rgba(54,226,196,.12)" stroke="#36e2c4"/></g>
+      <g class="d-pulse"><circle cx="424" cy="74" r="11" fill="rgba(54,226,196,.12)" stroke="#36e2c4"/></g>
+      <text class="d-lbl" x="300" y="118" fill="#5d6b7a">raw stake 300 → effective 300</text>
+      <g class="d-yes">
+        <rect x="300" y="136" width="130" height="30" rx="6" fill="rgba(54,226,196,.08)" stroke="#36e2c4"/>
+        <text x="318" y="156" font-family="Inter,system-ui,sans-serif" font-size="12" font-weight="800" letter-spacing=".1em" fill="#36e2c4">SETTLED ✓</text>
+      </g>
+    </svg>
+    <div class="fig-cap"><span>FIG. 02</span> MESH-BFT THEOREM 1 — CORRELATION-PENALIZED STAKE</div>
+    </div>
+  </div>
+</section>
+
+<section class="cta-band">
+  <h2>The math is in <em class="grad-text">the papers</em>.</h2>
+  <p>Committee selection, seal chains, light-client proofs, the diversity theorem — written down, reviewable, reproducible.</p>
+  <a class="btn btn-solid" href="papers/ELARA-PROTOCOL-WHITEPAPER.pdf">Protocol whitepaper</a>
+  &nbsp;&nbsp;
+  <a class="btn btn-ghost" href="papers/MESH-BFT-PAPER.pdf">MESH-BFT paper</a>
+</section>
+
+</main>
+
+<footer class="footer">
+  <div><strong>ELARA</strong> — an open-source post-quantum validation mesh.</div>
+  <div class="footer-links">
+    <a href="index.html">Home</a>
+    <a href="usecases.html">Use cases</a>
+    <a href="https://github.com/navigatorbuilds/elara-mesh" rel="noopener">GitHub</a>
+    <a href="papers/ELARA-PROTOCOL-WHITEPAPER.pdf">Whitepaper</a>
+  </div>
+  <div class="footer-fine">© 2026 Elara Protocol contributors · AGPL-3.0 node, MIT/Apache SDK · No cookies, no trackers, no token.</div>
+</footer>
+
+</body>
+</html>

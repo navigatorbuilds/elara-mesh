@@ -1,0 +1,32 @@
+{
+  "name": "@elara/mcp-server",
+  "version": "0.1.0",
+  "description": "MCP (Model Context Protocol) server giving AI agents cryptographic identity on the Elara network. Exposes 5 tools: elara_balance, elara_prove, elara_record, elara_witness, elara_sign.",
+  "license": "MIT OR Apache-2.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "elara-mcp": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "node --test --import tsx test/*.test.ts",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "tsx": "^4",
+    "typescript": "^5"
+  }
+}

@@ -1,0 +1,11 @@
+{
+ "kind": "design_decision",
+ "project": "elara-protocol",
+ "date": "2026-06-10",
+ "decision": "content-posture-doctrine",
+ "statement": "Integrity is protocol law; availability is operator choice. The mesh carries commitments (hashes, signatures, bounded metadata), never payloads; erasure happens off-mesh leaving opaque commitments (GDPR-compatible by construction); metadata abuse answered by cost (stake-gated ingestion) + retention-classes/pinning decay + per-operator storage sovereignty; no protocol-level delete button on truth, ever. Abuse SOP + metadata-budget review are pre-flip items.",
+ "decided_by": "Elara (doctrine, follows from Nenad's record-and-flag law)",
+ "refs": [
+  "docs/CONTENT-POSTURE.md"
+ ]
+}

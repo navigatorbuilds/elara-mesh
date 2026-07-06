@@ -1,0 +1,685 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Elara Explorer</title>
+<style>
+:root {
+  --bg: #0a0e14;
+  --surface: #111820;
+  --surface2: #1a2230;
+  --border: #1e2a3a;
+  --text: #c5cdd8;
+  --text-dim: #6b7d94;
+  --accent: #00d4aa;
+  --accent2: #00b8ff;
+  --red: #ff4d6a;
+  --yellow: #ffc233;
+  --green: #00d4aa;
+  --mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  font-family: var(--mono);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.5;
+  min-height: 100vh;
+}
+a { color: var(--accent2); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+header {
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  padding: 12px 24px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+header h1 {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--accent);
+}
+header .net-badge {
+  background: var(--accent);
+  color: var(--bg);
+  padding: 2px 8px;
+  border-radius: 3px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+header .status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--green);
+  animation: pulse 2s infinite;
+}
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+header .refresh-info {
+  margin-left: auto;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+nav {
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  padding: 0 24px;
+  display: flex;
+  gap: 0;
+}
+nav button {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 12px;
+  padding: 10px 16px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+nav button:hover { color: var(--text); }
+nav button.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+.container { padding: 20px 24px; max-width: 1400px; margin: 0 auto; }
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px;
+  margin-bottom: 20px;
+}
+.stat-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 14px 16px;
+}
+.stat-card .label {
+  color: var(--text-dim);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 4px;
+}
+.stat-card .value {
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--text);
+}
+.stat-card .value.accent { color: var(--accent); }
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+  margin-bottom: 16px;
+}
+th {
+  text-align: left;
+  padding: 10px 14px;
+  background: var(--surface2);
+  color: var(--text-dim);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  font-weight: 600;
+  border-bottom: 1px solid var(--border);
+}
+td {
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+}
+tr:last-child td { border-bottom: none; }
+tr:hover td { background: var(--surface2); }
+
+.hash {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--accent2);
+  cursor: pointer;
+}
+.hash:hover { text-decoration: underline; }
+
+.badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+.badge.green { background: rgba(0,212,170,0.15); color: var(--green); }
+.badge.yellow { background: rgba(255,194,51,0.15); color: var(--yellow); }
+.badge.red { background: rgba(255,77,106,0.15); color: var(--red); }
+.badge.blue { background: rgba(0,184,255,0.15); color: var(--accent2); }
+
+.search-bar {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 20px;
+}
+.search-bar input {
+  flex: 1;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 13px;
+  padding: 10px 14px;
+  outline: none;
+}
+.search-bar input:focus {
+  border-color: var(--accent);
+}
+.search-bar button {
+  background: var(--accent);
+  color: var(--bg);
+  border: none;
+  border-radius: 4px;
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 700;
+  padding: 10px 20px;
+  cursor: pointer;
+}
+.search-bar button:hover { opacity: 0.85; }
+
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 16px;
+  margin-bottom: 16px;
+}
+.panel h3 {
+  color: var(--accent);
+  font-size: 13px;
+  margin-bottom: 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+.kv-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 4px 0;
+}
+.kv-row .k { color: var(--text-dim); }
+.kv-row .v { color: var(--text); text-align: right; }
+
+.tab-content { display: none; }
+.tab-content.active { display: block; }
+
+.detail-view {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 16px;
+  margin-bottom: 16px;
+}
+.detail-view pre {
+  background: var(--surface2);
+  padding: 12px;
+  border-radius: 4px;
+  overflow-x: auto;
+  font-size: 11px;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+footer {
+  text-align: center;
+  padding: 20px;
+  color: var(--text-dim);
+  font-size: 11px;
+  border-top: 1px solid var(--border);
+  margin-top: 40px;
+}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>ELARA</h1>
+  <span class="net-badge" id="network-id">testnet</span>
+  <span class="status-dot" id="status-dot"></span>
+  <span id="node-version" style="color:var(--text-dim);font-size:11px;"></span>
+  <span class="refresh-info">Auto-refresh: <span id="countdown">10</span>s</span>
+</header>
+
+<nav>
+  <button class="active" data-tab="overview">Overview</button>
+  <button data-tab="accounts">Accounts</button>
+  <button data-tab="dag">DAG</button>
+  <button data-tab="consensus">Consensus</button>
+  <button data-tab="peers">Peers</button>
+  <button data-tab="search">Search</button>
+</nav>
+
+<div class="container">
+
+<!-- OVERVIEW -->
+<div class="tab-content active" id="tab-overview">
+  <div class="grid" id="overview-stats"></div>
+  <div class="panel">
+    <h3>Recent Transactions</h3>
+    <table><thead><tr>
+      <th>Time</th><th>From</th><th>To</th><th>Amount</th><th>Type</th>
+    </tr></thead><tbody id="recent-txs"></tbody></table>
+  </div>
+  <div class="panel">
+    <h3>Epoch Status</h3>
+    <table><thead><tr>
+      <th>Zone</th><th>Epoch</th><th>Seal Hash</th>
+    </tr></thead><tbody id="epoch-table"></tbody></table>
+  </div>
+</div>
+
+<!-- ACCOUNTS -->
+<div class="tab-content" id="tab-accounts">
+  <div class="panel">
+    <h3>All Accounts (<span id="account-count">0</span>)</h3>
+    <table><thead><tr>
+      <th>Identity</th><th>Available</th><th>Staked</th><th>Total</th><th>Txns</th>
+    </tr></thead><tbody id="accounts-table"></tbody></table>
+  </div>
+</div>
+
+<!-- DAG -->
+<div class="tab-content" id="tab-dag">
+  <div class="grid" id="dag-stats"></div>
+  <div class="panel">
+    <h3>DAG Tips</h3>
+    <table><thead><tr>
+      <th>Record ID</th><th>Creator</th><th>Age</th><th>Parents</th>
+    </tr></thead><tbody id="dag-tips-table"></tbody></table>
+  </div>
+</div>
+
+<!-- CONSENSUS -->
+<div class="tab-content" id="tab-consensus">
+  <div class="grid" id="consensus-stats"></div>
+  <div class="panel">
+    <h3>Witness Profiles</h3>
+    <table><thead><tr>
+      <th>Identity</th><th>Stake</th><th>Attestations</th><th>Score</th>
+    </tr></thead><tbody id="witness-table"></tbody></table>
+  </div>
+</div>
+
+<!-- PEERS -->
+<div class="tab-content" id="tab-peers">
+  <div class="grid" id="peer-stats"></div>
+  <div class="panel">
+    <h3>Connected Peers</h3>
+    <table><thead><tr>
+      <th>Identity</th><th>Host</th><th>Type</th><th>State</th><th>Last Seen</th>
+    </tr></thead><tbody id="peers-table"></tbody></table>
+  </div>
+</div>
+
+<!-- SEARCH -->
+<div class="tab-content" id="tab-search">
+  <div class="search-bar">
+    <input type="text" id="search-input" placeholder="Search by record ID, identity hash, or address...">
+    <button onclick="doSearch()">Search</button>
+  </div>
+  <div id="search-results"></div>
+</div>
+
+</div>
+
+<footer>
+  Elara Protocol Explorer &mdash; DAM (Directed Acyclic Mesh) &mdash; Validation Credits
+</footer>
+
+<script>
+const BASE = '';
+const BASE_UNITS_PER_BEAT = 1_000_000_000;
+let refreshTimer;
+let countdown = 10;
+
+function fmt(n) {
+  if (typeof n !== 'number') return n || '—';
+  if (n >= 1e12) return (n / 1e12).toFixed(1) + 'T';
+  if (n >= 1e9) return (n / 1e9).toFixed(1) + 'B';
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+  return n.toLocaleString();
+}
+
+function beats(baseUnits) {
+  return (baseUnits / BASE_UNITS_PER_BEAT).toFixed(1);
+}
+
+function shortHash(h, n=12) {
+  if (!h || h.length <= n) return h || '—';
+  return h.slice(0, n) + '...';
+}
+
+function ago(ts) {
+  if (!ts) return '—';
+  const s = Date.now() / 1000 - ts;
+  if (s < 60) return Math.floor(s) + 's ago';
+  if (s < 3600) return Math.floor(s / 60) + 'm ago';
+  if (s < 86400) return Math.floor(s / 3600) + 'h ago';
+  return Math.floor(s / 86400) + 'd ago';
+}
+
+async function api(path) {
+  try {
+    const r = await fetch(BASE + path);
+    if (!r.ok) return null;
+    return await r.json();
+  } catch { return null; }
+}
+
+// /balances, /peers and /witness/profiles are loopback-only — a public node
+// 404s them by design (node IP topology + bulk enumeration stay off the public
+// surface), so api() returns null. Render an explicit "restricted" row rather
+// than an empty table, which on a public node would misread as "0 accounts /
+// no witnesses / no peers".
+function restrictedRow(colspan) {
+  return `<tr><td colspan="${colspan}" style="color:var(--text-dim);padding:16px">🔒 Restricted — visible only on the node operator's local dashboard. Run a node to view this.</td></tr>`;
+}
+
+function statCard(label, value, cls='') {
+  return `<div class="stat-card"><div class="label">${label}</div><div class="value ${cls}">${value}</div></div>`;
+}
+
+// ── Tab switching ──
+document.querySelectorAll('nav button').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('nav button').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
+  });
+});
+
+// ── Overview ──
+async function loadOverview() {
+  const [status, health] = await Promise.all([api('/status'), api('/health')]);
+  if (!status) return;
+
+  document.getElementById('network-id').textContent = status.network_id || 'testnet';
+  document.getElementById('node-version').textContent = 'v' + (status.version || '?');
+
+  const dot = document.getElementById('status-dot');
+  if (health) {
+    dot.style.background = health.readiness === 'green' ? 'var(--green)' :
+      health.readiness === 'yellow' ? 'var(--yellow)' : 'var(--red)';
+  }
+
+  const upH = Math.floor((status.uptime_secs || 0) / 3600);
+  const upM = Math.floor(((status.uptime_secs || 0) % 3600) / 60);
+  document.getElementById('overview-stats').innerHTML = [
+    statCard('Total Supply', beats(status.ledger_supply) + ' beats', 'accent'),
+    statCard('Conservation Pool', beats(status.conservation_pool || 0) + ' beats'),
+    statCard('Staked', beats(status.ledger_staked) + ' beats'),
+    statCard('Accounts', fmt(status.ledger_accounts)),
+    statCard('Active DAG', fmt(status.dag_size)),
+    statCard('Lifetime Settled', fmt(status.total_ever_settled || 0)),
+    statCard('Lifetime Finalized', fmt(status.total_ever_finalized || 0)),
+    statCard('Total Attestations', fmt(status.total_attestations_processed || 0)),
+    statCard('Peers', (status.peers_connected || 0) + '/' + (status.peers_total || 0)),
+    statCard('Epoch', status.current_epoch || '—'),
+    statCard('Uptime', upH + 'h ' + upM + 'm'),
+    statCard('Memory', (status.rss_mb || '?') + ' MB' + (status.memory_pressure ? ' ⚠' : '')),
+  ].join('');
+
+  // Recent transactions
+  const txs = await api('/transactions/recent');
+  const tbody = document.getElementById('recent-txs');
+  if (txs && txs.transactions) {
+    tbody.innerHTML = txs.transactions.slice(0, 20).map(tx => `<tr>
+      <td>${ago(tx.timestamp)}</td>
+      <td><span class="hash" onclick="searchIdentity('${tx.from || tx.creator}')">${shortHash(tx.from || tx.creator)}</span></td>
+      <td><span class="hash" onclick="searchIdentity('${tx.to || ''}')">${shortHash(tx.to)}</span></td>
+      <td>${tx.amount ? beats(tx.amount) + ' beats' : '—'}</td>
+      <td><span class="badge blue">${tx.op || tx.type || '—'}</span></td>
+    </tr>`).join('');
+  } else {
+    tbody.innerHTML = '<tr><td colspan="5" style="color:var(--text-dim)">No recent transactions</td></tr>';
+  }
+
+  // Epochs
+  const epochs = await api('/epochs');
+  const etbody = document.getElementById('epoch-table');
+  if (epochs && epochs.epochs) {
+    etbody.innerHTML = epochs.epochs.map(e => `<tr>
+      <td><span class="badge green">Zone ${e.zone}</span></td>
+      <td>${e.epoch_number}</td>
+      <td><span class="hash">${shortHash(e.latest_seal_hash, 16)}</span></td>
+    </tr>`).join('');
+  }
+}
+
+// ── Accounts ──
+async function loadAccounts() {
+  const data = await api('/balances');
+  if (!data || !data.accounts) {
+    document.getElementById('accounts-table').innerHTML = restrictedRow(5);
+    document.getElementById('account-count').textContent = '—';
+    return;
+  }
+  const sorted = data.accounts.sort((a, b) => (b.total || 0) - (a.total || 0));
+  document.getElementById('account-count').textContent = sorted.length;
+  document.getElementById('accounts-table').innerHTML = sorted.map(a => `<tr>
+    <td><span class="hash" onclick="searchIdentity('${a.identity}')">${shortHash(a.identity, 16)}</span></td>
+    <td>${beats(a.available)} beats</td>
+    <td>${beats(a.staked)} beats</td>
+    <td style="font-weight:600">${beats(a.total)} beats</td>
+    <td>${a.tx_count}</td>
+  </tr>`).join('');
+}
+
+// ── DAG ──
+async function loadDag() {
+  const [status, tips] = await Promise.all([api('/dag/stats'), api('/dag/tips')]);
+  const stats = document.getElementById('dag-stats');
+  if (status) {
+    stats.innerHTML = [
+      statCard('Active Records', fmt(status.active_records || status.size || 0)),
+      statCard('Total Edges', fmt(status.edges || 0)),
+      statCard('Tips', fmt(status.tips || 0)),
+      statCard('Roots', fmt(status.roots || 0)),
+      statCard('Avg Parents', (status.avg_parents || 0).toFixed(2)),
+      statCard('Orphan Edges', fmt(status.orphan_edges || 0)),
+    ].join('');
+  }
+
+  const tbody = document.getElementById('dag-tips-table');
+  if (tips && tips.tips) {
+    tbody.innerHTML = tips.tips.slice(0, 30).map(t => `<tr>
+      <td><span class="hash" onclick="searchRecord('${t.id}')">${shortHash(t.id, 20)}</span></td>
+      <td><span class="hash" onclick="searchIdentity('${t.creator || ''}')">${shortHash(t.creator)}</span></td>
+      <td>${ago(t.timestamp)}</td>
+      <td>${t.parent_count || 0}</td>
+    </tr>`).join('');
+  }
+}
+
+// ── Consensus ──
+async function loadConsensus() {
+  const [cs, wp] = await Promise.all([api('/consensus/status'), api('/witness/profiles')]);
+  const stats = document.getElementById('consensus-stats');
+  if (cs) {
+    stats.innerHTML = [
+      statCard('Finalized', fmt(cs.finalized || 0)),
+      statCard('Settled', fmt(cs.settled || 0)),
+      statCard('Unsettled', fmt(cs.unsettled || 0)),
+      statCard('Attestations', fmt(cs.attestations || 0)),
+      statCard('Zone Stake', beats(cs.total_zone_stake || 0) + ' beats'),
+      statCard('Witnesses', fmt(cs.witness_profiles || 0)),
+    ].join('');
+  }
+
+  const tbody = document.getElementById('witness-table');
+  if (wp && wp.profiles) {
+    tbody.innerHTML = wp.profiles.sort((a, b) => (b.stake || 0) - (a.stake || 0)).map(w => `<tr>
+      <td><span class="hash" onclick="searchIdentity('${w.identity}')">${shortHash(w.identity, 16)}</span></td>
+      <td>${beats(w.stake || 0)} beats</td>
+      <td>${fmt(w.attestations || 0)}</td>
+      <td>${(w.score || 0).toFixed(2)}</td>
+    </tr>`).join('');
+  } else {
+    tbody.innerHTML = restrictedRow(4);
+  }
+}
+
+// ── Peers ──
+async function loadPeers() {
+  const data = await api('/peers');
+  if (!data || !data.peers) {
+    document.getElementById('peers-table').innerHTML = restrictedRow(5);
+    document.getElementById('peer-stats').innerHTML =
+      '<div style="color:var(--text-dim);padding:16px">🔒 Peer topology is restricted to the node operator\'s local dashboard.</div>';
+    return;
+  }
+
+  const stats = document.getElementById('peer-stats');
+  const now = Date.now() / 1000;
+  const active = data.peers.filter(p => now - (p.last_seen || 0) < 120);
+  const stale = data.peers.filter(p => now - (p.last_seen || 0) >= 120);
+  stats.innerHTML = [
+    statCard('Total Peers', data.peers.length),
+    statCard('Active', active.length),
+    statCard('Stale', stale.length),
+  ].join('');
+
+  document.getElementById('peers-table').innerHTML = data.peers
+    .sort((a, b) => (b.last_seen || 0) - (a.last_seen || 0))
+    .map(p => {
+    const seenAgo = now - (p.last_seen || 0);
+    const peerState = seenAgo < 120 ? 'Active' : seenAgo < 600 ? 'Stale' : 'Lost';
+    const stateClass = peerState === 'Active' ? 'green' : peerState === 'Stale' ? 'yellow' : 'red';
+    return `<tr>
+      <td><span class="hash">${shortHash(p.identity_hash || p.identity, 16)}</span></td>
+      <td>${p.host || '—'}:${p.port || '—'}</td>
+      <td><span class="badge blue">${p.node_type || '—'}</span></td>
+      <td><span class="badge ${stateClass}">${peerState}</span></td>
+      <td>${ago(p.last_seen)}</td>
+    </tr>`;
+  }).join('');
+}
+
+// ── Search ──
+function searchIdentity(id) {
+  if (!id) return;
+  document.querySelectorAll('nav button').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+  document.querySelector('[data-tab="search"]').classList.add('active');
+  document.getElementById('tab-search').classList.add('active');
+  document.getElementById('search-input').value = id;
+  doSearch();
+}
+
+function searchRecord(id) {
+  if (!id) return;
+  document.querySelectorAll('nav button').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+  document.querySelector('[data-tab="search"]').classList.add('active');
+  document.getElementById('tab-search').classList.add('active');
+  document.getElementById('search-input').value = id;
+  doSearch();
+}
+
+async function doSearch() {
+  const q = document.getElementById('search-input').value.trim();
+  const results = document.getElementById('search-results');
+  if (!q) { results.innerHTML = ''; return; }
+
+  results.innerHTML = '<div style="color:var(--text-dim);padding:16px;">Searching...</div>';
+
+  // Try record first, then account
+  const [record, account] = await Promise.all([
+    api('/record/' + encodeURIComponent(q)),
+    api('/account/' + encodeURIComponent(q)),
+  ]);
+
+  let html = '';
+
+  if (record && record.id) {
+    html += `<div class="detail-view">
+      <h3 style="color:var(--accent);margin-bottom:12px;">Record: ${shortHash(record.id, 24)}</h3>
+      <pre>${JSON.stringify(record, null, 2)}</pre>
+    </div>`;
+  }
+
+  if (account && account.exists) {
+    html += `<div class="detail-view">
+      <h3 style="color:var(--accent);margin-bottom:12px;">Account: ${shortHash(q, 24)}</h3>
+      <div class="kv-row"><span class="k">Available</span><span class="v">${beats(account.available)} beats</span></div>
+      <div class="kv-row"><span class="k">Staked</span><span class="v">${beats(account.staked)} beats</span></div>
+      <div class="kv-row"><span class="k">Total</span><span class="v" style="font-weight:600">${beats(account.total)} beats</span></div>
+      <div class="kv-row"><span class="k">Transactions</span><span class="v">${account.tx_count}</span></div>
+      <div class="kv-row"><span class="k">Last Active</span><span class="v">${ago(account.last_active)}</span></div>
+      ${account.active_stakes && account.active_stakes.length > 0 ?
+        '<h4 style="color:var(--accent);margin-top:12px;">Active Stakes</h4><pre>' + JSON.stringify(account.active_stakes, null, 2) + '</pre>' : ''}
+    </div>`;
+  }
+
+  if (!html) {
+    html = '<div style="color:var(--text-dim);padding:16px;">No results found for: ' + q + '</div>';
+  }
+
+  results.innerHTML = html;
+}
+
+// Enter key triggers search
+document.getElementById('search-input').addEventListener('keydown', e => {
+  if (e.key === 'Enter') doSearch();
+});
+
+// ── Auto refresh ──
+async function refresh() {
+  const tab = document.querySelector('nav button.active')?.dataset?.tab;
+  if (tab === 'overview' || !tab) await loadOverview();
+  if (tab === 'accounts') await loadAccounts();
+  if (tab === 'dag') await loadDag();
+  if (tab === 'consensus') await loadConsensus();
+  if (tab === 'peers') await loadPeers();
+}
+
+function tick() {
+  countdown--;
+  document.getElementById('countdown').textContent = countdown;
+  if (countdown <= 0) {
+    countdown = 10;
+    refresh();
+  }
+}
+
+// Initial load
+refresh();
+setInterval(tick, 1000);
+
+// Load all tabs on first click
+document.querySelectorAll('nav button').forEach(btn => {
+  btn.addEventListener('click', () => {
+    setTimeout(refresh, 50);
+  });
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,11 @@
+{
+ "kind": "design_decision",
+ "project": "elara-protocol",
+ "date": "2026-06-10",
+ "decision": "earn-in-economy",
+ "statement": "Post-pivot participation design: instant residency (free verified-identity participation floor), slow citizenship (unstaked apprentice witnessing at zero consensus weight earns reduced rewards; work -> credits -> stake -> full weight), genesis pools as transparent on-explorer public faucet. You cannot buy your way in - you verify your way in.",
+ "decided_by": "Nenad Vasic ('yes I agree, good call'), design Elara",
+ "refs": [
+  "docs/EARN-IN-ECONOMY.md"
+ ]
+}
