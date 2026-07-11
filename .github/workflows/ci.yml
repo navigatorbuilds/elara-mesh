@@ -1,0 +1,509 @@
+name: CI
+
+# Public-facing CI for the open-source mirror. Gates every push and PR on:
+#   1. a clean build of the two feature configs a fresh clone touches, and
+#   2. the correctness-critical consensus / credit-ledger / gossip test core.
+# The full 5,700+ test suite runs locally before release; running all of it on
+# free runners would blow the timeout, so CI gates the core and trusts the
+# local gate for the long tail. Contains no node endpoints, secrets, or
+# decommissioned-fleet references — safe for the published mirror.
+
+on:
+  # Push-CI is intentionally OFF here: on a private working repo the metered
+  # free-Actions budget drains fast under per-commit CI, while the local
+  # pre-commit gate already compiles both feature configs a fresh clone touches
+  # (node on every commit; default-features `cargo check --lib` on any
+  # src/crates/Cargo change). On the public repo Actions are free, so push-CI
+  # is ON (uncommented at the 2026-07 publish) to keep the README CI badge
+  # tracking the default branch's latest run.
+  #
+  # Gotcha (cost four 422s on 2026-07-06): if this file fails YAML parsing,
+  # GitHub silently degrades the workflow to a stub — name shows as the file
+  # path, ALL triggers vanish (PR gate included), and dispatch 422s with the
+  # misleading "does not have workflow_dispatch trigger". `gh workflow run`
+  # does not validate locally. Before pushing any workflow edit:
+  #   python3 -c "import yaml; yaml.safe_load(open('.github/workflows/ci.yml'))"
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  ELARA_TESTNET: "true"
+
+jobs:
+  check:
+    name: build check (default + node)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # A fresh clone's first touch is a bare default-feature check: a
+      # contributor without the node stack (RocksDB/OQS) must still compile the
+      # core lib. This is the guard that would have caught the default-build
+      # break that slipped in between mirror rebuilds.
+      - name: cargo check (default features, all targets)
+        run: cargo check --all-targets
+      - name: cargo check (node feature, all targets)
+        run: cargo check --all-targets --features node
+      # node-core WITHOUT node — the HTTP-only build the node-core examples
+      # (tps_bench / mandate_query_live) and any node-core SDK consumer compile
+      # under. `--features node` masks node/node-core gate mismatches because
+      # `node` enables `node-core`; this is the ONLY config that catches a
+      # `node`-only-gated symbol reached from a node-core code path (it caught
+      # `id_prefix` + `apply_protocol_upgrade_outcome` 2026-06-28).
+      # Scope includes --bins: the `elara-node` bin carries
+      # required-features=["node-core"] so it serves BOTH `node` and
+      # `node-windows`. Its platform extras are feature/target-cfg-gated in
+      # place (jemalloc purge) and auto_genesis_mint is node-core-gated, so
+      # this check is what keeps the node-windows release build linkable
+      # between tag cuts (node-windows = node-core + sha2, no cfg sites of
+      # its own — a green bin here proves the Windows artifact compiles).
+      - name: cargo check (node-core alone, lib + bins + examples)
+        run: cargo check --lib --bins --examples --features node-core
+      # Robustness gate: 0 production unwrap/expect/panic in src/ + crates/*/src/
+      # (test code excluded by a Rust-aware lexer). Backs the README "Hardening
+      # status" claim — turns CI red if a panic point regresses into a hot path.
+      # Pure stdlib Python; ubuntu-latest ships python3.
+      - name: production panic-surface == 0
+        run: python3 scripts/scan-prod-panics.py --check
+
+  test:
+    name: full lib test suite (all node-feature modules)
+    runs-on: ubuntu-latest
+    # The full debug suite runs in ~3.2 min locally (~194s, ~965s user-time on a
+    # 5-core box) and ~8-10 min on a 2-core runner; the slow leg is the cold-cache
+    # node build (OQS + RocksDB from source). 45 min leaves headroom for a cache
+    # miss without ever being the binding constraint at warm-cache steady state.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # The FULL library test suite under the node feature — all 5,700+ unit tests
+      # across consensus, epoch, seal, state_core, light, dht, zone, zone_committee,
+      # sync, health, token/ledger, gossip, crypto, storage, dag, record, mandate,
+      # identity, verify_core, wire. This job previously ran only the
+      # consensus/token/gossip substring filters (~1,385 tests, 25% of the suite);
+      # the other ~4,270 tests ran ONLY on release tags (tests.yml) and locally, so
+      # a logic regression in network::epoch / seal / state_core / crypto / storage
+      # passed CI silently at PR time — the same silent-rot class that let the
+      # zone-transition SIM scenario and the integration/bin targets rot unnoticed.
+      # The earlier "running all of it blows the timeout" assumption was measured
+      # false: the suite is compute/crypto-bound with no real-time sleeps in lib
+      # tests, so it fits comfortably. One run compiles the test binary once and
+      # exercises everything; cargo names the failing module path on a regression.
+      - name: full lib suite (node feature)
+        run: cargo test --features node --lib
+      # The light/mobile client (`not(node-core)`) decodes records with the
+      # pure-Rust core stubs — a distinct decoder surface the full node `--lib` run
+      # above `#[cfg]`-compiles OUT, so CI otherwise only compile-checks it. Run the
+      # always-compiled `decoder_fuzz` sweep in that config so the mobile-stub
+      # decoders are actually exercised. (The node-core decoder surface —
+      # PqRequest/PqResponse/PqStreamChunk, zone::ZoneId, sync::BloomFilter,
+      # parse_disc5_index_key — is now covered by the full node `--lib` step above,
+      # which includes the decoder_fuzz module; this is its no-node counterpart.)
+      - name: mobile/core decoder fuzz (no node)
+        run: cargo test --no-default-features --lib decoder_fuzz
+      # The extracted standalone crate carries its own test suite — run it
+      # directly so a regression in elara-dht turns CI red on its own.
+      - name: elara-dht crate
+        run: cargo test -p elara-dht
+      - name: elara-nat crate
+        run: cargo test -p elara-nat
+      - name: elara-active-inference crate
+        run: cargo test -p elara-active-inference
+      - name: elara-zone-autoscaler crate
+        run: cargo test -p elara-zone-autoscaler
+      - name: elara-itc crate
+        run: cargo test -p elara-itc
+      - name: elara-smt crate
+        run: cargo test -p elara-smt
+      - name: elara-pq-transport crate
+        run: cargo test -p elara-pq-transport
+      - name: elara-light-client crate
+        run: cargo test -p elara-light-client
+      # elara-record carries the byte-exact wire-codec / receipt / pqc KATs that
+      # MOVED out of the main crate at extraction — `--lib` above no longer runs
+      # them, so without this leg the wire format's conformance tests gate nothing.
+      - name: elara-record crate
+        run: cargo test -p elara-record
+      # elara-verify carries the extracted verify_core logic (+ anchor/grade legs
+      # and the anchor-pinned seal verify) — same silent-rot rationale as above.
+      - name: elara-verify crate (default + verify-anchor)
+        run: cargo test -p elara-verify && cargo test -p elara-verify --features verify-anchor
+      # Integration tests in tests/*.rs are SEPARATE targets — `cargo test --lib`
+      # (and the per-area filters above) never touch them, so these ran in NO
+      # workflow and had zero regression protection (the same silent-rot class
+      # that let the zone-transition SIM scenario break unnoticed). All in-process
+      # (no live node), ~12s combined. spec_compliance lives in tests.yml; the
+      # wallet_pq_regression target stays out (it's #[ignore] — needs a live PQ
+      # listener CI has no fixture for). cargo names the failing --test target.
+      - name: integration tests (slot-conflict / relay / disk / memory bound)
+        run: |
+          cargo test --features node \
+            --test slot_conflict_injection \
+            --test record_relay_v1 \
+            --test relay_by_hash \
+            --test disk_full \
+            --test memory_ceiling
+
+  bin-tests:
+    name: binary-target unit tests (protocol + verifier bins)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # The #[cfg(test)] modules INSIDE the bin crates (src/bin/*.rs) are
+      # binary-target tests. The `test` job's per-area steps build only the
+      # library target (`--lib`), and the crate steps only the extracted crates
+      # (`-p <crate>`) — so these ~260 unit tests ran in NO workflow, the same
+      # silent-rot class as the integration tests and the SIM scenarios. `cargo
+      # check --all-targets` compiles them (no compile-rot), but nothing EXECUTED
+      # them: a logic regression in elara-verify (the offline "verify it yourself"
+      # tool — 49 tests), elara-keygen (32), elara-cli (29), elara-node's helpers
+      # (41), or elara-econ-sim's protocol-constant-drift guards (29) passed CI
+      # silently. `--features "node verify-cli"` selects exactly the protocol +
+      # verifier binaries (proven 262 tests, all green) — the public build set.
+      # cargo names the failing binary, so a single combined run still localizes.
+      - name: protocol + verifier bin unit tests
+        run: cargo test --features "node verify-cli" --bins
+
+  verify-sample:
+    name: offline verification sample
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Make the independent SECOND-LANGUAGE time-bracket legs actually RUN in CI
+      # instead of skipping. verify.sh auto-detects examples/verify/.venv and routes
+      # its Python legs through it (PEP 668 blocks pip into the system Python; a venv
+      # is the documented setup — examples/verify/README.md). opentimestamps + py_ecc
+      # are pure-Python wheels (no native build), so this is fast and never flaky, and
+      # it turns leg 0d (Bitcoin existed-by, OpenTimestamps) + leg 0e (drand not-before,
+      # BLS via py_ecc) from SKIP into a real cross-toolchain check — a regression in
+      # verify_btc.py / verify_drand.py now turns CI red instead of silently skipping.
+      # Leg 0c is deliberately left to skip here: liboqs-python's wheel is a 19 KB
+      # wrapper that builds the native liboqs from source on first import (a GitHub
+      # clone + cmake build — a network/flakiness cost not worth paying in CI). The PQ
+      # signatures are already checked by the Rust verify legs below and pinned by
+      # conformance.rs's committed-vectors drift test; 0c's independent liboqs leg runs
+      # on the maintainer box. The two pure-Python legs have no such native-build step.
+      - name: independent bracket legs (0d/0e) — install second-language verifiers
+        run: |
+          python3 -m venv examples/verify/.venv
+          examples/verify/.venv/bin/pip install --quiet --upgrade pip
+          examples/verify/.venv/bin/pip install --quiet opentimestamps py_ecc
+          examples/verify/.venv/bin/python3 -c "import opentimestamps, py_ecc; print('0d+0e second-language verifiers ready')"
+      # The project's whole claim is "verify us, don't trust us." This proves it
+      # never silently regresses: build the standalone verifier and check the
+      # bundled testnet samples — a dual-PQ-signed record and a Bitcoin-anchored
+      # epoch seal — fully offline (no node, no network). verify.sh exits non-zero
+      # on any failed leg, so a broken verifier or tampered sample turns CI red.
+      # With the venv above present, legs 0d + 0e run for real (not skipped).
+      - name: verify bundled samples offline
+        run: ./examples/verify/verify.sh
+
+  verify-wasm:
+    name: browser verify-demo (wasm build + export)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: jetli/wasm-pack-action@v0.4.0
+      # The in-browser "verify it yourself" demo (served on GitHub Pages) is
+      # built ONLY by pages.yml, which is guarded to run ONLY on the public
+      # repo — so the verify-wasm crate's wasm build would otherwise first
+      # execute at publish time, ungated during development. This gate compiles it on every PR /
+      # push with the EXACT command pages.yml uses, then asserts the named export
+      # the demo imports is present: a refactor that breaks the verify-wasm build
+      # or drops `verify_record_offline` turns CI red here, not on launch day.
+      # (Verdict correctness — VERIFIED on a real record, FAILED on one tampered
+      # byte — is covered by the verify-sample job + verify_core's native tests,
+      # which the wasm is a thin shell over; this gate is the wasm build + wiring
+      # tripwire.)
+      - name: build verify-only wasm (same command as pages.yml)
+        run: wasm-pack build --target web -d ../browser-node/verify-demo/pkg verify-wasm
+      - name: assert the demo's import resolves
+        run: |
+          js=browser-node/verify-demo/pkg/elara_verify_wasm.js
+          grep -q 'export function verify_record_offline' "$js" \
+            || { echo "verify-wasm bundle missing export: verify_record_offline" >&2; exit 1; }
+          grep -q 'export function verify_receipt_offline' "$js" \
+            || { echo "verify-wasm bundle missing export: verify_receipt_offline" >&2; exit 1; }
+          grep -q 'export function evaluate_mandate_bundle' "$js" \
+            || { echo "verify-wasm bundle missing export: evaluate_mandate_bundle" >&2; exit 1; }
+          echo "verify-wasm: verify_record_offline + verify_receipt_offline + evaluate_mandate_bundle exports present — demo imports resolve."
+
+  clippy:
+    name: clippy (deny warnings)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v6
+      # Pinned (not @stable) so a future Rust release that adds a new lint cannot
+      # turn this gate red with no code change. Matches the toolchain the tree was
+      # cleaned and verified on; bump deliberately, in lockstep with local clippy.
+      - uses: dtolnay/rust-toolchain@1.93.1
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # Hard gate. The tree is clippy-clean across both feature configs and all
+      # target kinds (lib, bins, tests, benches), including the extracted crates.
+      # Two runs are needed because they cannot be combined:
+      #   1. workspace + default features → main crate (mobile-stub paths) + every
+      #      standalone crate, all targets. The default build is what a fresh clone
+      #      without the node stack (RocksDB/OQS) compiles first, so it must be clean.
+      #   2. node feature → the node-gated main-crate code path. `--workspace
+      #      --features node` can't combine (the standalone crates have no `node`
+      #      feature), so the node lint runs on the root package only.
+      - name: clippy (workspace, default features, all targets)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: clippy (node feature, all targets)
+        run: cargo clippy --features node --all-targets -- -D warnings
+      # The public-facing verifier binary builds only under `verify-cli`, which
+      # neither run above enables — so a warning in it (e.g. a dead binding
+      # field) shipped uncaught. Gate it explicitly: this is the "verify us,
+      # don't trust us" binary a reviewer compiles first.
+      - name: clippy (verify-cli, elara-verify bin)
+        run: cargo clippy --features verify-cli --bin elara-verify -- -D warnings
+      # That verifier must build with ONLY a Rust toolchain — no C compiler, no
+      # cmake, no liboqs. ML-DSA-65 / SLH-DSA / drand-BLS verification are all pure
+      # Rust; the sole liboqs pull (the node transport's ML-KEM) is scoped to the
+      # `node-core` feature. Assert oqs-sys stays OUT of the verify-cli graph so a
+      # stray unconditional dep can't silently re-impose a C toolchain on every
+      # fresh-clone reviewer (the bug this guard was added to lock out).
+      - name: verify-cli stays pure-Rust (no liboqs / C toolchain)
+        run: |
+          if cargo tree --features verify-cli -i oqs-sys >/dev/null 2>&1; then
+            echo "REGRESSION: oqs-sys (liboqs) is back in the verify-cli dependency graph."
+            echo "The offline verifier must build with only a Rust toolchain — elara-pq-transport/oqs belongs on the node-core feature, not an unconditional native target dep (see Cargo.toml)."
+            cargo tree --features verify-cli -i oqs-sys || true
+            exit 1
+          fi
+          echo "OK: verify-cli graph is liboqs-free (pure-Rust verifier, no C toolchain needed)."
+
+  supply-chain:
+    name: supply-chain (cargo-deny)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      # cargo-deny gates the whole dependency graph against `deny.toml`: RustSec
+      # advisories (vulns / unmaintained / unsound / yanked), the permissive-only
+      # license allow-list, wildcard/source bans, and crate provenance. A security
+      # product is judged on its supply chain — this is the machine-checked half of
+      # that claim, and it earns its place: its first run caught a live 7.5-severity
+      # remote-DoS in quinn-proto (RUSTSEC-2026-0185), now patched. A new advisory
+      # in any transitive dep turns this red at PR time, not after a release ships.
+      #
+      # The action ships a prebuilt cargo-deny and caches the advisory DB, so the
+      # gate costs ~1 job-minute with no source compile. `deny.toml` targets the
+      # cargo-deny 0.19.x schema (all fields used are stable from 0.16+).
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+      # verify-wasm is a standalone crate with its own lockfile (not a workspace
+      # member), so the check above never sees its graph — yet its wasm artifact
+      # is the one mirror-published on the demo page. Same deny.toml policy,
+      # applied to that manifest. (wallet-wasm / browser-node stay unscanned by
+      # choice: retired / not published as artifacts.)
+      # NOTE: use the action's dedicated `manifest-path` input, NOT
+      # `arguments: --manifest-path …` — the action always injects its own
+      # (default `./Cargo.toml`), so passing a second one makes cargo-deny abort
+      # with "argument '--manifest-path' cannot be used multiple times".
+      # `arguments` defaults to `--all-features`, which is what we want here.
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+          manifest-path: verify-wasm/Cargo.toml
+
+  consensus-sim:
+    name: adversarial sim (BFT / partition)
+    runs-on: ubuntu-latest
+    # Release build of the node crate (OQS + RocksDB) is the slow leg on a cold
+    # cache; Swatinem/rust-cache amortizes it to minutes on subsequent runs.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # The multi-node BFT/partition simulator (src/bin/elara_simulate.rs) spins
+      # up N in-process nodes, injects an adversary, and asserts conservation +
+      # liveness. It already existed — but ran in NO workflow, so it gave zero
+      # regression protection and silently bit-rotted (ARCH-1's finality-gated
+      # ledger + PQ-only discovery both broke its genesis bootstrap). This job is
+      # that protection: a consensus-safety/liveness regression turns CI red
+      # here, at PR time, instead of on a live network. Each scenario is its own
+      # step so a failure names the exact adversary class. Durations are
+      # accelerated, real-time observation windows, padded for slow CI runners.
+      # Built in release because the scenarios are timing-sensitive (real-time
+      # sleeps) and debug-profile crypto is too slow to seal inside the windows.
+      - name: build elara-simulate
+        run: cargo build --release --features node --bin elara-simulate
+      - name: basic (happy-path liveness → epochs seal + conservation holds)
+        run: ./target/release/elara-simulate --nodes 4 --scenario basic --epoch-interval 2 --duration 24
+      - name: partition (split-brain → heal → reconverge + conservation)
+        run: ./target/release/elara-simulate --nodes 6 --scenario partition --epoch-interval 2 --duration 30
+      - name: byzantine double-sign (equivocation injected → conservation holds)
+        run: ./target/release/elara-simulate --nodes 4 --scenario byzantine-double-sign --epoch-interval 2 --duration 24
+      - name: byzantine withhold (1 witness mute → 2/3 quorum still settles)
+        run: ./target/release/elara-simulate --nodes 6 --scenario byzantine-withhold --epoch-interval 2 --duration 30
+      - name: byzantine all-ranks (zone-0 fully silent → cross-zone escalation unsticks it)
+        run: ./target/release/elara-simulate --nodes 6 --scenario byzantine-all-ranks-malicious --epoch-interval 2 --duration 30
+      - name: sybil-flood (one-org identity flood → entity clustering caps influence)
+        run: ./target/release/elara-simulate --nodes 4 --scenario sybil-flood --epoch-interval 2 --duration 24
+      - name: timestamp-skew (out-of-window timestamps → conservation holds)
+        run: ./target/release/elara-simulate --nodes 4 --scenario timestamp-skew --epoch-interval 2 --duration 24
+      # byzantine-aggregator-offline mutes rank-0 on ALL nodes from genesis, so
+      # every epoch must fall through to a rank-1+ proposer. The scenario lifts
+      # the `staked.len() < 3` bootstrap carve-out (epoch.rs:2924 verifier /
+      # 4595 proposer) by cross-registering anchor-CF seats — the sim never
+      # gossips the vrf_registration record that propagates a seat in
+      # production — then asserts a 2/3 quorum advances past baseline (rank-1
+      # takeover reaches BFT finality despite rank-0 silence). Proven non-flaky
+      # over an 8/8 determinism sweep (every run had all 6/6 nodes advance).
+      - name: byzantine aggregator-offline (rank-0 muted fleet-wide → rank-1 takes over, finality holds)
+        run: ./target/release/elara-simulate --nodes 6 --scenario byzantine-aggregator-offline --epoch-interval 2 --duration 30
+      # Topology / settlement-correctness scenarios (non-adversarial). These three
+      # existed but ran in NO workflow — zone-transition had silently rotted to a
+      # hard slot-conflict (account_hash:nonce reuse, fixed in f9f0dcc8) and gave
+      # zero regression protection until then. zone-transition drives a coordinated
+      # zone_count 1→2 split; cross-zone-finality asserts cross-zone parents boost
+      # finality + conservation across both zones. Both proven 3/3 non-flaky at
+      # these accelerated params.
+      - name: zone-transition (coordinated zone_count 1→2 → both zones seal, conservation holds)
+        run: ./target/release/elara-simulate --nodes 4 --scenario zone-transition --epoch-interval 2 --duration 30
+      - name: cross-zone-finality (cross-zone parents → finality boost applied + conservation holds)
+        run: ./target/release/elara-simulate --nodes 4 --scenario cross-zone-finality --epoch-interval 2 --duration 24
+      # Stress harness smoke — NOT a performance gate. The stress scenario
+      # measures single-machine propagation throughput; its P99/drop/redundancy
+      # targets are gated on Gap 6 structured gossip, so it emits a baseline
+      # report and exits 0 BY DESIGN (a real measurement needs 50+ nodes — see
+      # docs/runs/L1543-phase-a-baseline.md). It cannot go red on the numbers.
+      # What this smoke DOES protect: the ~600 lines of stress-only harness —
+      # set_propagation_observer + its closure, the direct-injection submit
+      # loop, the direct stake injection, the percentile math, and
+      # render_stress_report — which run in NO other scenario and would silently
+      # rot exactly like zone-transition did (it broke to a hard slot-conflict
+      # and protected nothing until f9f0dcc8). A 4-node run drives that whole
+      # path and turns red on a boot/genesis-bootstrap break or a panic. Proven
+      # 3/3 non-flaky (exit 0, pool 4/4, 96/96 propagated) at these params.
+      - name: stress-smoke (harness liveness — observer + direct-inject + report path executes, exit 0)
+        run: ./target/release/elara-simulate --nodes 4 --scenario stress --epoch-interval 2 --duration 12 --rate-per-node 2.0
+
+  formal-tla:
+    name: formal model (TLA+ / TLC)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      # Machine-checked safety of the AWC settlement core, the cross-zone
+      # mutual-exclusion core, the supply-conservation core, AND the cross-zone
+      # settlement LIVENESS core (spec/tla/). The gate exhaustively model-checks
+      # DiversitySoundness (effective stake never exceeds raw stake — the AWC
+      # novelty), NoConflictingFinalization (in-zone BFT agreement), NoAbortAndClaim
+      # (Phase C: a sealed cross-zone transfer is never both claimed in zone B and
+      # aborted in zone A — the double-credit), SupplyInvariant (Phase D: the
+      # four-bucket beat supply sum is conserved), and the two Phase E temporal
+      # theorems (LiveFast: the committee fast path settles under GST + f<1/3;
+      # LiveBackstop: the quorum-free 30-day reaper terminates unconditionally). It
+      # asserts the 1/3 Byzantine bound is TIGHT on the two consensus cores
+      # (MCTightBreak / MCXZoneBreak, f=2 > n/3 reproduce the equivocation
+      # counterexample), that the two partition-tail fixes are NECESSARY for
+      # conservation (MCConsRevertBreak / MCConsReapBreak reproduce the
+      # zero-Byzantine supply-inflation counterexamples), AND that LiveFast genuinely
+      # FAILS without GST or at f>=1/3 (MCXZoneLiveNoGST_Fast / MCXZoneLiveByzStall_Fast
+      # reproduce the liveness lasso) while LiveBackstop survives. run-tlc.sh fetches
+      # tla2tools.jar and checks each model's EXPECTED outcome (including the
+      # intentional violations), so a regression in the consensus, cross-zone,
+      # conservation, or liveness math — or in the spec that mirrors it — turns CI
+      # red at PR time. The models are a few hundred states each; the whole gate is
+      # seconds of TLC plus the one-time jar download.
+      - name: model-check consensus + cross-zone cores
+        run: ./spec/tla/run-tlc.sh
+
+  formal-proverif:
+    name: formal model (ProVerif / PQ transport)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v6
+      # Pin the toolchain exactly (no floating "latest") so an upstream OCaml or
+      # ProVerif release can't turn this gate red independently of the model.
+      # 4.14.x matches the locally-verified switch; ProVerif 2.05 is the audited
+      # version.
+      - uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: "4.14.2"
+      # Symbolic (Dolev-Yao) machine-check of the PQ network transport — the
+      # handshake (crates/elara-pq-transport/src/handshake.rs) and the post-
+      # handshake record/stream layer (src/network/pq_transport/stream.rs).
+      # run-proverif.sh checks twenty-five scenarios against their EXPECTED outcomes
+      # (model<->code correspondence in spec/proverif/README.md): baseline proves session-key secrecy
+      # AND mutual injective authentication (the transcript-bound Dilithium3
+      # signature is the MITM killer); mlkem_broken / x25519_broken prove the
+      # HYBRID claim — secrecy survives either primitive being fully broken;
+      # both_broken is an INTENTIONAL violation (secrecy MUST fail) that proves
+      # the hybrid result is non-vacuous, the ProVerif analogue of
+      # spec/tla/MCTightBreak; forward_secrecy proves the session secret survives
+      # a post-session leak of both long-term keys (phase mechanism), with
+      # forward_secrecy_broken its intentional-violation non-vacuity gate; kci
+      # proves Key-Compromise-Impersonation resistance — the initiator's own key
+      # leaked DURING sessions keeps secrecy + initiator->responder auth, while
+      # the attacker can impersonate only the compromised party itself (asserted
+      # false) — with kci_broken (pinned-peer key also leaked) its in-world
+      # non-vacuity twin; uks is the multi-principal model (two honest initiators
+      # pinning one responder) proving the accept-any responder never
+      # cross-attributes one initiator's session to the other (UKS / identity-
+      # misbinding freedom), with uks_broken / uks_broken_sym its two same-world
+      # non-vacuity twins (each leaks one initiator's key to witness that accept
+      # event reachable). The record-layer scenarios (record_*) prove payload
+      # secrecy + injective agreement (anti-replay/reorder), direction separation,
+      # and frame-type-dispatch integrity, each with its intentional-violation
+      # non-vacuity twin (nonce reuse / key collapse / no-AEAD / empty-AD), plus
+      # record_close_unauth documenting the unauthenticated-Close truncation
+      # boundary. The composed_* scenarios close the seam between the two models
+      # (the record key IS the genuine handshake output, not an idealized fresh
+      # name); the admission_* scenarios machine-check realm membership-cert
+      # admission — Admitted(id) ==> the federation root issued a cert for that
+      # handshake-authenticated id — with forged-cert (root-key leak) and
+      # dropped-binding (stolen-cert) non-vacuity twins, plus a cross-realm
+      # isolation check. A regression in the transport — or in the model that
+      # mirrors it — turns CI red. ProVerif on these bounded models runs in
+      # seconds; the one-time cost is the cached opam/proverif install.
+      - name: install proverif
+        # proverif.inria.fr is a single academic server that intermittently
+        # refuses connections (observed 2026-07-10: curl exit 7 redded this
+        # gate; healthy 40 min earlier). Bounded retry absorbs brief upstream
+        # flakes; a persistent outage still fails the gate — never masked.
+        run: |
+          for i in 1 2 3; do
+            opam install -y proverif.2.05 && exit 0
+            if [ "$i" -lt 3 ]; then echo "install attempt $i failed — retrying in 75s"; sleep 75; fi
+          done
+          echo "proverif install failed after 3 attempts"
+          exit 1
+      - name: "model-check PQ transport (handshake: secrecy/auth/hybrid/FS/KCI/UKS + record: secrecy/anti-replay/direction/type-binding + composition + realm-admission)"
+        run: |
+          eval "$(opam env)"
+          ./spec/proverif/run-proverif.sh

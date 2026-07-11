@@ -1,0 +1,35 @@
+(* SCENARIO: composed_broken — NON-VACUITY twin of composed_baseline.
+   Same composed world (the record key is the genuine handshake output), but BOTH
+   ephemeral shared secrets leak (X25519 AND ML-KEM broken — both leak channels
+   bridged to the attacker, exactly as handshake `both_broken`).
+
+   EXPECT (run-proverif.sh mode composed_nonvacuity): the record-layer injective
+   agreement FAILS — `inj-event(RtoI_Recv(...)) ==> inj-event(RtoI_Send(...)) is
+   false`. Once the two ephemeral secrets leak, the attacker reconstructs the
+   record key kdf_recv(dh_ss,kem_ss,t2) (= the initiator's krecv) and FORGES a
+   Record B frame the pinned initiator accepts — so a record is received that the
+   honest responder never sent. This is the non-vacuity proof: composed_baseline's
+   anti-replay (and, by the same key, its secrecy) is a genuine CONSEQUENCE of
+   handshake key secrecy — a dependency the standalone record model (fresh `new k`,
+   secret by construction) can never exhibit. If the record key were NOT the
+   breakable handshake output, leaking the ephemeral secrets would leave the
+   forgery impossible and this gate would FAIL (agreement would stay true).
+
+   Why anti-replay rather than secrecy here: the companion `attacker(probe)`
+   secrecy goal is also reachable once the secrets leak, but ProVerif's generic-KEM
+   abstraction (kemss(pk,coins), no ciphertext-binding equation) leaves the
+   encapsulation randomness undischarged during trace reconstruction, so that
+   query reports the non-deterministic `cannot be proved` rather than a stable
+   verdict. The injective-agreement FORGERY, by contrast, reconstructs to a clean,
+   deterministic `is false`. The clean reconstructed secrecy-`is false` for this
+   exact key derivation is already machine-checked by handshake `both_broken`.
+   ------------------------------------------------------------------------- *)
+
+query k:key, n:nonce, m:bitstring;
+  inj-event(RtoI_Recv(k,n,m)) ==> inj-event(RtoI_Send(k,n,m)).
+
+process
+  out(c, spk(skI)); out(c, spk(skR));
+  ( !P_init_composed(skI, spk(skR)) | !P_resp_composed(skR)
+  | !( in(leak_dh,  x:bitstring); out(c, x) )       (* X25519 broken *)
+  | !( in(leak_kem, y:bitstring); out(c, y) ) )     (* ML-KEM broken *)

@@ -1,0 +1,32 @@
+[package]
+name = "elara-record"
+version = "0.1.0"
+edition = "2021"
+# publish gated OFF until the verify-stack extraction completes and the crates.io
+# release ceremony runs (publish order: elara-smt → elara-record → elara-verify;
+# see docs/VERIFIER-EXTRACTION-AUDIT-2026-07-07.md). crates.io names are permanent.
+publish = false
+description = "Elara Protocol data layer: ValidationRecord, the byte-exact post-quantum wire codec, receipt types, hierarchical ZoneId, uuid7, and verify-side crypto primitives (Dilithium3 / SPHINCS+ verify, SHA3). The single source of truth for the wire format, shared by the AGPL node via re-export so node and standalone use never drift. Pure-Rust, wasm32-portable."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/navigatorbuilds/elara-mesh"
+readme = "README.md"
+keywords = ["post-quantum", "wire-format", "validation", "verify", "dilithium"]
+categories = ["data-structures", "encoding", "cryptography"]
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+# Logging facade only (no subscriber): record.rs emits one diagnostic on the
+# metadata-encode-overflow fallback path. Same non-optional posture as the node.
+tracing = "0.1"
+serde_json = { version = "1.0", features = ["float_roundtrip"] }
+thiserror = "2.0"
+sha3 = "0.10"
+hex = "0.4"
+uuid = { version = "1.0", features = ["v7", "js"] }
+dilithium-rs = "=0.2.0"
+lattice-slh-dsa = "=0.3.3"
+
+# record::now_timestamp() reads the clock via js_sys::Date on wasm32 (no
+# SystemTime there). Same pin as the node's wasm32 target block.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = "0.3"

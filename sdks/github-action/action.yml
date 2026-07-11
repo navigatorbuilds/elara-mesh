@@ -1,0 +1,42 @@
+name: 'Elara Agent Register'
+description: 'Verify an Elara agent identity in CI and emit its account proof as job outputs.'
+author: 'Elara Protocol'
+branding:
+  icon: 'shield'
+  color: 'purple'
+
+inputs:
+  node-url:
+    description: 'Public URL of an Elara node you run or have access to (no public testnet endpoints yet).'
+    required: true
+  identity:
+    description: '64-hex-char SHA3-256 identity of the agent. Pass via `${{ secrets.ELARA_IDENTITY }}`.'
+    required: true
+  fail-if-missing:
+    description: 'Fail the workflow when the identity has no account on the node. Default true.'
+    required: false
+    default: 'true'
+
+outputs:
+  available:
+    description: 'Available beat base units (1 beat = 1_000_000_000 units).'
+    value: ${{ steps.register.outputs.available }}
+  staked:
+    description: 'Staked beat base units (1 beat = 1_000_000_000 units).'
+    value: ${{ steps.register.outputs.staked }}
+  total:
+    description: 'Total beat base units (available + staked).'
+    value: ${{ steps.register.outputs.total }}
+  exists:
+    description: '"true" if the account exists on the node.'
+    value: ${{ steps.register.outputs.exists }}
+  proof-root:
+    description: 'Account-Merkle root the proof was emitted against.'
+    value: ${{ steps.register.outputs.proof-root }}
+  bound-to-seal:
+    description: '"true" if the proof root matches the latest signed epoch seal (verifiable finality).'
+    value: ${{ steps.register.outputs.bound-to-seal }}
+
+runs:
+  using: 'node20'
+  main: 'dist/index.js'

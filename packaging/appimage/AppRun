@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# AppImage entry script for elara-node.
+#
+# Resolves $APPDIR (set by the AppImage runtime to the mounted squashfs root),
+# defaults the node's data directory to ~/.local/share/elara-node so the user
+# does not need to think about paths, and execs the embedded binary.
+#
+# All elara-node CLI flags pass through. To override the data dir or pass a
+# config, run the AppImage like:
+#
+#   Elara_Node-x86_64.AppImage --data-dir ~/elara-data --listen 0.0.0.0:9473
+
+set -eu
+
+HERE="${APPDIR:-$(dirname "$(readlink -f "$0")")}"
+
+# XDG-compliant default data dir, only applied if the user did not pass one.
+DEFAULT_DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/elara-node"
+HAS_DATA_FLAG=0
+for arg in "$@"; do
+    case "$arg" in
+        --data-dir|--data-dir=*) HAS_DATA_FLAG=1; break ;;
+    esac
+done
+
+mkdir -p "$DEFAULT_DATA_DIR"
+
+if [[ "$HAS_DATA_FLAG" -eq 1 ]]; then
+    exec "$HERE/usr/bin/elara-node" "$@"
+else
+    exec "$HERE/usr/bin/elara-node" --data-dir "$DEFAULT_DATA_DIR" "$@"
+fi

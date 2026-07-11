@@ -1,0 +1,449 @@
+{
+ "acts": [
+  {
+   "act_timestamp_ms": 1783696624119,
+   "action": "commit",
+   "agent_id": "elara-maintainer",
+   "args_hash": "f98f83a23e15ff786a7ca7737c9fea0d8808d3d7bcb50b699d947a102382e05a",
+   "authorized": true,
+   "browser_verify": true,
+   "flag": "valid",
+   "kind": "agent_audit",
+   "mandate_ref": "605d8e66b16b0cae072b494f23ab2eeee6870111e9401c3c436fa4825fcd67cc",
+   "mandate_status": {
+    "act_timestamp_ms": 1783696624119,
+    "agent_identity_hash": "b11338a40cdcdef00777d3d903e1d754a128c263944400df19504b2c4b8c779b",
+    "authoritative_complete": true,
+    "authorized": true,
+    "chain_depth": 1,
+    "flag": "valid",
+    "is_mandate_act": true,
+    "lineage": [
+     {
+      "agent_identity_hash": "b11338a40cdcdef00777d3d903e1d754a128c263944400df19504b2c4b8c779b",
+      "hop_index": 0,
+      "mandate_id": "605d8e66b16b0cae072b494f23ab2eeee6870111e9401c3c436fa4825fcd67cc",
+      "principal_identity_hash": "7b4f7b17ca76937be28f01924ddc773840d264d67fad56a0280ed1ac5ac77631"
+     }
+    ],
+    "lineage_note": "leaf\u2192root verified delegation chain; hop 0's principal is this act's authorizer, ancestors are the verified chain of authority \u2014 not accused",
+    "mandate_ref": "605d8e66b16b0cae072b494f23ab2eeee6870111e9401c3c436fa4825fcd67cc",
+    "principal_identity_hash": "7b4f7b17ca76937be28f01924ddc773840d264d67fad56a0280ed1ac5ac77631",
+    "record_id": "019f4c9a-89f7-7ed1-98de-183d842f426f",
+    "scope_deferred": false
+   },
+   "record_id": "019f4c9a-89f7-7ed1-98de-183d842f426f",
+   "scope_deferred": false,
+   "timestamp": 1783696624.119937,
+   "tool": "git"
+  },
+  {
+   "act_timestamp_ms": 1783695734338,
+   "action": "commit",
+   "agent_id": "elara-maintainer",
+   "args_hash": "bc342c8e217be3bd429379d04a0fce185dfa855107e16fc6d9b124be55bea53c",
+   "authorized": true,
+   "browser_verify": true,
+   "flag": "valid",
+   "kind": "agent_audit",
+   "mandate_ref": "605d8e66b16b0cae072b494f23ab2eeee6870111e9401c3c436fa4825fcd67cc",
+   "mandate_status": {
+    "act_timestamp_ms": 1783695734338,
+    "agent_identity_hash": "b11338a40cdcdef00777d3d903e1d754a128c263944400df19504b2c4b8c779b",
+    "authoritative_complete": true,
+    "authorized": true,
+    "chain_depth": 1,
+    "flag": "valid",
+    "is_mandate_act": true,
+    "lineage": [
+     {
+      "agent_identity_hash": "b11338a40cdcdef00777d3d903e1d754a128c263944400df19504b2c4b8c779b",
+      "hop_index": 0,
+      "mandate_id": "605d8e66b16b0cae072b494f23ab2eeee6870111e9401c3c436fa4825fcd67cc",
+      "principal_identity_hash": "7b4f7b17ca76937be28f01924ddc773840d264d67fad56a0280ed1ac5ac77631"
+     }
+    ],
+    "lineage_note": "leaf\u2192root verified delegation chain; hop 0's principal is this act's authorizer, ancestors are the verified chain of authority \u2014 not accused",
+    "mandate_ref": "605d8e66b16b0cae072b494f23ab2eeee6870111e9401c3c436fa4825fcd67cc",
+    "principal_identity_hash": "7b4f7b17ca76937be28f01924ddc773840d264d67fad56a0280ed1ac5ac77631",
+    "record_id": "019f4c8c-f642-7282-aac6-90eb5f91923f",
+    "scope_deferred": false
+   },
+   "record_id": "019f4c8c-f642-7282-aac6-90eb5f91923f",
+   "scope_deferred": false,
+   "timestamp": 1783695734.3387775,
+   "tool": "git"
+  },
+  {
+   "act_timestamp_ms": 1783692541056,
+   "action": "commit",
+   "agent_id": "elara-maintainer",
+   "args_hash": "14b75c6d23a1077b12ea3cac08ede4d9efbaa52fd3cd119cc6f0f098ef6834a5",
+   "authorized": true,
+   "browser_verify": true,
+   "flag": "valid",
+   "kind": "agent_audit",
+   "mandate_ref": "605d8e66b16b0cae072b494f23ab2eeee6870111e9401c3c436fa4825fcd67cc",
+   "mandate_status": {
+    "act_timestamp_ms": 1783692541056,
+    "agent_identity_hash": "b11338a40cdcdef00777d3d903e1d754a128c263944400df19504b2c4b8c779b",
+    "authoritative_complete": true,
+    "authorized": true,
+    "chain_depth": 1,
+    "flag": "valid",
+    "is_mandate_act": true,
+    "lineage": [
+     {
+      "agent_identity_hash": "b11338a40cdcdef00777d3d903e1d754a128c263944400df19504b2c4b8c779b",
+      "hop_index": 0,
+      "mandate_id": "605d8e66b16b0cae072b494f23ab2eeee6870111e9401c3c436fa4825fcd67cc",
+      "principal_identity_hash": "7b4f7b17ca76937be28f01924ddc773840d264d67fad56a0280ed1ac5ac77631"
+     }
+    ],
+    "lineage_note": "leaf\u2192root verified delegation chain; hop 0's principal is this act's authorizer, ancestors are the verified chain of authority \u2014 not accused",
+    "mandate_ref": "605d8e66b16b0cae072b494f23ab2eeee6870111e9401c3c436fa4825fcd67cc",
+    "principal_identity_hash": "7b4f7b17ca76937be28f01924ddc773840d264d67fad56a0280ed1ac5ac77631",
+    "record_id": "019f4c5c-3c80-7dd0-9611-d8778d5e0ccd",
+    "scope_deferred": false
+   },
+   "record_id": "019f4c5c-3c80-7dd0-9611-d8778d5e0ccd",
+   "scope_deferred": false,
+   "timestamp": 1783692541.0562081,
+   "tool": "git"
+  },
+  {
+   "act_timestamp_ms": 1783692046051,
+   "action": "post-deploy-probe",
+   "agent_id": "elara-maintainer",
+   "args_hash": "a68ccbe72b46096f54df96bc5d124c227214f7a4f8b4ee44942de446493d9ef9",
+   "authorized": true,
+   "browser_verify": true,
+   "flag": "valid",
+   "kind": "agent_audit",
+   "mandate_ref": "605d8e66b16b0cae072b494f23ab2eeee6870111e9401c3c436fa4825fcd67cc",
+   "mandate_status": {
+    "act_timestamp_ms": 1783692046051,
+    "agent_identity_hash": "b11338a40cdcdef00777d3d903e1d754a128c263944400df19504b2c4b8c779b",
+    "authoritative_complete": true,
+    "authorized": true,
+    "chain_depth": 1,
+    "flag": "valid",
+    "is_mandate_act": true,
+    "lineage": [
+     {
+      "agent_identity_hash": "b11338a40cdcdef00777d3d903e1d754a128c263944400df19504b2c4b8c779b",
+      "hop_index": 0,
+      "mandate_id": "605d8e66b16b0cae072b494f23ab2eeee6870111e9401c3c436fa4825fcd67cc",
+      "principal_identity_hash": "7b4f7b17ca76937be28f01924ddc773840d264d67fad56a0280ed1ac5ac77631"
+     }
+    ],
+    "lineage_note": "leaf\u2192root verified delegation chain; hop 0's principal is this act's authorizer, ancestors are the verified chain of authority \u2014 not accused",
+    "mandate_ref": "605d8e66b16b0cae072b494f23ab2eeee6870111e9401c3c436fa4825fcd67cc",
+    "principal_identity_hash": "7b4f7b17ca76937be28f01924ddc773840d264d67fad56a0280ed1ac5ac77631",
+    "record_id": "019f4c54-aee3-74f3-9da3-4f58b85e8a2b",
+    "scope_deferred": false
+   },
+   "record_id": "019f4c54-aee3-74f3-9da3-4f58b85e8a2b",
+   "scope_deferred": false,
+   "timestamp": 1783692046.0517502,
+   "tool": "health"
+  },
+  {
+   "act_timestamp_ms": 1783691708719,
+   "action": "commit",
+   "agent_id": "elara-maintainer",
+   "args_hash": "c7e03b6902f48464af031813cdebd9728936bc50cbb7fa23e05d1fcd2c63c8d0",
+   "authorized": true,
+   "browser_verify": true,
+   "flag": "valid",
+   "kind": "agent_audit",
+   "mandate_ref": "605d8e66b16b0cae072b494f23ab2eeee6870111e9401c3c436fa4825fcd67cc",
+   "mandate_status": {
+    "act_timestamp_ms": 1783691708719,
+    "agent_identity_hash": "b11338a40cdcdef00777d3d903e1d754a128c263944400df19504b2c4b8c779b",
+    "authoritative_complete": true,
+    "authorized": true,
+    "chain_depth": 1,
+    "flag": "valid",
+    "is_mandate_act": true,
+    "lineage": [
+     {
+      "agent_identity_hash": "b11338a40cdcdef00777d3d903e1d754a128c263944400df19504b2c4b8c779b",
+      "hop_index": 0,
+      "mandate_id": "605d8e66b16b0cae072b494f23ab2eeee6870111e9401c3c436fa4825fcd67cc",
+      "principal_identity_hash": "7b4f7b17ca76937be28f01924ddc773840d264d67fad56a0280ed1ac5ac77631"
+     }
+    ],
+    "lineage_note": "leaf\u2192root verified delegation chain; hop 0's principal is this act's authorizer, ancestors are the verified chain of authority \u2014 not accused",
+    "mandate_ref": "605d8e66b16b0cae072b494f23ab2eeee6870111e9401c3c436fa4825fcd67cc",
+    "principal_identity_hash": "7b4f7b17ca76937be28f01924ddc773840d264d67fad56a0280ed1ac5ac77631",
+    "record_id": "019f4c4f-892f-7702-9ef1-f47289eb91df",
+    "scope_deferred": false
+   },
+   "record_id": "019f4c4f-892f-7702-9ef1-f47289eb91df",
+   "scope_deferred": false,
+   "timestamp": 1783691708.7192652,
+   "tool": "git"
+  },
+  {
+   "act_timestamp_ms": 1783691672121,
+   "action": "commit",
+   "agent_id": "elara-maintainer",
+   "args_hash": "1c8cc3360b6dd26a9a918df21c0daa8d59d2e52640fd98f2b25e65e0f35860bc",
+   "authorized": true,
+   "browser_verify": true,
+   "flag": "valid",
+   "kind": "agent_audit",
+   "mandate_ref": "605d8e66b16b0cae072b494f23ab2eeee6870111e9401c3c436fa4825fcd67cc",
+   "mandate_status": {
+    "act_timestamp_ms": 1783691672121,
+    "agent_identity_hash": "b11338a40cdcdef00777d3d903e1d754a128c263944400df19504b2c4b8c779b",
+    "authoritative_complete": true,
+    "authorized": true,
+    "chain_depth": 1,
+    "flag": "valid",
+    "is_mandate_act": true,
+    "lineage": [
+     {
+      "agent_identity_hash": "b11338a40cdcdef00777d3d903e1d754a128c263944400df19504b2c4b8c779b",
+      "hop_index": 0,
+      "mandate_id": "605d8e66b16b0cae072b494f23ab2eeee6870111e9401c3c436fa4825fcd67cc",
+      "principal_identity_hash": "7b4f7b17ca76937be28f01924ddc773840d264d67fad56a0280ed1ac5ac77631"
+     }
+    ],
+    "lineage_note": "leaf\u2192root verified delegation chain; hop 0's principal is this act's authorizer, ancestors are the verified chain of authority \u2014 not accused",
+    "mandate_ref": "605d8e66b16b0cae072b494f23ab2eeee6870111e9401c3c436fa4825fcd67cc",
+    "principal_identity_hash": "7b4f7b17ca76937be28f01924ddc773840d264d67fad56a0280ed1ac5ac77631",
+    "record_id": "019f4c4e-fa39-7e10-b29f-01e999951349",
+    "scope_deferred": false
+   },
+   "record_id": "019f4c4e-fa39-7e10-b29f-01e999951349",
+   "scope_deferred": false,
+   "timestamp": 1783691672.1211019,
+   "tool": "git"
+  },
+  {
+   "act_timestamp_ms": 1783632686469,
+   "action": "commit",
+   "agent_id": "elara-maintainer",
+   "args_hash": "7b1ba50cf3a6c9c5de64979e230d7e246a58885d4e5044ab0356e5ad7706da49",
+   "authorized": true,
+   "browser_verify": true,
+   "flag": "valid",
+   "kind": "agent_audit",
+   "mandate_ref": "605d8e66b16b0cae072b494f23ab2eeee6870111e9401c3c436fa4825fcd67cc",
+   "mandate_status": {
+    "act_timestamp_ms": 1783632686469,
+    "agent_identity_hash": "b11338a40cdcdef00777d3d903e1d754a128c263944400df19504b2c4b8c779b",
+    "authoritative_complete": true,
+    "authorized": true,
+    "chain_depth": 1,
+    "flag": "valid",
+    "is_mandate_act": true,
+    "lineage": [
+     {
+      "agent_identity_hash": "b11338a40cdcdef00777d3d903e1d754a128c263944400df19504b2c4b8c779b",
+      "hop_index": 0,
+      "mandate_id": "605d8e66b16b0cae072b494f23ab2eeee6870111e9401c3c436fa4825fcd67cc",
+      "principal_identity_hash": "7b4f7b17ca76937be28f01924ddc773840d264d67fad56a0280ed1ac5ac77631"
+     }
+    ],
+    "lineage_note": "leaf\u2192root verified delegation chain; hop 0's principal is this act's authorizer, ancestors are the verified chain of authority \u2014 not accused",
+    "mandate_ref": "605d8e66b16b0cae072b494f23ab2eeee6870111e9401c3c436fa4825fcd67cc",
+    "principal_identity_hash": "7b4f7b17ca76937be28f01924ddc773840d264d67fad56a0280ed1ac5ac77631",
+    "record_id": "019f48ca-ed85-7601-9eb4-0f5ed3c79294",
+    "scope_deferred": false
+   },
+   "record_id": "019f48ca-ed85-7601-9eb4-0f5ed3c79294",
+   "scope_deferred": false,
+   "timestamp": 1783632686.469079,
+   "tool": "git"
+  },
+  {
+   "act_timestamp_ms": 1783631353542,
+   "action": "commit",
+   "agent_id": "elara-maintainer",
+   "args_hash": "799204207d3ef3ccf55c5510b40a20c45b6fe0a9393ce9d2d466263c5c98e7c9",
+   "authorized": true,
+   "browser_verify": true,
+   "flag": "valid",
+   "kind": "agent_audit",
+   "mandate_ref": "605d8e66b16b0cae072b494f23ab2eeee6870111e9401c3c436fa4825fcd67cc",
+   "mandate_status": {
+    "act_timestamp_ms": 1783631353542,
+    "agent_identity_hash": "b11338a40cdcdef00777d3d903e1d754a128c263944400df19504b2c4b8c779b",
+    "authoritative_complete": true,
+    "authorized": true,
+    "chain_depth": 1,
+    "flag": "valid",
+    "is_mandate_act": true,
+    "lineage": [
+     {
+      "agent_identity_hash": "b11338a40cdcdef00777d3d903e1d754a128c263944400df19504b2c4b8c779b",
+      "hop_index": 0,
+      "mandate_id": "605d8e66b16b0cae072b494f23ab2eeee6870111e9401c3c436fa4825fcd67cc",
+      "principal_identity_hash": "7b4f7b17ca76937be28f01924ddc773840d264d67fad56a0280ed1ac5ac77631"
+     }
+    ],
+    "lineage_note": "leaf\u2192root verified delegation chain; hop 0's principal is this act's authorizer, ancestors are the verified chain of authority \u2014 not accused",
+    "mandate_ref": "605d8e66b16b0cae072b494f23ab2eeee6870111e9401c3c436fa4825fcd67cc",
+    "principal_identity_hash": "7b4f7b17ca76937be28f01924ddc773840d264d67fad56a0280ed1ac5ac77631",
+    "record_id": "019f48b6-96c6-7281-9bbd-8f30621fdf09",
+    "scope_deferred": false
+   },
+   "record_id": "019f48b6-96c6-7281-9bbd-8f30621fdf09",
+   "scope_deferred": false,
+   "timestamp": 1783631353.542772,
+   "tool": "git"
+  },
+  {
+   "act_timestamp_ms": 1783631235953,
+   "action": "commit",
+   "agent_id": "elara-maintainer",
+   "args_hash": "dfa41c7755830383459ffb05f8e91352c4d08238e2b246406e83c667da9b0411",
+   "authorized": true,
+   "flag": "valid",
+   "kind": "agent_audit",
+   "mandate_ref": "605d8e66b16b0cae072b494f23ab2eeee6870111e9401c3c436fa4825fcd67cc",
+   "mandate_status": {
+    "act_timestamp_ms": 1783631235953,
+    "agent_identity_hash": "b11338a40cdcdef00777d3d903e1d754a128c263944400df19504b2c4b8c779b",
+    "authoritative_complete": true,
+    "authorized": true,
+    "chain_depth": 1,
+    "flag": "valid",
+    "is_mandate_act": true,
+    "lineage": [
+     {
+      "agent_identity_hash": "b11338a40cdcdef00777d3d903e1d754a128c263944400df19504b2c4b8c779b",
+      "hop_index": 0,
+      "mandate_id": "605d8e66b16b0cae072b494f23ab2eeee6870111e9401c3c436fa4825fcd67cc",
+      "principal_identity_hash": "7b4f7b17ca76937be28f01924ddc773840d264d67fad56a0280ed1ac5ac77631"
+     }
+    ],
+    "lineage_note": "leaf\u2192root verified delegation chain; hop 0's principal is this act's authorizer, ancestors are the verified chain of authority \u2014 not accused",
+    "mandate_ref": "605d8e66b16b0cae072b494f23ab2eeee6870111e9401c3c436fa4825fcd67cc",
+    "principal_identity_hash": "7b4f7b17ca76937be28f01924ddc773840d264d67fad56a0280ed1ac5ac77631",
+    "record_id": "019f48b4-cb71-7d90-bdc7-2faf69d9079c",
+    "scope_deferred": false
+   },
+   "record_id": "019f48b4-cb71-7d90-bdc7-2faf69d9079c",
+   "scope_deferred": false,
+   "timestamp": 1783631235.95308,
+   "tool": "git"
+  },
+  {
+   "act_timestamp_ms": 1783631140072,
+   "action": "commit",
+   "agent_id": "elara-maintainer",
+   "args_hash": "8bf16d8e7cb4c7e86dcfabda3756807d6fc999fc8cf58cb3c965bb2a5e4d2e08",
+   "authorized": true,
+   "flag": "valid",
+   "kind": "agent_audit",
+   "mandate_ref": "605d8e66b16b0cae072b494f23ab2eeee6870111e9401c3c436fa4825fcd67cc",
+   "mandate_status": {
+    "act_timestamp_ms": 1783631140072,
+    "agent_identity_hash": "b11338a40cdcdef00777d3d903e1d754a128c263944400df19504b2c4b8c779b",
+    "authoritative_complete": true,
+    "authorized": true,
+    "chain_depth": 1,
+    "flag": "valid",
+    "is_mandate_act": true,
+    "lineage": [
+     {
+      "agent_identity_hash": "b11338a40cdcdef00777d3d903e1d754a128c263944400df19504b2c4b8c779b",
+      "hop_index": 0,
+      "mandate_id": "605d8e66b16b0cae072b494f23ab2eeee6870111e9401c3c436fa4825fcd67cc",
+      "principal_identity_hash": "7b4f7b17ca76937be28f01924ddc773840d264d67fad56a0280ed1ac5ac77631"
+     }
+    ],
+    "lineage_note": "leaf\u2192root verified delegation chain; hop 0's principal is this act's authorizer, ancestors are the verified chain of authority \u2014 not accused",
+    "mandate_ref": "605d8e66b16b0cae072b494f23ab2eeee6870111e9401c3c436fa4825fcd67cc",
+    "principal_identity_hash": "7b4f7b17ca76937be28f01924ddc773840d264d67fad56a0280ed1ac5ac77631",
+    "record_id": "019f48b3-54e8-7242-9b66-64e316173894",
+    "scope_deferred": false
+   },
+   "record_id": "019f48b3-54e8-7242-9b66-64e316173894",
+   "scope_deferred": false,
+   "timestamp": 1783631140.0727165,
+   "tool": "git"
+  },
+  {
+   "act_timestamp_ms": 1783631062069,
+   "action": "commit",
+   "agent_id": "elara-maintainer",
+   "args_hash": "7eb83c0b4d27898006afac8c3388e34a8732a1bae57df4ad7a2dc4a31b079b7c",
+   "authorized": true,
+   "flag": "valid",
+   "kind": "agent_audit",
+   "mandate_ref": "605d8e66b16b0cae072b494f23ab2eeee6870111e9401c3c436fa4825fcd67cc",
+   "mandate_status": {
+    "act_timestamp_ms": 1783631062069,
+    "agent_identity_hash": "b11338a40cdcdef00777d3d903e1d754a128c263944400df19504b2c4b8c779b",
+    "authoritative_complete": true,
+    "authorized": true,
+    "chain_depth": 1,
+    "flag": "valid",
+    "is_mandate_act": true,
+    "lineage": [
+     {
+      "agent_identity_hash": "b11338a40cdcdef00777d3d903e1d754a128c263944400df19504b2c4b8c779b",
+      "hop_index": 0,
+      "mandate_id": "605d8e66b16b0cae072b494f23ab2eeee6870111e9401c3c436fa4825fcd67cc",
+      "principal_identity_hash": "7b4f7b17ca76937be28f01924ddc773840d264d67fad56a0280ed1ac5ac77631"
+     }
+    ],
+    "lineage_note": "leaf\u2192root verified delegation chain; hop 0's principal is this act's authorizer, ancestors are the verified chain of authority \u2014 not accused",
+    "mandate_ref": "605d8e66b16b0cae072b494f23ab2eeee6870111e9401c3c436fa4825fcd67cc",
+    "principal_identity_hash": "7b4f7b17ca76937be28f01924ddc773840d264d67fad56a0280ed1ac5ac77631",
+    "record_id": "019f48b2-2435-7910-800d-69d853258cd6",
+    "scope_deferred": false
+   },
+   "record_id": "019f48b2-2435-7910-800d-69d853258cd6",
+   "scope_deferred": false,
+   "timestamp": 1783631062.0699842,
+   "tool": "git"
+  },
+  {
+   "act_timestamp_ms": 1783629918291,
+   "action": "receipts-arming-complete",
+   "agent_id": "elara-maintainer",
+   "args_hash": "69e149ebdd28dc46ed48e3ed09ec223c76a1ecdf0d26850e2d1fbd92fa87c507",
+   "authorized": true,
+   "flag": "valid",
+   "kind": "agent_audit",
+   "mandate_ref": "605d8e66b16b0cae072b494f23ab2eeee6870111e9401c3c436fa4825fcd67cc",
+   "mandate_status": {
+    "act_timestamp_ms": 1783629918291,
+    "agent_identity_hash": "b11338a40cdcdef00777d3d903e1d754a128c263944400df19504b2c4b8c779b",
+    "authoritative_complete": true,
+    "authorized": true,
+    "chain_depth": 1,
+    "flag": "valid",
+    "is_mandate_act": true,
+    "lineage": [
+     {
+      "agent_identity_hash": "b11338a40cdcdef00777d3d903e1d754a128c263944400df19504b2c4b8c779b",
+      "hop_index": 0,
+      "mandate_id": "605d8e66b16b0cae072b494f23ab2eeee6870111e9401c3c436fa4825fcd67cc",
+      "principal_identity_hash": "7b4f7b17ca76937be28f01924ddc773840d264d67fad56a0280ed1ac5ac77631"
+     }
+    ],
+    "lineage_note": "leaf\u2192root verified delegation chain; hop 0's principal is this act's authorizer, ancestors are the verified chain of authority \u2014 not accused",
+    "mandate_ref": "605d8e66b16b0cae072b494f23ab2eeee6870111e9401c3c436fa4825fcd67cc",
+    "principal_identity_hash": "7b4f7b17ca76937be28f01924ddc773840d264d67fad56a0280ed1ac5ac77631",
+    "record_id": "019f48a0-b053-7792-af5d-af7e3e04dc3c",
+    "scope_deferred": false
+   },
+   "record_id": "019f48a0-b053-7792-af5d-af7e3e04dc3c",
+   "scope_deferred": false,
+   "timestamp": 1783629918.2912204,
+   "tool": "ceremony"
+  }
+ ],
+ "authoritative_complete": true,
+ "count": 12,
+ "generated_at_utc": "2026-07-10T15:19:15Z",
+ "mandate_id": "605d8e66b16b0cae072b494f23ab2eeee6870111e9401c3c436fa4825fcd67cc",
+ "note": "Static convenience snapshot of the PUBLIC mandate-acts feed. Not a trust root: check any row against a mesh node via /record/{record_id} and /mandate/status/{record_id}, or fully offline with elara-verify."
+}

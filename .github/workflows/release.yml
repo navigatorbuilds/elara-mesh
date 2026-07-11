@@ -1,0 +1,425 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+# Permissions explained:
+#   contents: write      — create GitHub release + upload assets
+#   id-token: write      — allow OIDC token issuance (needed by attest-build-provenance)
+#   attestations: write  — write SLSA build attestations to GitHub's attestation store
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    # Inert on the private upstream — releases are cut only from the public
+    # mirror, so the SLSA attestations bind to navigatorbuilds/elara-mesh
+    # (matching the verify instructions in the release body + VERIFY.md).
+    if: github.repository == 'navigatorbuilds/elara-mesh'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            features: node
+            bins: --bin elara-node --bin elara-cli
+            archive: elara-node-linux-x86_64.tar.gz
+            pack: "elara-node elara-cli elara-verify"
+
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            features: node
+            bins: --bin elara-node --bin elara-cli
+            archive: elara-node-linux-aarch64.tar.gz
+            pack: "elara-node elara-cli elara-verify"
+            cross: true
+
+          # v0.2.0: mac/windows native builds are OPTIONAL. The cross-platform
+          # port landed 2026-07-11 (every libc/std::os::unix site is #[cfg(unix)]-
+          # gated with documented off-unix fallbacks; elara-node + elara-verify
+          # cross-check at 0 errors for x86_64-pc-windows-gnu). These legs stay
+          # optional because compile-checked ≠ runtime-tested on native mac/win
+          # hardware — Linux remains the shipped, release-gating platform, and
+          # the job-level continue-on-error keeps the release green on Linux.
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            features: node
+            bins: --bin elara-node --bin elara-cli
+            archive: elara-node-macos-aarch64.tar.gz
+            pack: "elara-node elara-cli elara-verify"
+            optional: true
+
+          # Intel Macs (pre-2020) — cross-built on the arm64 macos-latest runner
+          # (Apple's toolchain builds both slices). This leg is BEST-EFFORT: its
+          # artifact is deliberately NOT in the release `files:`/SHA256SUMS lists
+          # (Apple Silicon is the shipped mac target). `optional: true` + the
+          # job-level `continue-on-error` below make its failure a no-op for the
+          # build job's conclusion — WITHOUT that, `fail-fast:false` still leaves
+          # the job marked failed, and `release` (needs: build, success()-gated)
+          # would be SKIPPED, sinking the whole release over a non-shipped slice.
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            features: node
+            bins: --bin elara-node --bin elara-cli
+            archive: elara-node-macos-x86_64.tar.gz
+            pack: "elara-node elara-cli elara-verify"
+            optional: true
+
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            features: node-windows
+            bins: --bin elara-node
+            archive: elara-node-windows-x86_64.zip
+            # NOTE: comma-separated — this string is spliced into PowerShell
+            # `Compress-Archive -Path <pack>`, which takes a comma-list (the
+            # Unix legs splice into `tar czf … <pack>`, which takes spaces).
+            pack: "elara-node.exe,elara-verify.exe"
+            optional: true   # compiles (cfg(unix) port landed); untested on native Windows — keep non-gating
+
+    runs-on: ${{ matrix.os }}
+    # Only the `optional: true` matrix leg (Intel Mac) may fail without failing
+    # the job; all shipped-platform legs still hard-gate the release. This is the
+    # documented "a failure here never blocks the other artifacts" contract,
+    # actually enforced (fail-fast:false alone did NOT enforce it).
+    continue-on-error: ${{ matrix.optional || false }}
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      # Linux x86_64: install system deps for C libraries (rocksdb, oqs, aws-lc-rs)
+      - name: Install Linux deps
+        if: matrix.os == 'ubuntu-latest' && !matrix.cross
+        run: sudo apt-get update && sudo apt-get install -y build-essential cmake clang pkg-config libssl-dev
+
+      # Linux aarch64: use cross for cross-compilation
+      - name: Install cross
+        if: matrix.cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      # macOS: cmake needed for some C deps
+      - name: Install macOS deps
+        if: matrix.os == 'macos-latest'
+        run: brew install cmake
+
+      # Windows: cmake + LLVM for aws-lc-rs
+      - name: Install Windows deps
+        if: matrix.os == 'windows-latest'
+        run: choco install cmake llvm -y
+
+      # Build: native or cross. Native builds go through `cargo auditable`, which
+      # embeds the exact dependency tree (crate versions + sources) into the binary,
+      # so an operator can run `cargo audit bin elara-node` on a downloaded release
+      # and re-scan it against advisories published AFTER the build — a runtime
+      # complement to the build-time cargo-deny gate (ci.yml) and the SLSA build-
+      # provenance attestation below. The cross (aarch64-linux) target stays on a
+      # plain `cross build`: cargo-auditable's rustc wrapper does not compose with
+      # cross's container toolchain, and that one un-embedded artifact is still
+      # covered by the build-time deny gate + provenance attestation.
+      - name: Install cargo-auditable (native)
+        if: '!matrix.cross'
+        run: cargo install cargo-auditable --locked
+
+      - name: Build (cross)
+        if: matrix.cross
+        run: cross build --release --features ${{ matrix.features }} --target ${{ matrix.target }} ${{ matrix.bins }}
+
+      - name: Build (native, auditable)
+        if: '!matrix.cross'
+        run: cargo auditable build --release --features ${{ matrix.features }} --target ${{ matrix.target }} ${{ matrix.bins }}
+
+      # Offline verifier, built with ONLY `verify-cli` (pure Rust — kept out of
+      # the liboqs/rocksdb graph, Cargo.toml) so the node/cli artifacts above are
+      # byte-identical to a matrix without this step (Option B,
+      # docs/design-briefs/ship-verifier-in-releases.md). Linux binaries are
+      # glibc-dynamic (gnu target); a musl static build is a possible follow-up.
+      - name: Build offline verifier (cross)
+        if: matrix.cross
+        run: cross build --release --features verify-cli --bin elara-verify --target ${{ matrix.target }}
+
+      - name: Build offline verifier (native, auditable)
+        if: '!matrix.cross'
+        run: cargo auditable build --release --features verify-cli --bin elara-verify --target ${{ matrix.target }}
+
+      # Package: tar.gz for Unix, zip for Windows
+      - name: Package (Unix)
+        if: matrix.os != 'windows-latest'
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar czf ../../../${{ matrix.archive }} ${{ matrix.pack }}
+          cd ../../..
+
+      - name: Package (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          cd target/${{ matrix.target }}/release
+          Compress-Archive -Path ${{ matrix.pack }} -DestinationPath ../../../${{ matrix.archive }}
+          cd ../../..
+
+      # Attest before upload: the attestation is computed from the file's SHA256
+      # digest on disk; it does not depend on the artifact store. Attesting first
+      # makes the intent clear — the artifact is endorsed by CI before it is
+      # shared. Verifiable after download with:
+      #   gh attestation verify <file> --repo navigatorbuilds/elara-mesh
+      - name: Attest archive provenance
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: ${{ matrix.archive }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.archive }}
+          path: ${{ matrix.archive }}
+
+      # Software Bill of Materials: a standalone, machine-readable inventory of
+      # every crate in the released binaries' dependency closure, in both
+      # CycloneDX 1.6 and SPDX 2.3 JSON. Complements `cargo auditable` (which
+      # embeds the tree INSIDE the binary) with the FILE form that supply-chain
+      # scanners (Dependency-Track, Grype, OSV-Scanner) and grant/enterprise
+      # intake ingest directly. Generated once on this leg — the dependency graph
+      # is resolved from Cargo.lock and is therefore target-independent.
+      - name: Generate SBOM (CycloneDX + SPDX)
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: |
+          cargo install cargo-sbom --locked --version 0.10.0
+          ./scripts/generate-sbom.sh
+
+      - name: Attest SBOM provenance
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: |
+            elara-sbom.cdx.json
+            elara-sbom.spdx.json
+
+      - name: Upload SBOM artifacts
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        uses: actions/upload-artifact@v4
+        with:
+          name: elara-sbom
+          path: |
+            elara-sbom.cdx.json
+            elara-sbom.spdx.json
+
+      # Build AppImage for Linux x86_64 (single-file double-click installer).
+      - name: Build AppImage (Linux x86_64)
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: |
+          sudo apt-get install -y imagemagick libfuse2
+          mkdir -p target/release
+          cp target/${{ matrix.target }}/release/elara-node target/release/elara-node
+          chmod +x target/release/elara-node
+          bash packaging/appimage/build.sh
+          mv dist/Elara_Node-x86_64.AppImage Elara_Node-x86_64.AppImage
+
+      - name: Attest AppImage provenance
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: Elara_Node-x86_64.AppImage
+
+      - name: Upload AppImage artifact
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Elara_Node-x86_64.AppImage
+          path: Elara_Node-x86_64.AppImage
+
+      # Build NSIS installer for Windows x86_64.
+      - name: Build NSIS installer (Windows x86_64)
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        shell: pwsh
+        run: |
+          choco install nsis -y --no-progress
+          $version = "${{ github.ref_name }}".TrimStart('v')
+          if (-not $version) { $version = "0.2.0" }
+          # NSIS resolves relative File/OutFile paths against the .nsi script's
+          # directory (packaging\windows\), NOT makensis's cwd — root-relative
+          # defines silently miss (v0.2.1 run 29143432187: "no files found").
+          # Absolute paths are immune; OUT_PATH must land at the workspace root
+          # where the attest + upload steps expect it.
+          & "C:\Program Files (x86)\NSIS\makensis.exe" `
+            /DBIN_PATH="$env:GITHUB_WORKSPACE\target\${{ matrix.target }}\release\elara-node.exe" `
+            /DOUT_PATH="$env:GITHUB_WORKSPACE\Elara_Node_Setup-x86_64.exe" `
+            /DVERSION="$version" `
+            packaging\windows\elara-node.nsi
+
+      - name: Attest NSIS installer provenance
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: Elara_Node_Setup-x86_64.exe
+
+      - name: Upload NSIS installer artifact
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Elara_Node_Setup-x86_64.exe
+          path: Elara_Node_Setup-x86_64.exe
+
+  release:
+    needs: build
+    if: github.repository == 'navigatorbuilds/elara-mesh'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      # Generate SHA256SUMS over all release artifacts.
+      # This file is itself attached to the release so downloaders can verify
+      # integrity without trusting any third-party tool:
+      #   sha256sum -c SHA256SUMS
+      - name: Generate SHA256SUMS
+        run: |
+          set -euo pipefail
+          # The macOS/Windows build legs are `optional: true` (continue-on-error)
+          # until the cross-platform port lands — their artifacts are ABSENT in a
+          # Linux-only release. Checksum whatever actually downloaded, and skip
+          # the missing optional ones with a log line (no silent truncation). But
+          # the primary Linux binary is REQUIRED — an empty/Linux-less release is
+          # a genuine failure, not a skippable optional, so hard-fail on it.
+          candidates=(
+            elara-node-linux-x86_64.tar.gz
+            elara-node-linux-aarch64.tar.gz
+            elara-node-macos-aarch64.tar.gz
+            elara-node-windows-x86_64.zip
+            Elara_Node-x86_64.AppImage
+            Elara_Node_Setup-x86_64.exe
+            elara-sbom.cdx.json
+            elara-sbom.spdx.json
+          )
+          if [ ! -f elara-node-linux-x86_64.tar.gz ]; then
+            echo "FATAL: required artifact elara-node-linux-x86_64.tar.gz is missing" >&2
+            exit 1
+          fi
+          present=()
+          for f in "${candidates[@]}"; do
+            if [ -f "$f" ]; then present+=("$f"); else echo "skip absent optional artifact: $f"; fi
+          done
+          sha256sum "${present[@]}" > SHA256SUMS
+          echo "--- SHA256SUMS (${#present[@]} artifacts) ---"
+          cat SHA256SUMS
+
+      # Attest the SHA256SUMS file so the full verify chain works:
+      #   gh attestation verify SHA256SUMS --repo navigatorbuilds/elara-mesh
+      # This lets a downloader confirm the digest manifest itself came from CI,
+      # not just the individual artifacts.
+      - name: Attest SHA256SUMS provenance
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: SHA256SUMS
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          body: |
+            ## Verifying downloads
+
+            Full instructions and trust-model notes: [VERIFY.md](https://github.com/navigatorbuilds/elara-mesh/blob/main/VERIFY.md)
+
+            ### Option A — SHA256 checksum (integrity, no tool required)
+            ```bash
+            sha256sum -c SHA256SUMS
+            ```
+            All files should print `OK`. This confirms your download is bit-identical
+            to what was published and was not corrupted in transit.
+
+            ### Option B — GitHub build attestation (stronger: proves what built it)
+            Requires the [GitHub CLI](https://cli.github.com/) (`gh`).
+            ```bash
+            # Verify any individual artifact:
+            gh attestation verify elara-node-linux-x86_64.tar.gz \
+              --repo navigatorbuilds/elara-mesh
+
+            # Or verify the SHA256SUMS manifest itself:
+            gh attestation verify SHA256SUMS \
+              --repo navigatorbuilds/elara-mesh
+            ```
+            Exit 0 means the file was built/generated by this repository's release
+            workflow from the exact tagged commit, inside a GitHub-hosted runner.
+            Replace the filename with whichever artifact you downloaded. Attestations
+            are stored in GitHub's public transparency log, independent of release
+            asset storage — they remain verifiable even if the release is deleted.
+
+            ### Software Bill of Materials (SBOM)
+            Two standalone dependency manifests are attached, inventorying every
+            crate in the dependency closure of `elara-node`/`elara-cli`/`elara-verify`:
+            - `elara-sbom.cdx.json` — CycloneDX 1.6
+            - `elara-sbom.spdx.json` — SPDX 2.3
+
+            Feed either to a supply-chain scanner (Dependency-Track, Grype,
+            OSV-Scanner, Trivy) to audit dependencies against advisory databases.
+            Both are reproducible from source — `scripts/generate-sbom.sh` runs
+            the exact commands this release used, so you can regenerate and
+            byte-compare:
+            ```bash
+            ./scripts/generate-sbom.sh
+            sha256sum -c SHA256SUMS   # the elara-sbom.* lines should print OK
+            ```
+            The SBOM files are also build-attested (Option B above), and the
+            binaries embed the same dependency tree via `cargo auditable`
+            (`cargo audit bin elara-node`) for runtime re-scanning.
+
+            ### Note on signing keys and post-quantum honesty
+            These release binaries are not signed with a maintainer key (GPG/minisign).
+            The reason: Elara uses Dilithium3 + SPHINCS+/SLH-DSA for all on-chain
+            signatures, but no mature SPHINCS+-based release-signing toolchain exists
+            yet outside the protocol itself. Signing with Ed25519 (classical) would
+            be dishonest for a post-quantum project. The GitHub build attestation
+            above serves as the verifiable trust anchor instead — it requires no
+            long-lived classical key and the binding to source is cryptographically
+            enforced by GitHub's OIDC infrastructure. A native SPHINCS+ release-signing
+            path using Elara's own verifier is on the roadmap.
+
+            ### Note on OS security warnings (Windows SmartScreen / macOS Gatekeeper)
+            The Windows installer (`Elara_Node_Setup-x86_64.exe`) and macOS archive
+            are **not** signed with commercial OS vendor certificates (Windows
+            Authenticode / Apple Developer notarization). These certificates cost
+            money and are incompatible with the project's free-and-open-source
+            distribution model.
+
+            **Windows:** SmartScreen may show "Windows protected your PC" on first
+            run. Click "More info" → "Run anyway". Alternatively, verify the build
+            attestation first (Option B above), then right-click → Properties →
+            Unblock → OK before running.
+
+            **macOS:** Gatekeeper may say the app "cannot be opened because the
+            developer cannot be verified". In System Settings → Privacy & Security,
+            click "Open Anyway". Alternatively, from Terminal:
+            ```bash
+            xattr -d com.apple.quarantine elara-node-macos-aarch64.tar.gz
+            ```
+            The build attestation is a stronger assurance than a commercial cert —
+            it proves the binary was compiled from this exact source commit in a
+            clean CI environment, not merely that someone paid a CA for a code-signing
+            voucher.
+
+          files: |
+            elara-node-linux-x86_64.tar.gz
+            elara-node-linux-aarch64.tar.gz
+            elara-node-macos-aarch64.tar.gz
+            elara-node-windows-x86_64.zip
+            Elara_Node-x86_64.AppImage
+            Elara_Node_Setup-x86_64.exe
+            elara-sbom.cdx.json
+            elara-sbom.spdx.json
+            SHA256SUMS

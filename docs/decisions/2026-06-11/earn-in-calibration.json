@@ -1,0 +1,11 @@
+{
+ "kind": "design_decision",
+ "project": "elara-protocol",
+ "date": "2026-06-11",
+ "decision": "earn-in-calibration",
+ "statement": "Citizenship clock recalibrated to institutional time (Nenad: '3 months are joke'): full consensus weight at 12 months sustained presence (time AND work AND ~80% epoch consistency), non-linear ramp (weightless first quarter), weight decays on absence (trust maintained, never owned). Credits/rewards flow from day one - rewards fast, power slow. Time+consistency are the entire sybil cost since capital purchase is removed by design.",
+ "decided_by": "Nenad Vasic (correction), Elara (mechanism)",
+ "refs": [
+  "docs/EARN-IN-ECONOMY.md"
+ ]
+}

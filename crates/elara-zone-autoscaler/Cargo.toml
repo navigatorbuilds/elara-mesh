@@ -1,0 +1,13 @@
+[package]
+name = "elara-zone-autoscaler"
+version = "0.1.0"
+edition = "2021"
+description = "Hysteresis-based adaptive sharding decision engine — recommends zone split/merge from a per-zone activity snapshot. Dependency-free, generic over the zone-id type. Extracted from the Elara Protocol node."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/navigatorbuilds/elara-mesh"
+readme = "README.md"
+keywords = ["sharding", "autoscaling", "hysteresis", "load-balancing"]
+categories = ["algorithms"]
+
+[dependencies]
+# Intentionally none — this is a pure-std decision engine.

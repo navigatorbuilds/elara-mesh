@@ -1,0 +1,37 @@
+[package]
+name = "elara-light-client"
+version = "0.1.0"
+edition = "2021"
+description = "Stateless, wasm-portable light-client verification for the Elara Protocol: fold a compressed 256-bit account-SMT inclusion OR non-membership proof back to a signed root, bind it to an epoch header, and check a state-delta against a trusted seal. No I/O, no async, no node runtime. Extracted from the Elara Protocol node."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/navigatorbuilds/elara-mesh"
+readme = "README.md"
+keywords = ["light-client", "merkle-proof", "verification", "post-quantum", "wasm"]
+categories = ["cryptography", "wasm", "algorithms"]
+
+[dependencies]
+# SHA3-256 for the SMT path/leaf hashing — pinned to the workspace minor so the
+# verifier folds proofs byte-identically to the node that produced them. This is
+# the only crypto dependency; signature verification (Dilithium3) stays in the
+# node, which owns the `ValidationRecord` wire type.
+sha3 = "0.10"
+# Proof/header/binding types deserialize from whatever serde format the caller's
+# transport delivers (REST JSON hex-strings or in-process Rust byte arrays).
+serde = { version = "1", features = ["derive"] }
+# State-delta binding roots arrive hex-encoded inside the signed delta payload.
+hex = "0.4"
+
+[dev-dependencies]
+# Wire round-trip tests parse live REST JSON shapes. float_roundtrip keeps f64
+# fields (LiteEpochHeader.start/end) bit-exact across a JSON round-trip — without
+# it ~12% of values shift 1 ULP and the round-trip assertions flake.
+serde_json = { version = "1", features = ["float_roundtrip"] }
+# The offline_verify example builds a REAL account-SMT proof with the sibling
+# engine, then verifies it here — proving the two crates' 256-level fold is
+# byte-compatible. Dev-only: the library itself re-implements the fold to stay
+# wasm-minimal, so this is not a runtime dependency. `path` resolves it from the
+# workspace for CI/clones; `version` makes the PUBLISHED manifest carry a real
+# registry dep (`elara-smt = "0.1.0"`) so the shipped example compiles for a
+# crates.io consumer — a version-less path dep is silently dropped on publish,
+# which breaks the example. Publish ordering: release elara-smt before this crate.
+elara-smt = { path = "../elara-smt", version = "0.1.0" }

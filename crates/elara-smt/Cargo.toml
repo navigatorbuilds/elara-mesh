@@ -1,0 +1,20 @@
+[package]
+name = "elara-smt"
+version = "0.1.0"
+edition = "2021"
+description = "Key-addressed sparse Merkle tree (256-bit path, SHA3-256, identity-bound domain-separated leaves) with empty-subtree-compressed inclusion AND non-membership proofs (~log2(N) siblings), generic over a pluggable key-value store. Extracted from the Elara Protocol node."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/navigatorbuilds/elara-mesh"
+readme = "README.md"
+keywords = ["merkle", "sparse-merkle-tree", "smt", "proof", "authenticated"]
+categories = ["data-structures", "cryptography", "algorithms"]
+
+[dependencies]
+# SHA3-256 for node/leaf hashing — the only crypto dependency. The proof and
+# node types also derive serde for transporting proofs over any serde format.
+sha3 = "0.10"
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+# Proof serde round-trip test only.
+serde_json = "1"

@@ -1,0 +1,520 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Elara — verify it yourself</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --border: #30363d; --fg: #e6edf3;
+    --muted: #8b949e; --pass: #3fb950; --partial: #d29922; --fail: #f85149;
+    --accent: #58a6ff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 15px/1.55 ui-monospace, SFMono-Regular, "DejaVu Sans Mono", Menlo, monospace;
+    padding: 2rem 1rem;
+  }
+  main { max-width: 820px; margin: 0 auto; }
+  h1 { font-size: 1.6rem; margin: 0 0 .25rem; letter-spacing: -0.01em; }
+  .tag { color: var(--accent); }
+  .lede { color: var(--muted); margin: 0 0 1.5rem; max-width: 60ch; }
+  .lede strong { color: var(--fg); }
+  textarea {
+    width: 100%; min-height: 190px; background: var(--panel); color: var(--fg);
+    border: 1px solid var(--border); border-radius: 8px; padding: .8rem;
+    font: inherit; resize: vertical;
+  }
+  .row { display: flex; gap: .6rem; margin: .8rem 0 0; flex-wrap: wrap; }
+  button {
+    background: var(--accent); color: #0d1117; border: 0; border-radius: 6px;
+    padding: .55rem 1.1rem; font: inherit; font-weight: 600; cursor: pointer;
+  }
+  button.ghost { background: transparent; color: var(--accent); border: 1px solid var(--border); }
+  button:disabled { opacity: .5; cursor: progress; }
+  #verdict {
+    margin: 1.5rem 0 .5rem; padding: 1rem 1.2rem; border-radius: 8px;
+    border: 1px solid var(--border); background: var(--panel);
+    display: none; align-items: center; gap: .9rem;
+  }
+  #verdict .glyph { font-size: 2.2rem; line-height: 1; }
+  #verdict .label { font-size: 1.25rem; font-weight: 700; letter-spacing: .04em; }
+  #verdict.v-verified { border-color: var(--pass); } #verdict.v-verified .glyph, #verdict.v-verified .label { color: var(--pass); }
+  #verdict.v-partial  { border-color: var(--partial); } #verdict.v-partial .glyph, #verdict.v-partial .label { color: var(--partial); }
+  #verdict.v-failed   { border-color: var(--fail); } #verdict.v-failed .glyph, #verdict.v-failed .label { color: var(--fail); }
+  #verdict .sub { color: var(--muted); font-size: .85rem; margin-left: auto; text-align: right; }
+  .check { display: flex; gap: .7rem; padding: .55rem .2rem; border-bottom: 1px solid var(--border); }
+  .check:last-child { border-bottom: 0; }
+  .check .g { font-size: 1.1rem; width: 1.2rem; flex: none; text-align: center; }
+  .check .g.pass { color: var(--pass); } .check .g.partial { color: var(--partial); } .check .g.fail { color: var(--fail); }
+  .check .name { font-weight: 600; width: 11rem; flex: none; }
+  .check .detail { color: var(--muted); word-break: break-word; }
+  hr.sep { border: 0; border-top: 1px solid var(--border); margin: 3rem 0 2rem; }
+  .facts { margin: .8rem 0 0; }
+  .facts .f { display: flex; gap: .7rem; padding: .35rem .2rem; }
+  .facts .f .k { color: var(--muted); width: 11rem; flex: none; }
+  .facts .f .val { word-break: break-all; }
+  .lineage { margin: .8rem 0 0; padding: .8rem 1rem; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; }
+  .lineage .hop { padding: .3rem 0; color: var(--muted); }
+  .lineage .hop b { color: var(--fg); }
+  .caveats {
+    margin: 1rem 0 0; padding: .85rem 1rem; border-radius: 8px;
+    border: 1px solid var(--partial); background: rgba(210,153,34,.08);
+  }
+  .caveats h4 { margin: 0 0 .5rem; color: var(--partial); font-size: .85rem; letter-spacing: .03em; text-transform: uppercase; }
+  .caveats li { color: var(--fg); margin: .35rem 0; font-size: .88rem; }
+  footer { color: var(--muted); font-size: .82rem; margin-top: 2.2rem; border-top: 1px solid var(--border); padding-top: 1rem; }
+  code { color: var(--accent); }
+  a { color: var(--accent); }
+  .headline {
+    display: none; margin: .5rem 0 0; padding: .6rem .9rem; border-radius: 8px;
+    border: 1px dashed var(--border); color: var(--fg); font-size: .92rem;
+  }
+  textarea.pins { min-height: 72px; margin-top: .6rem; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Elara — <span class="tag">verify it yourself</span></h1>
+  <p class="lede">
+    Paste a validation record below and check it <strong>in your browser</strong> —
+    no server, no network, no account, and no trust in us. The same code the
+    <code>elara-verify</code> CLI runs, compiled to WebAssembly. It confirms the
+    post-quantum signature and identity binding, and it
+    <strong>never prints a green it can't prove</strong>: an unproven bound shows
+    <span style="color:var(--partial)">⚠&nbsp;PARTIAL</span>, a forged one shows
+    <span style="color:var(--fail)">✗&nbsp;FAILED</span>.
+  </p>
+  <p class="lede" style="margin-top:-0.9rem">
+    This box checks the record's own integrity — structure, identity binding, and
+    the post-quantum signature. To check a record <em>against the chain</em> —
+    epoch seal, inclusion, a drand time beacon — paste a
+    <strong>receipt</strong> in the next section, or use the
+    <code>elara-verify</code> CLI (<code>--inclusion</code> / <code>--seal</code> /
+    <code>--anchor</code>; Bitcoin <code>.ots</code> proofs are CLI-only).
+  </p>
+
+  <textarea id="input" spellcheck="false" placeholder='Paste a ValidationRecord JSON here…'></textarea>
+  <div class="row">
+    <button id="verify" disabled>Loading verifier…</button>
+    <button id="example" class="ghost" type="button">Load real record</button>
+    <button id="tampered" class="ghost" type="button">Tamper one byte</button>
+    <button id="clear" class="ghost" type="button">Clear</button>
+  </div>
+
+  <div id="verdict">
+    <span class="glyph"></span>
+    <span class="label"></span>
+    <span class="sub"></span>
+  </div>
+  <div id="headline" class="headline"></div>
+  <div id="checks"></div>
+
+  <hr class="sep" />
+
+  <h1>…the <span class="tag">whole chain, one file</span></h1>
+  <p class="lede">
+    A <strong>receipt</strong> (<code>.elara-receipt</code>) bundles the evidence
+    for one verification — the signed record, the epoch seal, inclusion and
+    account proofs — so "check it yourself" is <strong>one file</strong>. Paste
+    it and the same shared core grades every leg <em>and the cryptographic links
+    between them</em>, offline: post-quantum signatures, seal commitments, and a
+    drand not-before beacon whose BLS signature is verified <strong>in your
+    browser</strong> against the pinned League-of-Entropy key. (Bitcoin
+    <code>.ots</code> existed-by proofs don't ride in receipts — that leg is
+    graded by the CLI, and shows here as an honest
+    <span style="color:var(--partial)">⚠</span>.)
+  </p>
+  <p class="lede" style="margin-top:-0.9rem">
+    <strong>Trust pins come from you, never from the receipt.</strong> A receipt
+    that vouched for its own trust root would prove nothing, so without a pinned
+    anchor key the seal grades
+    <span style="color:var(--partial)">⚠&nbsp;PARTIAL</span> — honestly. The
+    sample button — and the "verify this" links on the
+    <a href="../receipts.html">receipts page</a> — fill the pin with the repo's
+    zone-0 anchor key for the demo; in real use you obtain that key from a
+    source you already trust. Try "Drop the pins" to watch the verdict
+    downgrade rather than lie.
+  </p>
+  <p class="lede" id="act-note" style="display:none;margin-top:-0.9rem"></p>
+
+  <textarea id="rinput" spellcheck="false" placeholder='Paste an .elara-receipt (v1 JSON envelope) here…'></textarea>
+  <textarea id="rpins" class="pins" spellcheck="false" placeholder='Trust pins, optional JSON — {"trusted_anchor": ["<anchor pubkey hex from a source YOU trust>"], "expected_hash": "…", "expect_root": "…", "expect_identity": "…"}'></textarea>
+  <div class="row">
+    <button id="rverify" disabled>Loading verifier…</button>
+    <button id="r-sample" class="ghost" type="button">Load sample receipt</button>
+    <button id="r-nopins" class="ghost" type="button">Drop the pins</button>
+    <button id="rclear" class="ghost" type="button">Clear</button>
+  </div>
+
+  <div id="rverdict">
+    <span class="glyph"></span>
+    <span class="label"></span>
+    <span class="sub"></span>
+  </div>
+  <div id="rheadline" class="headline"></div>
+  <div id="rfacts" class="facts"></div>
+  <div id="rchecks"></div>
+
+  <hr class="sep" />
+
+  <h1>…and <span class="tag">who was authorized</span></h1>
+  <p class="lede">
+    A timestamp proves <em>these bytes existed</em>. A signature proves
+    <em>this key signed them</em>. Neither can answer the question that matters
+    for an autonomous agent: <strong>was this agent authorized to act — by whom,
+    for what, and was that authority still valid when it signed?</strong> Paste a
+    <strong>mandate bundle</strong> and check that chain <strong>offline, in your
+    browser</strong> — the same verdict the node's <code>/mandate/status</code>
+    endpoint computes.
+  </p>
+  <p class="lede" style="margin-top:-0.9rem">
+    A <span style="color:var(--pass)">✓&nbsp;CONSISTENT</span> result proves the
+    signatures and that authority held at the act's signed time
+    <strong>given the records in this bundle</strong>. It is deliberately
+    <strong>not</strong> labelled "authorized": offline it cannot prove the
+    records are on-chain or that a revocation wasn't withheld — that is the live
+    node's answer. The named principal is shown
+    <strong>only when the verdict attributes to them</strong> (an impostor's act
+    exonerates them).
+  </p>
+
+  <textarea id="minput" spellcheck="false" placeholder='Paste a mandate bundle JSON here…'></textarea>
+  <div class="row">
+    <button id="mverify" disabled>Loading verifier…</button>
+    <button id="m-valid" class="ghost" type="button">Authorized agent</button>
+    <button id="m-impostor" class="ghost" type="button">Impostor</button>
+    <button id="m-revoked" class="ghost" type="button">After revocation</button>
+    <button id="m-tamper" class="ghost" type="button">Tamper the act</button>
+    <button id="mclear" class="ghost" type="button">Clear</button>
+  </div>
+
+  <div id="mverdict">
+    <span class="glyph"></span>
+    <span class="label"></span>
+    <span class="sub"></span>
+  </div>
+  <div id="mfacts" class="facts"></div>
+  <div id="mlineage"></div>
+  <div id="mcaveats"></div>
+  <div id="mchecks"></div>
+
+  <footer>
+    Runs entirely client-side via <code>verify_record_offline()</code> /
+    <code>verify_receipt_offline()</code> in the Elara verify-only WASM module —
+    <strong>no wallet, no secret keys, no signing, and no network code</strong>
+    is linked into this binary (the separate web-wallet build is far larger).
+    The logic is <code>elara_runtime::verify_core</code> — including
+    <code>grade::{grade_receipt_v1, bind_outcomes}</code>, the identical
+    node-free sequence <code>elara-verify --receipt</code> runs — so neither
+    verdict here can drift from the CLI's; the drand not-before leg verifies the
+    beacon's BLS signature against the pinned League-of-Entropy key
+    (<code>verify_core::anchor</code>). The authorization check is
+    <code>evaluate_mandate_bundle()</code> over
+    <code>elara_runtime::mandate_bundle</code> — the same pure verdict core the
+    node's <code>/mandate/status</code> endpoint runs. Build it yourself from the
+    repo root with
+    <code>wasm-pack build --target web -d ../browser-node/verify-demo/pkg verify-wasm</code>
+    and diff the wasm to confirm it matches what runs here.
+    <br /><br />
+    The verifier is MIT/Apache-2.0-licensed (the <code>elara-verify</code> +
+    <code>elara-record</code> crates — no AGPL node code links into this wasm);
+    its complete source is the public Elara repository this page is built from.
+  </footer>
+</main>
+
+<script type="module">
+  // The glue is generated by `wasm-pack build --target web -d ../browser-node/verify-demo/pkg verify-wasm`.
+  import init, { verify_record_offline, verify_receipt_offline, evaluate_mandate_bundle } from "./pkg/elara_verify_wasm.js";
+
+  const $ = (id) => document.getElementById(id);
+  const verifyBtn = $("verify");
+  const rverifyBtn = $("rverify");
+  const mverifyBtn = $("mverify");
+  const short = (h) => (h && h.length > 16 ? h.slice(0, 16) + "…" : h);
+
+  init().then(() => {
+    verifyBtn.disabled = false;
+    verifyBtn.textContent = "Verify";
+    rverifyBtn.disabled = false;
+    rverifyBtn.textContent = "Verify receipt";
+    mverifyBtn.disabled = false;
+    mverifyBtn.textContent = "Check authorization";
+  }).catch((e) => {
+    verifyBtn.textContent = "verifier failed to load";
+    rverifyBtn.textContent = "verifier failed to load";
+    mverifyBtn.textContent = "verifier failed to load";
+    console.error(e);
+  });
+
+  // Shared renderer for the record and receipt sections: verdict box, the
+  // gates-driven headline (the SAME sentence the CLI leads with), check rows.
+  function renderInto(prefix, res) {
+    const v = $(prefix + "verdict");
+    const cls = { VERIFIED: "v-verified", PARTIAL: "v-partial", FAILED: "v-failed" }[res.verdict] || "v-failed";
+    v.className = cls;
+    v.style.display = "flex";
+    v.querySelector(".glyph").textContent = res.glyph;
+    v.querySelector(".label").textContent = res.verdict;
+    v.querySelector(".sub").textContent = res.reason === "ok"
+      ? "offline · post-quantum · no server"
+      : res.reason;
+
+    const hl = $(prefix + "headline");
+    if (hl) {
+      hl.textContent = res.headline || "";
+      hl.style.display = res.headline ? "block" : "none";
+    }
+
+    const box = $(prefix + "checks");
+    box.innerHTML = "";
+    for (const c of res.checks || []) {
+      const row = document.createElement("div");
+      row.className = "check";
+      row.innerHTML =
+        `<span class="g ${c.status}">${c.glyph}</span>` +
+        `<span class="name"></span><span class="detail"></span>`;
+      row.querySelector(".name").textContent = c.name;
+      row.querySelector(".detail").textContent = c.detail;
+      box.appendChild(row);
+    }
+  }
+  const render = (res) => renderInto("", res);
+
+  verifyBtn.addEventListener("click", () => {
+    try {
+      render(verify_record_offline($("input").value));
+    } catch (e) {
+      render({ verdict: "FAILED", glyph: "✗", checks: [], reason: String(e) });
+    }
+  });
+
+  $("clear").addEventListener("click", () => {
+    $("input").value = "";
+    $("verdict").style.display = "none";
+    $("checks").innerHTML = "";
+  });
+
+  // A real signed record (Profile A — dual Dilithium3 + SPHINCS+) harvested from
+  // the live chain (examples/verify/sample-record.json). Fetched, not inlined, so
+  // "view source" stays readable; the verification still runs entirely in-browser.
+  let sampleCache = null;
+  async function loadSample() {
+    if (sampleCache === null) sampleCache = await (await fetch("./sample-record.json")).text();
+    return sampleCache;
+  }
+  const resetVerdict = () => { $("verdict").style.display = "none"; $("checks").innerHTML = ""; };
+  const loadErr = "// could not load sample-record.json — serve this page over HTTP\n// (the wasm module also requires it): python3 -m http.server, then open localhost:8000";
+
+  $("example").addEventListener("click", async () => {
+    try { $("input").value = await loadSample(); resetVerdict(); }
+    catch (e) { $("input").value = loadErr; }
+  });
+
+  // Flip ONE byte of the signed content_hash: the same record that verified now
+  // FAILS — the post-quantum signature catches the change. Tampering is done in
+  // plain sight (parse → mutate → re-stringify) so you can see there's no trick.
+  $("tampered").addEventListener("click", async () => {
+    try {
+      const rec = JSON.parse(await loadSample());
+      if (Array.isArray(rec.content_hash) && rec.content_hash.length) {
+        rec.content_hash[0] = (rec.content_hash[0] + 1) % 256;
+      } else if (Array.isArray(rec.signature) && rec.signature.length) {
+        rec.signature[0] = (rec.signature[0] + 1) % 256;
+      }
+      $("input").value = JSON.stringify(rec, null, 2);
+      resetVerdict();
+    } catch (e) { $("input").value = loadErr; }
+  });
+
+  // ── Receipt verifier (full-chain parity with `elara-verify --receipt`) ───
+  function rrender(res) {
+    renderInto("r", res);
+    // Producer + skipped legs: advisory display, never graded (the core
+    // already capped the verdict for unevaluated legs).
+    const facts = $("rfacts"); facts.innerHTML = "";
+    const addFact = (k, val) => {
+      if (val === undefined || val === null || val === "") return;
+      const row = document.createElement("div"); row.className = "f";
+      row.innerHTML = `<span class="k"></span><span class="val"></span>`;
+      row.querySelector(".k").textContent = k;
+      row.querySelector(".val").textContent = val;
+      facts.appendChild(row);
+    };
+    if (res.producer) addFact("producer (self-declared)", JSON.stringify(res.producer) + "  — advisory; NOT verified by any check");
+    if (res.not_evaluated && res.not_evaluated.length) addFact("legs not evaluated", res.not_evaluated.join(", "));
+  }
+
+  rverifyBtn.addEventListener("click", () => {
+    try {
+      rrender(verify_receipt_offline($("rinput").value, $("rpins").value));
+    } catch (e) {
+      rrender({ verdict: "FAILED", glyph: "✗", headline: "", checks: [], reason: String(e) });
+    }
+  });
+
+  const rreset = () => {
+    $("rverdict").style.display = "none";
+    for (const id of ["rheadline", "rfacts", "rchecks"]) { $(id).innerHTML = ""; }
+    $("rheadline").style.display = "none";
+  };
+  const rLoadErr = "// could not load sample-receipt.json — serve this page over HTTP\n// (the wasm module also requires it): python3 -m http.server, then open localhost:8000";
+
+  let receiptCache = null, receiptPinsCache = null;
+  $("r-sample").addEventListener("click", async () => {
+    try {
+      if (receiptCache === null) receiptCache = await (await fetch("./sample-receipt.json")).text();
+      if (receiptPinsCache === null) receiptPinsCache = await (await fetch("./sample-receipt-pins.json")).text();
+      $("rinput").value = receiptCache;
+      $("rpins").value = receiptPinsCache;
+      rreset();
+    } catch (e) { $("rinput").value = rLoadErr; }
+  });
+
+  // The trust-inversion demo: same receipt, no pins → the seal leg downgrades
+  // to an honest ⚠ PARTIAL instead of trusting the receipt's own contents.
+  $("r-nopins").addEventListener("click", () => { $("rpins").value = ""; rreset(); });
+  $("rclear").addEventListener("click", () => { $("rinput").value = ""; $("rpins").value = ""; rreset(); });
+
+  // ── ?act=<record_id> deep link (from the receipts page) ─────────────────
+  // Prefills the receipt + pins boxes with the REAL maintainer act harvested
+  // into /receipts/<id>.{receipt,pins}.json on this same site (same-origin
+  // static fetch — nothing leaves your machine). The id is validated to a
+  // strict charset and the paths are constructed here — no path or URL is
+  // ever taken from the query string. Verification is NOT auto-run: you
+  // press the button, you read the verdict.
+  (async () => {
+    const act = new URLSearchParams(location.search).get("act");
+    if (!act) return;
+    const note = $("act-note");
+    const section = $("rinput");
+    if (!/^[0-9a-f][0-9a-f-]{6,62}[0-9a-f]$/.test(act)) {
+      note.textContent = "The ?act= link id has an unexpected format — nothing was loaded. Paste a receipt manually below.";
+      note.style.display = "block";
+      return;
+    }
+    try {
+      const [rec, pins] = await Promise.all([
+        fetch(`../receipts/${act}.receipt.json`).then((r) => { if (!r.ok) throw new Error(r.status); return r.text(); }),
+        fetch(`../receipts/${act}.pins.json`).then((r) => (r.ok ? r.text() : "")),
+      ]);
+      $("rinput").value = rec;
+      $("rpins").value = pins;
+      rreset();
+      note.innerHTML = "Loaded the maintainer act <code></code> from this site's receipts feed — " +
+        "<strong>nothing is verified yet</strong>. Press <strong>Verify receipt</strong> and read the verdict; " +
+        "the check runs in your browser only.";
+      note.querySelector("code").textContent = act;
+      note.style.display = "block";
+      section.scrollIntoView({ behavior: "auto", block: "center" });
+    } catch (e) {
+      note.textContent = "Could not load that act's receipt from this site (it may have left the newest-acts window). Paste one manually, or fetch it from any mesh node.";
+      note.style.display = "block";
+    }
+  })();
+
+  // ── Mandate bundle verifier ──────────────────────────────────────────────
+  function mrender(res) {
+    const v = $("mverdict");
+    const cls = { CONSISTENT: "v-verified", "NOT AUTHORIZED": "v-failed", FAILED: "v-failed" }[res.verdict] || "v-failed";
+    v.className = cls;
+    v.style.display = "flex";
+    v.querySelector(".glyph").textContent = res.glyph;
+    v.querySelector(".label").textContent = res.verdict;
+    v.querySelector(".sub").textContent = res.reason === "ok"
+      ? (res.verdict === "CONSISTENT" ? "offline · given this bundle only" : "offline · post-quantum")
+      : res.reason;
+
+    const facts = $("mfacts"); facts.innerHTML = "";
+    const addFact = (k, val) => {
+      if (val === undefined || val === null || val === "") return;
+      const row = document.createElement("div"); row.className = "f";
+      row.innerHTML = `<span class="k"></span><span class="val"></span>`;
+      row.querySelector(".k").textContent = k;
+      row.querySelector(".val").textContent = val;
+      facts.appendChild(row);
+    };
+    if (res.explanation) addFact("verdict", res.explanation);
+    if (res.network) addFact("network", res.network);
+    if (res.signer) addFact("agent (signer)", short(res.signer));
+    // Principal shown ONLY when the core attributes to them (it nulls it otherwise — anti-libel).
+    if (res.principal) addFact("principal", short(res.principal));
+    if (res.act_timestamp_ms) addFact("act signed at", new Date(res.act_timestamp_ms).toISOString() + "  (self-asserted; not anchored offline)");
+    if (res.scope_note) addFact("v0 scope", res.scope_note);
+
+    const lin = $("mlineage"); lin.innerHTML = "";
+    if (res.lineage && res.lineage.length) {
+      const box = document.createElement("div"); box.className = "lineage";
+      box.innerHTML = `<div class="hop" style="color:var(--fg);font-weight:600">verified authority chain (leaf → root)</div>`;
+      for (const h of res.lineage) {
+        const d = document.createElement("div"); d.className = "hop";
+        d.innerHTML = `<b></b> → authorized <b></b> <span style="opacity:.65"></span>`;
+        const bs = d.querySelectorAll("b");
+        bs[0].textContent = short(h.principal); bs[1].textContent = short(h.agent);
+        d.querySelector("span").textContent = `(mandate ${short(h.mandate_id)})`;
+        box.appendChild(d);
+      }
+      lin.appendChild(box);
+    }
+
+    // Honest-scope banner — always shown when there's a verdict.
+    const cav = $("mcaveats"); cav.innerHTML = "";
+    if (res.soundness_caveats && res.soundness_caveats.length) {
+      const box = document.createElement("div"); box.className = "caveats";
+      const h = document.createElement("h4"); h.textContent = "What this offline check does NOT prove";
+      const ul = document.createElement("ul"); ul.style.cssText = "margin:0;padding-left:1.1rem";
+      for (const c of res.soundness_caveats) { const li = document.createElement("li"); li.textContent = c; ul.appendChild(li); }
+      box.appendChild(h); box.appendChild(ul); cav.appendChild(box);
+    }
+
+    const cb = $("mchecks"); cb.innerHTML = "";
+    const glyphFor = (s) => ({ pass: "✓", fail: "✗", info: "•" }[s] || "•");
+    for (const c of res.checks || []) {
+      const row = document.createElement("div"); row.className = "check";
+      row.innerHTML = `<span class="g ${c.status}">${glyphFor(c.status)}</span><span class="name"></span><span class="detail"></span>`;
+      row.querySelector(".name").textContent = c.name;
+      row.querySelector(".detail").textContent = c.detail;
+      cb.appendChild(row);
+    }
+  }
+
+  const mreset = () => { $("mverdict").style.display = "none"; for (const id of ["mfacts","mlineage","mcaveats","mchecks"]) $(id).innerHTML = ""; };
+  const mLoadErr = "// could not load sample-mandate-bundles.json — serve this page over HTTP:\n// python3 -m http.server, then open localhost:8000";
+
+  let mbundles = null;
+  async function loadBundles() {
+    if (mbundles === null) mbundles = await (await fetch("./sample-mandate-bundles.json")).json();
+    return mbundles;
+  }
+  async function loadScenario(key) {
+    try { const b = await loadBundles(); $("minput").value = JSON.stringify(b[key], null, 2); mreset(); }
+    catch (e) { $("minput").value = mLoadErr; }
+  }
+  $("m-valid").addEventListener("click", () => loadScenario("valid"));
+  $("m-impostor").addEventListener("click", () => loadScenario("impostor"));
+  $("m-revoked").addEventListener("click", () => loadScenario("revoked"));
+
+  mverifyBtn.addEventListener("click", () => {
+    try { mrender(evaluate_mandate_bundle($("minput").value)); }
+    catch (e) { mrender({ verdict: "FAILED", glyph: "✗", checks: [], soundness_caveats: [], reason: String(e) }); }
+  });
+  $("mclear").addEventListener("click", () => { $("minput").value = ""; mreset(); });
+
+  // Flip ONE byte of the act's signature: the same bundle that was CONSISTENT
+  // now FAILS — the post-quantum signature catches it. Done in plain sight.
+  $("m-tamper").addEventListener("click", async () => {
+    try {
+      let cur = $("minput").value.trim();
+      if (!cur) { const b = await loadBundles(); cur = JSON.stringify(b.valid); }
+      const bundle = JSON.parse(cur);
+      if (bundle.act && Array.isArray(bundle.act.signature) && bundle.act.signature.length) {
+        bundle.act.signature[0] = (bundle.act.signature[0] + 1) % 256;
+      }
+      $("minput").value = JSON.stringify(bundle, null, 2);
+      mreset();
+    } catch (e) { $("minput").value = mLoadErr; }
+  });
+</script>
+</body>
+</html>

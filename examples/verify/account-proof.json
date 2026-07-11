@@ -1,0 +1,34 @@
+{
+  "account_id": "ada8575c57e1da94057c1a43ea398d4b4be105ff6a0476259b34801f0e4e6c79",
+  "account_state": {
+    "available": 8999000000000000000,
+    "inactive_days": 0,
+    "last_active": 1783330262.8772614,
+    "staked": 1000000000000000,
+    "total_received": 10000000000000000000,
+    "total_sent": 1000000000000000000,
+    "tx_count": 2,
+    "uptime_secs": 0,
+    "vested_locked": 0,
+    "witness_bonded": 0
+  },
+  "bound_to_seal": true,
+  "exists": true,
+  "identity": "ada8575c57e1da94057c1a43ea398d4b4be105ff6a0476259b34801f0e4e6c79",
+  "latest_sealed_account": {
+    "account_smt_root": "64ff9e19339c615db7c118d4872c340b8887988fbc262805b5632e823551899b",
+    "epoch_number": 41340,
+    "matches_proof_root": true,
+    "seal_id": "019f4e50-0e02-7673-8c2e-7b2323ab32b2",
+    "sealed_at": 1783725297.3504307,
+    "zone": "0"
+  },
+  "live_state_matches_sealed": true,
+  "present": "a000000000000000000000000000000000000000000000000000000000000000",
+  "root": "64ff9e19339c615db7c118d4872c340b8887988fbc262805b5632e823551899b",
+  "siblings": [
+    "f0486d642ddf2d950c755917dfb33b9c4bbd1cb0e2825c37e2d3ee11d6ec8f03",
+    "8002a6ac014d3873ab8ca8830ba977fc83907d090fbaac42e5c202084400c02b"
+  ],
+  "state_hash": "fb1a2f22a24ba14248864d824900da9f1ab8d4b0f0061beb449b3f3099864e0f"
+}

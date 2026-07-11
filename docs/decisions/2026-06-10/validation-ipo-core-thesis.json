@@ -1,0 +1,11 @@
+{
+ "kind": "design_decision",
+ "project": "elara-protocol",
+ "date": "2026-06-10",
+ "decision": "validation-ipo-core-thesis",
+ "statement": "Pre/post-IPO scenario (private network for years/decades, then publish) confirmed as core product thesis \u2014 solves public-mesh cold-start via private-first adoption. NETWORK_PUBLISH already specified (whitepaper 10.6.3, tokenomics Part VIII). Two-agent audit of both papers performed same night.",
+ "decided_by": "Nenad (thesis + 'check tokenomics and consensus'), Elara (audit)",
+ "refs": [
+  "docs/REALMS-SELF-ASSEMBLY.md"
+ ]
+}
