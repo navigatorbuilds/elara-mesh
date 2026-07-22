@@ -1,0 +1,125 @@
+# Elara 3-node testnet
+# Usage: docker compose up --build
+#
+# Zero manual steps — entrypoint auto-generates identities, resolves genesis,
+# and stakes the genesis authority (so its epoch seals can finalize).
+#
+# See a record reach finality end-to-end. The mesh seals empty epochs on its
+# own; to watch the full submit → seal → settle → finalize pipeline, emit one
+# record from a NON-staker identity (the sole staker — genesis — cannot attest
+# its own records), then watch elara_finalized_count cross 0:
+#
+#   docker compose exec genesis sh -c '\
+#     elara-node --data-dir /tmp/demo --generate-identity && \
+#     elara-cli --node http://localhost:9473 agent-emit \
+#       --identity /tmp/demo/identity.json --tool Demo --action post \
+#       --args-hash 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
+#   docker compose exec genesis sh -c \
+#     "curl -s localhost:9473/metrics | grep '^elara_finalized_count'"
+#
+# NOTE: only the HTTP port (9473) is published to the host; the PQ port
+# (HTTP+100 = 9573, which the `elara-cli` derives) is NOT. Run the CLI INSIDE a
+# container via `docker compose exec` (as above), not from the host.
+
+# RocksDB fds + the node's connection-admission defaults (pq_serve_concurrency
+# 4096 + http_conn_cap 1024, sized against 65536 in config.rs) exceed the common
+# 1024-fd container default; under real fan-in that strangles a node (EMFILE →
+# gossip goes silently deaf). Dormant at this 3-node local scale, but set so the
+# compose stays mainnet-correct if scaled up or reused as a real self-host base —
+# matches deploy/elara-node.service and the --install-service unit.
+x-node-ulimits: &node-ulimits
+  nofile:
+    soft: 65536
+    hard: 65536
+
+services:
+  genesis:
+    build: .
+    container_name: elara-genesis
+    ports:
+      - "9473:9473"
+    environment:
+      ELARA_LISTEN: "0.0.0.0:9473"
+      # Single-listener mode: serve the FULL API on the published port so the
+      # documented curl/SDK examples work against localhost. (Default is a split
+      # control/data plane — see README "Two listeners". The path gate still 404s
+      # non-public routes to off-host callers even bound to 0.0.0.0.)
+      ELARA_DATA_PLANE_LISTEN: ""
+      ELARA_IS_GENESIS: "true"
+      # Anchor = the only node type that can seal epochs (peer.rs can_seal_epochs).
+      # "authority" is NOT a NodeType variant — from_str silently coerces any
+      # unknown string to Leaf, which cannot seal. But sealing alone is not
+      # enough: finality needs stake (settlement = attesting/total_zone_stake
+      # >= 2/3), so the entrypoint also stakes this authority via
+      # ELARA_GENESIS_VALIDATORS — the live dev-net seed carries the same stake
+      # in its TOML and finalizes solo. Without the stake the anchor seals empty
+      # epochs forever at 0 finalized (observed during demo bring-up).
+      ELARA_NODE_TYPE: "anchor"
+      ELARA_AUTO_WITNESS: "true"
+      ELARA_SEEDS: ""
+      RUST_LOG: "elara_node=info,elara_runtime=info"
+    volumes:
+      - genesis-data:/data
+    command: ["--data-dir", "/data"]
+    ulimits: *node-ulimits
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9473/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  witness1:
+    build: .
+    container_name: elara-witness1
+    ports:
+      - "9474:9473"
+    environment:
+      ELARA_LISTEN: "0.0.0.0:9473"
+      # Single-listener mode: serve the FULL API on the published port so the
+      # documented curl/SDK examples work against localhost. (Default is a split
+      # control/data plane — see README "Two listeners". The path gate still 404s
+      # non-public routes to off-host callers even bound to 0.0.0.0.)
+      ELARA_DATA_PLANE_LISTEN: ""
+      ELARA_NODE_TYPE: "witness"
+      ELARA_AUTO_WITNESS: "true"
+      ELARA_SEEDS: "genesis:9473"
+      RUST_LOG: "elara_node=info,elara_runtime=info"
+    volumes:
+      - witness1-data:/data
+    command: ["--data-dir", "/data"]
+    ulimits: *node-ulimits
+    restart: unless-stopped
+    depends_on:
+      genesis:
+        condition: service_healthy
+
+  witness2:
+    build: .
+    container_name: elara-witness2
+    ports:
+      - "9475:9473"
+    environment:
+      ELARA_LISTEN: "0.0.0.0:9473"
+      # Single-listener mode: serve the FULL API on the published port so the
+      # documented curl/SDK examples work against localhost. (Default is a split
+      # control/data plane — see README "Two listeners". The path gate still 404s
+      # non-public routes to off-host callers even bound to 0.0.0.0.)
+      ELARA_DATA_PLANE_LISTEN: ""
+      ELARA_NODE_TYPE: "witness"
+      ELARA_AUTO_WITNESS: "true"
+      ELARA_SEEDS: "genesis:9473"
+      RUST_LOG: "elara_node=info,elara_runtime=info"
+    volumes:
+      - witness2-data:/data
+    command: ["--data-dir", "/data"]
+    ulimits: *node-ulimits
+    restart: unless-stopped
+    depends_on:
+      genesis:
+        condition: service_healthy
+
+volumes:
+  genesis-data:
+  witness1-data:
+  witness2-data:

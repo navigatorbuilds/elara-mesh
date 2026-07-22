@@ -1,0 +1,18 @@
+(* record_close_unauth — INTENDED FAILURE documenting the truncation boundary.
+   PqStream::close() sends a type=Close, empty-payload frame with NO AEAD
+   (stream.rs); the receiver treats Close as PeerClosed. Close is therefore an
+   unauthenticated framing signal a network attacker can forge to tear a session
+   down early (a truncation attack: the receiver stops, never seeing records the
+   honest sender still had to deliver). Injective agreement on Close FAILS — the
+   property is honestly NOT claimed for the record layer (see README scope note:
+   injective agreement is a safety property, "no spurious accepts", not a
+   liveness/delivery-completeness property). The analogue of forward_secrecy_broken. *)
+free CLOSE_FRAME: bitstring.            (* the type=Close, empty-payload frame: public, unauthenticated *)
+event CloseSent(bitstring).
+event CloseRecv(bitstring).
+let session =
+  new sid: bitstring;
+  ( event CloseSent(sid); out(net, CLOSE_FRAME) )
+  | ( in(net, x: bitstring); if x = CLOSE_FRAME then event CloseRecv(sid) ).
+query s: bitstring; inj-event(CloseRecv(s)) ==> inj-event(CloseSent(s)).
+process ( !session )

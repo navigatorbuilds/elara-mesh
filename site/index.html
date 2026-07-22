@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Elara — proof of who did what, when</title>
+<meta name="description" content="Elara is an open-source, post-quantum validation mesh: cryptographic provenance for digital work, built for the age of AI agents. Written in Rust.">
+<meta property="og:title" content="Elara — proof of who did what, when">
+<meta property="og:description" content="An open-source, post-quantum validation mesh. Cryptographic provenance for digital and physical work, built for the age of AI agents.">
+<meta property="og:type" content="website">
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='38' fill='none' stroke='%2336e2c4' stroke-width='9'/><circle cx='50' cy='50' r='10' fill='%2336e2c4'/></svg>">
+<script src="globe.js" defer></script>
+<script src="reveal.js" defer></script>
+</head>
+<body>
+
+<header class="nav">
+  <a class="nav-brand" href="#top">ELARA</a>
+  <nav class="nav-links">
+    <a href="#why">Why</a>
+    <a href="how.html">How it works</a>
+    <a href="usecases.html">Use cases</a>
+    <a href="verify/">Verify</a>
+    <a href="receipts.html">Receipts</a>
+    <a href="writing.html">Writing</a>
+    <a href="#status">Status</a>
+    <a href="#papers">Papers</a>
+    <a class="nav-gh" href="https://github.com/navigatorbuilds/elara-mesh" rel="noopener">GitHub →</a>
+  </nav>
+</header>
+
+<main id="top">
+
+<!-- ───────────────────────── HERO ───────────────────────── -->
+<section class="hero">
+  <div class="hero-grid" aria-hidden="true"></div>
+  <canvas id="globe" class="hero-globe" aria-hidden="true"></canvas>
+  <div class="hero-inner">
+    <p class="hero-kicker">Open-source · post-quantum · written in Rust</p>
+    <h1>Proof of who did&nbsp;what, <em>when</em>.</h1>
+    <p class="hero-sub">
+      Software now acts on its own — agents write code, move money, operate machines.
+      When something goes wrong, the only evidence is the operator's own logs: private,
+      mutable, written by the party under suspicion. Elara is the neutral record that
+      question needs — every action signed, witnessed by independent parties, and sealed
+      against a timeline no one can rewrite. Post-quantum from the first byte, because
+      proof that must hold in twenty years cannot rest on signatures that won't.
+    </p>
+    <div class="hero-cta">
+      <a class="btn btn-solid" href="papers/ELARA-PROTOCOL-WHITEPAPER.pdf">Read the whitepaper</a>
+      <a class="btn btn-ghost" href="verify/">Verify it live →</a>
+      <a class="btn btn-ghost" href="https://github.com/navigatorbuilds/elara-mesh" rel="noopener">View the source</a>
+    </div>
+    <p class="hero-sub" style="margin-top:0.9rem;font-size:0.92em;opacity:0.85">
+      Running proof: this project's maintainer is an AI agent acting under a public, revocable
+      mandate — <a href="receipts.html">pick one of its receipted actions and verify it in your
+      browser</a>. The verdict is computed locally, and every prefilled trust input is disclosed
+      and replaceable with your own.
+    </p>
+  </div>
+  <div class="hero-strip">
+    <div><strong>~350K</strong><span>lines of Rust, open source</span></div>
+    <div><strong>5,700+</strong><span>tests green — the suite is the spec</span></div>
+    <div><strong>Dilithium3 + SPHINCS+</strong><span>NIST post-quantum, default and only mode</span></div>
+    <div><strong>Verifiable offline</strong><span>check any proof yourself — no server, no account</span></div>
+  </div>
+</section>
+
+<!-- ───────────────────────── WHY ───────────────────────── -->
+<section id="why" class="block">
+  <h2><span class="sec-n">01</span> Why this, why now</h2>
+  <div class="cols">
+    <div class="col">
+      <h3>The quantum clock is running</h3>
+      <p>
+        Everything signed with today's classical cryptography can be harvested now and
+        forged later, once quantum computers arrive. Proof that must still be true in
+        twenty years has to be post-quantum <em>from the moment it is created</em>.
+        Elara signs every record with NIST-standardised post-quantum signatures —
+        Dilithium3 and SPHINCS+ — not as an add-on, but as the default and only mode.
+      </p>
+    </div>
+    <div class="col">
+      <h3>AI agents need an accountability layer</h3>
+      <p>
+        Software agents now write code, move money, and operate machines. The question
+        "which agent did what, and when?" stops being a log line and becomes
+        infrastructure. Elara gives every actor — human or AI — a cryptographic
+        identity whose work is witnessed by independent third parties and sealed into
+        a history that nobody, including the operator, can quietly rewrite.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- ───────────────────────── HOW ───────────────────────── -->
+<section id="how" class="block block-alt">
+  <h2><span class="sec-n">02</span> How it works</h2>
+  <div class="steps">
+    <div class="step">
+      <span class="step-n">1</span>
+      <h3>Record</h3>
+      <p>
+        A device hashes the work, signs it with post-quantum keys, and stamps it with a
+        causal clock. This happens locally and works fully offline — a record created on
+        a plane is as valid as one created in a datacenter.
+      </p>
+    </div>
+    <div class="step">
+      <span class="step-n">2</span>
+      <h3>Witness</h3>
+      <p>
+        When connectivity exists, a peer-to-peer mesh gossips the record into its zone,
+        where a diversity-weighted committee of independent witnesses attests to it.
+        Correlated witnesses — same org, same subnet — count less. Sybil farms don't settle.
+      </p>
+    </div>
+    <div class="step">
+      <span class="step-n">3</span>
+      <h3>Seal</h3>
+      <p>
+        Epochs seal attested history under Merkle roots, chained and checkpointed.
+        A light client on a phone verifies any record against the sealed history —
+        no full node, no genesis replay, post-quantum all the way down.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- ───────────────────────── USE CASES TEASER ───────────────────────── -->
+<section id="usecases" class="block">
+  <h2><span class="sec-n">03</span> What it's for</h2>
+  <div class="uc-grid">
+    <a class="uc-card" href="usecases.html#agents">
+      <h3>AI-agent accountability</h3>
+      <p>Every agent action signed under its own identity, witnessed by independent parties, with explicit revocable authorization. Liability becomes an evidence question — with evidence.</p>
+      <span class="paper-cta">Read the case →</span>
+    </a>
+    <a class="uc-card" href="usecases.html#factory">
+      <h3>Manufacturing provenance</h3>
+      <p>Every station signs what it did to which unit, when. A defect months later traces back to the machine and the moment — without trusting the factory's own database.</p>
+      <span class="paper-cta">Read the case →</span>
+    </a>
+    <a class="uc-card" href="usecases.html#authorship">
+      <h3>Proof of priority</h3>
+      <p>Seal a work's fingerprint into a drand-anchored timeline that cannot be back-dated. Registration priority, precisely scoped — in most disputes, the ordering is the whole fight.</p>
+      <span class="paper-cta">Read the case →</span>
+    </a>
+    <a class="uc-card" href="usecases.html#offline">
+      <h3>Offline-first field operations</h3>
+      <p>Records are created and signed with no connectivity, each fixed in causal order. The backlog syncs later and history lands in the order it happened.</p>
+      <span class="paper-cta">Read the case →</span>
+    </a>
+    <a class="uc-card" href="usecases.html#spamfarm">
+      <h3>Sybil resistance as arithmetic</h3>
+      <p>Correlated witnesses — same operator, same subnet — collapse toward one vote in consensus. A thousand clones weigh about as much as one honest voice.</p>
+      <span class="paper-cta">Read the case →</span>
+    </a>
+    <a class="uc-card" href="usecases.html#aiboxes">
+      <h3>The coming fleet of personal AI machines</h3>
+      <p>Always-on local-AI boxes need exactly two things at scale: provable agent authorization, and something useful for idle cycles. Elara ships the first and is built for the second.</p>
+      <span class="paper-cta">Read the case →</span>
+    </a>
+  </div>
+</section>
+
+<!-- ───────────────────────── STATUS ───────────────────────── -->
+<section id="status" class="block block-alt">
+  <h2><span class="sec-n">04</span> Exactly where it stands</h2>
+  <p class="status-lead">
+    Every public claim this project makes distinguishes <em>designed-for</em> from
+    <em>tested-at</em>. This table is the honest version — it is the same one in the README.
+  </p>
+  <table class="status-table">
+    <tr><th>Tested at</th><td>small private testnets — historically up to 6 rented VPS nodes across Europe and North America (that fleet was retired 2026-06-09); the current fleet is 3 local machines (one desktop + two laptops), weeks of continuous soak; ~17K-record DAGs; first external-machine join over the public internet completed July&nbsp;2026; full test suite (5,700+ tests) green</td></tr>
+    <tr><th>Designed for</th><td>1M zones × 10T records/day × 10K+ nodes — <em>design targets that shaped the architecture, not demonstrated capacity</em></td></tr>
+    <tr><th>Hardening</th><td>explicit-panic phase done — <strong>0</strong> <code>unwrap()</code>/<code>expect()</code>/<code>panic!</code> across the node and published protocol crates (test code excluded), CI-gated. Active lane: hot-path bounds/arithmetic hardening — a Byzantine peer must never crash a node</td></tr>
+    <tr><th>Public network</th><td>none yet — this is a runtime you can build and run yourself today</td></tr>
+    <tr><th>Beats</th><td>the internal unit (the <strong>beat</strong>) is protocol plumbing (staking, sybil resistance, resource accounting). <strong>It is not a cryptocurrency offering: there is no token sale, no exchange listing, no airdrop — and none is planned.</strong></td></tr>
+  </table>
+</section>
+
+<!-- ───────────────────────── PAPERS ───────────────────────── -->
+<section id="papers" class="block">
+  <h2><span class="sec-n">05</span> Papers &amp; specification</h2>
+  <div class="papers">
+    <a class="paper" href="papers/ELARA-PROTOCOL-WHITEPAPER.pdf">
+      <h3>Protocol Whitepaper</h3>
+      <p>The Elara Protocol — a post-quantum universal validation layer for digital work. 121 pages, v0.7.30.</p>
+      <span class="paper-cta">PDF →</span>
+    </a>
+    <a class="paper" href="papers/MESH-BFT-PAPER.pdf">
+      <h3>MESH-BFT</h3>
+      <p>Diversity-weighted Byzantine fault tolerance: consensus where independence counts, with liveness theorem.</p>
+      <span class="paper-cta">PDF →</span>
+    </a>
+    <a class="paper" href="https://github.com/navigatorbuilds/elara-mesh/tree/main/docs/spec" rel="noopener">
+      <h3>Design specification</h3>
+      <p>The full working corpus: protocol, architecture, discovery, hardware tiers — published verbatim for review.</p>
+      <span class="paper-cta">Browse →</span>
+    </a>
+  </div>
+</section>
+
+<!-- ───────────────────────── START ───────────────────────── -->
+<section id="start" class="block block-alt">
+  <h2><span class="sec-n">06</span> Run it yourself</h2>
+  <pre class="code"><code>git clone https://github.com/navigatorbuilds/elara-mesh.git
+cd elara-mesh
+cargo test                          # the suite is the spec
+cargo build --release --features node
+./target/release/elara-node         # your node. your history.</code></pre>
+  <p class="start-note">
+    Rust 1.87+, Linux/macOS (WSL2 works). The node runs on any 2&nbsp;GB machine; light clients
+    verify proofs on phone-class hardware. The node is AGPL-3.0-only; the SDKs and reusable crates are MIT/Apache-2.0.
+  </p>
+</section>
+
+</main>
+
+<footer class="footer">
+  <div>
+    <strong>ELARA</strong> — an open-source post-quantum validation mesh.
+  </div>
+  <div class="footer-links">
+    <a href="https://github.com/navigatorbuilds/elara-mesh" rel="noopener">GitHub</a>
+    <a href="papers/ELARA-PROTOCOL-WHITEPAPER.pdf">Whitepaper</a>
+    <a href="https://github.com/navigatorbuilds/elara-mesh/blob/main/SECURITY.md" rel="noopener">Security policy</a>
+    <a href="https://github.com/navigatorbuilds/elara-mesh/blob/main/CONTRIBUTING.md" rel="noopener">Contributing</a>
+  </div>
+  <div class="footer-fine">
+    © 2026 Elara Protocol contributors · AGPL-3.0 node, MIT/Apache SDK · No cookies, no trackers, no token.
+  </div>
+</footer>
+
+</body>
+</html>

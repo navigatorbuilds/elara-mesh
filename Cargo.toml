@@ -1,0 +1,503 @@
+[package]
+name = "elara-runtime"
+version = "0.2.2"
+edition = "2021"
+# MSRV — matches the README "Rust 1.87+" requirement; an older rustc now gets a
+# clear "requires rustc 1.87 or newer" error instead of cryptic syntax failures.
+rust-version = "1.87"
+description = "Elara — an open-source post-quantum validation mesh (provenance & integrity), written in Rust"
+license = "AGPL-3.0-only"
+# The node is the AGPL *application*, not a crates.io library — the publishable
+# units are the MIT/Apache SDK crates under crates/. `publish = false` blocks an
+# accidental `cargo publish` of the AGPL binary and lets the supply-chain gate's
+# `allow-wildcard-paths` exempt our 8 workspace path-deps (deny.toml [bans]).
+publish = false
+
+[workspace]
+members = ["crates/elara-dht", "crates/elara-nat", "crates/elara-active-inference", "crates/elara-zone-autoscaler", "crates/elara-itc", "crates/elara-smt", "crates/elara-pq-transport", "crates/elara-light-client", "crates/elara-record", "crates/elara-verify"]
+resolver = "2"
+
+# Per-connection panic isolation — S2 hostile-input safety gate.
+# The deployed node is built `--release`;
+# `panic = "unwind"` means a malformed packet from a stranger unwinds the single
+# tokio connection task instead of aborting the whole process. This is Rust's
+# default, pinned explicit so a future binary-size tweak (`panic = "abort"`)
+# can't silently turn one decoder panic into a fleet-wide node crash. Enforced by
+# `build_invariants::tests::release_profile_must_not_panic_abort_*`.
+# `overflow-checks = true` — release would otherwise SILENTLY WRAP integer
+# overflow (Rust's release default). In a consensus ledger system a wrapping add
+# could bypass a cap check or corrupt a balance/SMT leaf. Ledger accumulators
+# use `saturating_add` and intentional wraps use `wrapping_*`, so this flag never
+# panics a normal path — it is the regression net that turns any FUTURE raw
+# overflow into a contained (panic=unwind, per-connection) failure instead of a
+# silent consensus fork. The dev/test profile already runs with overflow checks
+# (debug-assertions), so the test suite already exercises this behaviour. Enforced
+# by `build_invariants::tests::release_profile_must_enable_overflow_checks_*`.
+[profile.release]
+panic = "unwind"
+overflow-checks = true
+
+[lib]
+name = "elara_runtime"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# Extracted standalone crate (MIT/Apache) — Kademlia routing table
+elara-dht = { path = "crates/elara-dht" }
+# Extracted standalone crate (MIT/Apache) — NAT traversal (STUN + UPnP)
+elara-nat = { path = "crates/elara-nat" }
+# Extracted standalone crate (MIT/Apache) — active-inference (free-energy) engine
+elara-active-inference = { path = "crates/elara-active-inference" }
+# Extracted standalone crate (MIT/Apache) — zone auto-scaling decision engine
+elara-zone-autoscaler = { path = "crates/elara-zone-autoscaler" }
+# Extracted standalone crate (MIT/Apache) — Interval Tree Clocks
+elara-itc = { path = "crates/elara-itc" }
+elara-record = { path = "crates/elara-record" }
+# Extracted standalone crate (MIT/Apache) — offline verification logic
+# (verify_core + anchor/grade legs + anchor-pinned seal verify), signing-incapable
+elara-verify = { path = "crates/elara-verify" }
+# Extracted standalone crate (MIT/Apache) — key-addressed sparse Merkle tree
+elara-smt = { path = "crates/elara-smt" }
+# Extracted standalone crate (MIT/Apache) — post-quantum transport: wire frame,
+# session crypto, ML-KEM-768 + Dilithium3 handshake. Base entry is default-off
+# (pure-Rust frame/crypto/sig only) so the wasm graph never pulls liboqs; the
+# non-wasm target table below adds the `oqs` feature for the native node.
+elara-pq-transport = { path = "crates/elara-pq-transport", default-features = false }
+# Extracted standalone crate (MIT/Apache) — stateless light-client proof
+# verification (account-SMT inclusion + header binding + state-delta seal
+# binding). Pure-Rust, wasm-portable; consumed by src/light_verify.rs.
+elara-light-client = { path = "crates/elara-light-client" }
+
+# Hashing
+sha3 = "0.10"
+
+# Error handling
+thiserror = "2.0"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+# float_roundtrip: parse f64 at full precision so JSON-serialized timestamps
+# round-trip bit-exact. Without it serde_json drops ~1 ULP on ~12% of values,
+# which flips `ValidationRecord::timestamp.to_be_bytes()` in `signable_bytes()`
+# and makes a valid JSON record's signature fail to verify (the verify CLI's
+# primary input is JSON). Wire format is unaffected — this is parse-side only.
+serde_json = { version = "1.0", features = ["float_roundtrip"] }
+
+# Encoding
+hex = "0.4"
+# base64 for anchor-proof record payloads (P1.5(b)): a 5.3 KiB .ots proof must
+# fit the 8 KiB per-metadata-value cap — hex (2x) overflows it, base64 (4/3x)
+# fits. Already in-tree transitively via axum/reqwest at this exact version.
+base64 = "0.22"
+
+# Secret key zeroization on drop
+zeroize = { version = "1", features = ["derive"] }
+
+# System calls (getuid for daemon)
+libc = "0.2"
+sha2 = { version = "0.10", optional = true }
+getrandom = "0.2"
+
+# ─── PQ transport (Phase 4A): X25519 + ChaCha20-Poly1305 + HKDF ─────────────
+# Behind `node` feature (transport only runs on full nodes).
+x25519-dalek = { version = "2", features = ["static_secrets"], optional = true }
+chacha20poly1305 = { version = "0.10", optional = true }
+hkdf = { version = "0.12", optional = true }
+rand_core = { version = "0.6", optional = true }
+
+# Identity encryption at rest (AES-256-GCM + Argon2id KDF)
+aes-gcm = "0.10"
+argon2 = "0.5"
+
+# UUIDs (js feature needed for wasm32 timestamp source)
+uuid = { version = "1.0", features = ["v7", "js"] }
+
+# Time (for environment sensor day-phase detection)
+chrono = "0.4"
+arc-swap = "1.9.0"
+# PQC signature crates — pinned to exact versions for supply-chain hardening
+# (FIPS 204 / ML-DSA). Bump via explicit
+# edit + audit-tick after KAT-vector regression check, never via `cargo update`.
+dilithium-rs = "=0.2.0"
+lattice-slh-dsa = "=0.3.3"
+drand-verify = { version = "0.6.2", optional = true }
+
+# ─── Native-only deps (not available on wasm32) ─────────────────────────────
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# Python bindings (optional — not needed for standalone node binary)
+pyo3 = { version = "0.29", features = ["extension-module"], optional = true }
+
+# Post-quantum crypto (wraps liboqs C library — only used for ML-KEM-768 key encapsulation)
+# Behind native-crypto feature: mobile builds use pure-Rust dilithium-rs instead
+oqs = { version = "0.11", default-features = false, features = ["vendored", "ml_kem", "serde"], optional = true }
+
+# NOTE: the transport crate's `oqs` feature (ML-KEM-768 + hybrid handshake — the
+# ONLY thing that pulls the liboqs C library) is enabled by the `node-core`
+# FEATURE below, not unconditionally here. An unconditional native-target enable
+# leaked liboqs into EVERY native build — verify-cli, mobile, mandate-cli, even a
+# bare `cargo build` — forcing a C toolchain (cmake/clang) on builds whose compiled
+# code never touches ML-KEM. The base [dependencies] entry stays default-off (wasm
+# graph liboqs-free); node-core re-enables oqs for the native node.
+
+# Parallelism
+rayon = { version = "1.10", optional = true }
+
+# AUDIT-10 PQ-cleanup: winterfell was pulled in as an aspirational STARK
+# prover but never wired up. Commitment proofs live in `crypto::commitment`
+# (SHA3-based). Removed to shrink the transitive graph.
+
+# Memory-mapped files (Phase 2) — behind node feature for mobile compat
+memmap2 = { version = "0.9", optional = true }
+
+# RocksDB — LSM-tree storage engine for production persistence (Protocol §12.2)
+# Behind node feature: mobile uses lighter storage
+rocksdb = { version = "0.22", default-features = false, features = ["zstd"], optional = true }
+
+# ─── WASM-only deps ─────────────────────────────────────────────────────────
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = "0.3"
+wasm-bindgen = "0.2"
+getrandom = { version = "0.2", features = ["js"] }
+
+
+# ─── mDNS LAN discovery (Protocol §11.14 Layer C) ───────────────────────────
+[dependencies.mdns-sd]
+version = "0.12"
+optional = true
+
+# ─── Node daemon (optional, behind "node" feature) ──────────────────────────
+[dependencies.tokio]
+version = "1"
+features = ["full"]
+optional = true
+
+[dependencies.axum]
+version = "0.8"
+features = ["ws"]
+optional = true
+
+[dependencies.tower-http]
+version = "0.6"
+features = ["cors", "trace", "set-header"]
+optional = true
+
+# DELIBERATE partial exception to the AUDIT-10/PQ-R6 removal (see the notes
+# further down where hyper/hyper-util were dropped as direct deps): the
+# hardened public HTTP accept loop (network/server/public_http.rs, design:
+# docs/PUBLIC-LISTENER-HARDENING-2026-07-12.md) must configure hyper's http1
+# Builder directly — axum::serve exposes no hook to arm header_read_timeout.
+# Both resolve to the versions already locked transitively via axum/reqwest:
+# a transitive→direct promotion, not a new supply-chain surface. Still no
+# rustls/TLS types spoken directly.
+[dependencies.hyper]
+version = "1"
+features = ["server", "http1"]
+optional = true
+
+[dependencies.hyper-util]
+version = "0.1"
+features = ["tokio", "service"]
+optional = true
+
+# ServiceExt (ready/call/map_request) for the manual accept loop — already in
+# the tree transitively via axum; same transitive→direct promotion as above.
+[dependencies.tower]
+version = "0.5"
+features = ["util"]
+optional = true
+
+[dependencies.reqwest]
+version = "0.13"
+default-features = false
+features = ["rustls", "json", "query", "blocking"]
+optional = true
+
+[dependencies.toml]
+version = "1.0"
+optional = true
+
+[dependencies.clap]
+version = "4"
+features = ["derive"]
+optional = true
+
+# tracing (the logging facade) is a non-optional base dependency: core modules
+# (notably accounting/ledger.rs) emit tracing events unconditionally, so every feature
+# set that compiles the core lib — including bare default features — must link it.
+# Making it optional silently broke `cargo check` on a fresh default-feature clone.
+# tracing-subscriber (the init/consumer side) stays optional + node/mail-only.
+[dependencies.tracing]
+version = "0.1"
+
+[dependencies.tracing-subscriber]
+version = "0.3"
+features = ["env-filter", "json"]
+optional = true
+
+[dependencies.tokio-stream]
+version = "0.1"
+features = ["sync"]
+optional = true
+
+[dependencies.futures-util]
+version = "0.3"
+optional = true
+
+# AUDIT-10 / PQ-R6: rustls/tokio-rustls/rustls-pemfile/rustls-pki-types/
+# hyper/hyper-util/tower-service/rcgen were dropped when the in-process TLS
+# server was deleted. reqwest continues to pull rustls transitively for its
+# outbound HTTPS shim.
+# ─── Memory allocator (jemalloc for reduced fragmentation on long-running nodes)
+[target.'cfg(all(not(target_arch = "wasm32"), target_family = "unix"))'.dependencies.tikv-jemallocator]
+version = "0.6"
+optional = true
+features = ["unprefixed_malloc_on_supported_platforms"]
+
+[target.'cfg(all(not(target_arch = "wasm32"), target_family = "unix"))'.dependencies.tikv-jemalloc-ctl]
+version = "0.6"
+optional = true
+features = ["stats"]
+
+[features]
+default = []
+# AUDIT-10 / PQ-R6: in-process TLS server removed. Classical transport is
+# plain HTTP; public HTTPS is a reverse-proxy concern. rustls/tokio-rustls/
+# rustls-pemfile/rustls-pki-types/hyper/hyper-util/tower-service/rcgen are
+# no longer direct dependencies — reqwest still pulls rustls transitively
+# for outbound HTTPS, but we don't speak rustls types ourselves.
+# Shared full-node substrate (everything `node` and `node-windows` agree on).
+# Source cfg-gates the node stack on THIS feature (was: any(node, node-windows));
+# platform features below layer their platform-specific deps on top. Lets
+# `[[bin]] elara-node` carry required-features = ["node-core"] so a
+# default-features `cargo check --all-targets` (fresh-clone first touch) passes.
+node-core = ["tokio", "axum", "tower-http", "hyper", "hyper-util", "tower", "reqwest", "toml", "clap", "tracing-subscriber",
+        "tokio-stream", "futures-util",
+        "mdns-sd",
+        "rayon",
+        # sha2: network/drand_fetch derives pulse randomness as sha256(signature)
+        # instead of trusting the relay's field (node/node-windows already carried
+        # sha2 — listing it here only widens node-core-ALONE builds).
+        "sha2",
+        "rocksdb", "memmap2",
+        # ML-KEM-768 + hybrid handshake for the node transport (network/pq_transport
+        # re-exports it; crypto::kem layers on top under `node`). This is the SOLE
+        # liboqs pull — scoped to node-core so verify-cli / mobile / mandate-cli / a
+        # bare `cargo build` stay pure-Rust and need no C toolchain. node-core is
+        # native-only (rocksdb/mdns), so wasm never enables oqs through it.
+        "elara-pq-transport/oqs"]
+node = ["node-core", "kernel-online", "tikv-jemallocator", "tikv-jemalloc-ctl",
+        "oqs",
+        # Phase 4A: PQ transport hybrid handshake
+        # x25519-dalek + rand_core use dep: syntax: both are dep:-gated (no implicit
+        # feature) in elara-pq-transport, so a bare ref here makes cargo-auditable's
+        # metadata pass try to enable a non-existent pq-transport feature (flip-day
+        # 2026-07-05 release-build fix). sha2/chacha20poly1305/hkdf stay bare —
+        # non-optional in pq-transport, and sha2 is referenced by other features.
+        "dep:x25519-dalek", "chacha20poly1305", "hkdf", "dep:rand_core", "sha2"]
+mobile = ["tokio"]  # Pure Rust core only — no C libs, no RocksDB, no libp2p
+# Windows full node: like node but without jemalloc + OQS (both need cmake/autotools)
+# Uses pure-Rust Dilithium3 fallback + RocksDB (compiles with MinGW if CXXFLAGS set)
+# KNOWN BROKEN since Phase 4A (pre-dates the 2026-06-10 node-core refactor):
+# network/pq_transport is now load-bearing and needs `oqs` (crypto::kem) +
+# the hybrid-handshake deps — porting Windows = oqs via vcpkg or a pure-Rust
+# ML-KEM, its own project. Kept for the future desktop-installer lane.
+node-windows = ["node-core", "sha2"]
+cognition = []
+# Optional higher-layer agent-runtime feature, off by default and not part of the
+# public release (its modules are not included here). Kept as a reserved feature
+# flag so the protocol node builds identically whether or not that layer is present;
+# `kernel-online` gates its network-facing paths, which a full `node` build already
+# satisfies. Public builds never enable it.
+kernel-online = ["tokio", "axum", "tower-http", "hyper", "hyper-util", "tower", "reqwest",
+        "tokio-stream", "futures-util", "tracing-subscriber"]
+# Path-free anchor-leg verification (`verify_core::anchor`): drand not-before
+# with BLS against the pinned League-of-Entropy key + the OTS→Bitcoin existed-by
+# walk. Split from verify-cli so the WASM verifier reaches full-chain parity
+# (verifier-flagship audit 2026-07-06 step 4) without pulling clap. drand-verify
+# (pure-Rust BLS12-381) + sha2 are wasm32-clean; never in the node/mobile graph
+# unless a build opts in.
+verify-anchor = ["sha2", "dep:drand-verify", "elara-verify/verify-anchor"]
+# READ-SIDE-STRATEGY §1: the offline record verifier. Deliberately minimal —
+# core lib + the anchor legs, NO node stack (tracing is a base dep now), so the
+# verifier builds and ships standalone:
+# `cargo build --release --features verify-cli --bin elara-verify`.
+# Since extraction Step 4b the driver lives in `elara-verify/cli` (clap moves
+# there with it); the root bin is a delegate, kept so that exact command — which
+# release.yml and the operator docs pin — keeps producing the verifier. `clap`
+# stays listed for the delegate bin's test-compat import block.
+verify-cli = ["clap", "verify-anchor", "elara-verify/cli"]
+# Operator/auditor CLI for the mandate/accountability layer — "was this act
+# authorized?". Minimal (core lib + clap, no node stack), queries a running
+# node's public /mandate/status read API:
+# `cargo build --release --features mandate-cli --bin elara-mandate-audit`.
+mandate-cli = ["clap"]
+
+[dev-dependencies]
+criterion = { version = "0.8", features = ["html_reports"] }
+tempfile = "3"
+# Enable the crate's test-helpers (AeadKey::key_bytes) for the node's
+# pq_transport handshake tests. Dev-only — resolver v2 keeps this feature
+# out of `cargo build --release`, so key_bytes is never in a prod build.
+elara-pq-transport = { path = "crates/elara-pq-transport", default-features = false, features = ["test-helpers"] }
+# Router-level test helpers (`oneshot()`). tower is already pulled transitively
+# by tower-http, so this only adds the ServiceExt trait import.
+tower = { version = "0.5", features = ["util"] }
+# tokio "test-util" enables the paused-time test clock (`start_paused`) used by
+# the loop-supervision timing tests (network/supervision.rs). Dev-only: test-util
+# is deliberately excluded from tokio's "full", so it never enters
+# `cargo build --release`. Version matches [dependencies.tokio].
+tokio = { version = "1", features = ["test-util"] }
+
+[[bench]]
+name = "bench_crypto"
+harness = false
+
+[[bench]]
+name = "bench_wire"
+harness = false
+
+[[bench]]
+name = "bench_dag"
+harness = false
+
+[[bench]]
+name = "bench_tps"
+harness = false
+required-features = ["node-core"]
+
+[[bench]]
+name = "bench_account_smt"
+harness = false
+required-features = ["node"]
+
+[[bench]]
+name = "bench_snapshot"
+harness = false
+required-features = ["node"]
+
+[[bench]]
+name = "bench_committee_selection"
+harness = false
+required-features = ["node"]
+
+[[bench]]
+name = "bench_staker_aggregates"
+harness = false
+
+[[bench]]
+name = "bench_xzone"
+harness = false
+
+[[bench]]
+name = "bench_super_seal"
+harness = false
+required-features = ["node"]
+
+[[bench]]
+name = "bench_auto_scale"
+harness = false
+required-features = ["node"]
+
+[[bench]]
+name = "bench_dht"
+harness = false
+required-features = ["node"]
+
+# Integration tests touching the feature-gated network stack. Declared
+# explicitly (autodiscovery keeps covering the rest) so a default-features
+# `cargo check --all-targets` — the first command a fresh clone runs — passes.
+[[test]]
+name = "slot_conflict_injection"
+required-features = ["node"]
+
+[[test]]
+name = "record_relay_v1"
+required-features = ["node"]
+
+[[test]]
+name = "relay_by_hash"
+required-features = ["node"]
+
+[[bin]]
+name = "elara-node"
+path = "src/bin/elara_node.rs"
+# node-core = the node/node-windows intersection — both platform features
+# enable it, and a default-features build correctly skips this binary.
+required-features = ["node-core"]
+
+[[bin]]
+name = "elara-cli"
+path = "src/bin/elara_cli.rs"
+required-features = ["node"]
+
+[[bin]]
+name = "elara-consolidate"
+path = "src/bin/elara_consolidate.rs"
+required-features = ["cognition"]
+
+[[bin]]
+name = "elara-verify"
+path = "src/bin/elara_verify.rs"
+required-features = ["verify-cli"]
+
+[[bin]]
+name = "elara-mandate-audit"
+path = "src/bin/elara_mandate_audit.rs"
+required-features = ["mandate-cli"]
+
+[[bin]]
+name = "elara-keygen"
+path = "src/bin/elara_keygen.rs"
+
+[[bin]]
+name = "elara-econ-sim"
+path = "src/bin/elara_econ_sim.rs"
+
+[[bin]]
+name = "elara-fuzz"
+path = "src/bin/elara_fuzz.rs"
+required-features = ["node"]
+
+[[bin]]
+name = "elara-simulate"
+path = "src/bin/elara_simulate.rs"
+required-features = ["node"]
+
+[[bin]]
+name = "elara-bench"
+path = "src/bin/elara_bench.rs"
+required-features = ["node"]
+
+[[example]]
+name = "pq_probe"
+path = "examples/pq_probe.rs"
+required-features = ["node"]
+
+[[example]]
+name = "tps_bench"
+path = "examples/tps_bench.rs"
+required-features = ["node-core"]
+
+[[example]]
+name = "mandate_query_live"
+path = "examples/mandate_query_live.rs"
+required-features = ["node-core"]
+
+[[example]]
+name = "light_client_live"
+path = "examples/light_client_live.rs"
+required-features = ["node-core"]
+
+[[example]]
+name = "seal_enum_soak_driver"
+path = "examples/seal_enum_soak_driver.rs"
+required-features = ["node-core"]
+
+[lints.clippy]
+assertions_on_constants = "warn"
+unimplemented = "warn"
+range_plus_one = "warn"
+manual_string_new = "warn"
+semicolon_if_nothing_returned = "warn"
+manual_assert = "warn"
+redundant_else = "warn"

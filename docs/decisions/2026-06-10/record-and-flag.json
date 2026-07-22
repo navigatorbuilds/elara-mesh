@@ -1,0 +1,12 @@
+{
+ "kind": "design_decision",
+ "project": "elara-protocol",
+ "date": "2026-06-10",
+ "decision": "record-and-flag",
+ "statement": "Out-of-mandate agent records are RECORDED AND FLAGGED, never silently rejected; flagged records carry zero weight (no trust, consensus, or reputation effect). A truth ledger records what happened, including violations — rejection blinds the victim.",
+ "decided_by": "Nenad Vasic (decision)",
+ "refs": [
+  "docs/AGENT-DELEGATION.md"
+ ],
+ "status_note_2026_07_11": "Shipped status: v0 is observational — out-of-mandate acts are recorded and flagged (crates/elara-verify/src/mandate.rs); the zero-weight consensus enforcement described above is design intent, staged as a later, separately-audited slice. This note distinguishes the decided design from what is currently wired into consensus."
+}

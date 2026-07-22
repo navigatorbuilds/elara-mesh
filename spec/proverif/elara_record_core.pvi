@@ -1,0 +1,47 @@
+(* ===========================================================================
+   Shared primitives for the Elara POST-HANDSHAKE RECORD/STREAM protocol model.
+
+   Companion to elara_handshake_core.pvi. Where the handshake model shares one
+   protocol BODY across scenarios, the record scenarios deliberately VARY the
+   body (nonce reuse, no-AEAD, empty-AD) to make each non-vacuity twin, so the
+   shared core here is just the primitives + the cleartext frame-type tags.
+   The per-scenario sender/receiver processes live in scenarios/record_*.pvh.
+
+   Code under analysis:
+     crates/elara-pq-transport/src/crypto.rs  — ChaCha20-Poly1305 AeadKey,
+       96-bit counter nonce (4 zero bytes || 8-byte BE counter), per-direction
+       keys k_send/k_recv from distinct HKDF labels.
+     src/network/pq_transport/stream.rs        — PqStream session driver:
+       strictly-sequential receiver (decrypt_frame decrypts at exactly
+       next_recv_counter then advances by 1), send_typed binds the 1-byte
+       frame TYPE into the AEAD associated data.
+     crates/elara-pq-transport/src/frame.rs     — ELPQ wire frame; the TYPE byte
+       rides in the CLEARTEXT 9-byte header, OUTSIDE the ciphertext.
+   =========================================================================== *)
+
+type key.
+type nonce.
+
+(* AEAD with associated data (ChaCha20-Poly1305). adec reduces ONLY when the
+   associated data, key, and nonce all match what aenc used. This models two
+   things at once: (1) Poly1305 integrity — no forgery without the key; (2) the
+   associated-data binding — a frame whose AD does not match what the sender
+   sealed under fails to open. In the code the AD is the 1-byte frame type
+   (stream.rs send_typed / decrypt_frame), and the nonce is the per-direction
+   monotonic counter (crypto.rs nonce_from_counter). *)
+fun aenc(bitstring, bitstring, key, nonce): bitstring.   (* aenc(ad, msg, k, nonce) *)
+reduc forall ad: bitstring, m: bitstring, k: key, n: nonce;
+      adec(ad, aenc(ad, m, k, n), k, n) = m.
+
+(* Cleartext wire frame-type tags. They ride in the ELPQ header in the clear,
+   so the Dolev-Yao attacker — who fully controls `net` — can read AND rewrite
+   them in transit. Modelled as public free names: the attacker may substitute
+   any tag for any other on the wire. (frame.rs FrameType: Data=4 / StreamChunk=7
+   / Admission=8.) *)
+free TYPE_DATA: bitstring.
+free TYPE_STREAM: bitstring.
+free TYPE_ADMISSION: bitstring.
+
+(* The public network. The attacker is the network: it observes every frame and
+   may drop, reorder, replay, or inject arbitrary frames. *)
+free net: channel.

@@ -1,0 +1,34 @@
+(* record_baseline — the headline record-layer properties.
+
+   Per-session fresh key (abstracts the handshake's transcript-bound output),
+   a strictly-sequential two-record receiver, each record sealed under a
+   DISTINCT public counter-nonce with the frame TYPE bound into the AD.
+
+   Proves, under a network-controlling attacker:
+     * payload secrecy  : the record payload `probe` stays secret;
+     * injective agreement : every record the receiver accepts at counter n was
+       sent by the honest sender at counter n, injectively — i.e. no replay, no
+       reorder, no injection (truncation is NOT covered; see README scope note). *)
+
+free n1: nonce.   (* counter 1 — distinct public values; the attacker knows them *)
+free n2: nonce.   (* counter 2 *)
+free probe: bitstring [private].   (* secret payload carried as record 1 *)
+
+event Send(key, nonce, bitstring).
+event Recv(key, nonce, bitstring).
+
+let session =
+  new k: key;            (* per-session key: distinct handshake transcript => distinct k *)
+  new s2: bitstring;
+  ( (* sender: two records, consecutive distinct counters, type bound as AD *)
+    event Send(k, n1, probe); out(net, (TYPE_DATA, aenc(TYPE_DATA, probe, k, n1)));
+    event Send(k, n2, s2);    out(net, (TYPE_DATA, aenc(TYPE_DATA, s2,    k, n2))) )
+  |
+  ( (* receiver: STRICTLY SEQUENTIAL — slot 1 opens only under n1, slot 2 only under n2 *)
+    in(net, (t1: bitstring, c1: bitstring)); let m1 = adec(t1, c1, k, n1) in event Recv(k, n1, m1);
+    in(net, (t2: bitstring, c2: bitstring)); let m2 = adec(t2, c2, k, n2) in event Recv(k, n2, m2) ).
+
+query k: key, n: nonce, m: bitstring; inj-event(Recv(k,n,m)) ==> inj-event(Send(k,n,m)).
+query attacker(probe).
+
+process ( !session )

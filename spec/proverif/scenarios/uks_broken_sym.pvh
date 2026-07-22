@@ -1,0 +1,39 @@
+(* SCENARIO: uks_broken_sym — the MIRROR of uks_broken, leaking the FIRST initiator's
+   key skI instead of skI2. Its job is to machine-witness the OTHER honest accept
+   event's reachability: `uks` has TWO TRUE auth queries (Q_I and Q_I2), so the lane's
+   non-vacuity discipline wants BOTH RespAcceptInit(spk(skI),.) and
+   RespAcceptInit(spk(skI2),.) proven reachable, not one witnessed and the other left
+   to a "by symmetry" prose argument. uks_broken witnesses the skI2 side; this twin
+   witnesses the skI side. Same-world (only skI's visibility varies).
+
+   EXPECT (machine-checked):
+   - Q_I  (spk(skI))  -> FALSE  attacker, holding the leaked skI, completes a fresh
+                                session AS I (own ephemerals, own session key) and
+                                signs t3 with skI; R fires RespAcceptInit(spk(skI), t)
+                                with no honest InitCommit. Proves RespAcceptInit(
+                                spk(skI),.) IS reachable -> Q_I's TRUE in `uks` is
+                                non-vacuous.
+   - Q_I2 (spk(skI2)) -> TRUE   cross-KEY separation in the other direction: leaking
+                                skI does not let the attacker misattribute I2's
+                                sessions (forging needs skI2, still private).
+
+   run-proverif.sh asserts (mode uks_broken_sym): Q_I false, Q_I2 true (matched by
+   event NAME). probe-secrecy holds here too (omitted from the assertion — the two
+   uks twins already pin the secrecy result; this twin's contract is purely the
+   skI-side accept-event reachability).
+   ------------------------------------------------------------------------- *)
+
+free skI2:sskey [private].
+
+query t:bitstring;
+  inj-event(RespAcceptInit(spk(skI),  t)) ==> inj-event(InitCommit(spk(skI),  t)).
+
+query t:bitstring;
+  inj-event(RespAcceptInit(spk(skI2), t)) ==> inj-event(InitCommit(spk(skI2), t)).
+
+process
+  out(c, spk(skI)); out(c, spk(skI2)); out(c, spk(skR));
+  out(c, skI);                                   (* first initiator's OWN key compromised, UP-FRONT *)
+  ( !P_init(skI,  spk(skR))
+  | !P_init(skI2, spk(skR))
+  | !P_resp(skR) )

@@ -1,0 +1,65 @@
+(* SCENARIO: uks — Unknown-Key-Share / identity-misbinding freedom (multi-principal).
+   TWO honest initiators I (skI) and I2 (skI2), BOTH pinning the honest responder R
+   (skR), all keys private. This is the first scenario with more than one honest
+   initiator: UKS is inherently multi-principal — it asks whether the ACCEPT-ANY
+   responder can be driven to attribute a completed session to the WRONG honest
+   identity (record I2 for a run I actually drove, or vice versa). The baseline
+   (single honest initiator) cannot witness this: with only one honest signer there
+   is no competing honest identity for R to confuse.
+
+   WHY THIS IS THE INTERESTING SIDE. The responder's session keys are
+   kdf_{send,recv}(dh_ss, kem_ss, t2) (core lines 160-161) — derived from the
+   ephemerals and the transcript, with NO initiator long-term identity. The
+   initiator's identity enters ONLY as the AEAD-encrypted, t3-signed blob in msg3
+   (core line 134), decrypted by R under that identity-free session key (line 168)
+   and authenticated solely by checksig(ipk, t3, isig) (line 169). At first glance
+   that looks UKS-exposed (the key says nothing about WHO the initiator is). What
+   actually binds identity to session: the msg3 blob is encrypted under a key only
+   the genuine session endpoints can derive, so a relay attacker cannot substitute a
+   different identity (it would have to re-AEAD under that key, which it never holds).
+
+   EXPECT (machine-checked):
+   - Q_I  : R attributes a session to I  only if I  committed to that exact t  -> TRUE
+   - Q_I2 : R attributes a session to I2 only if I2 committed to that exact t  -> TRUE
+   - session-key secrecy still holds in the multi-principal world               -> TRUE
+
+   WHY GROUND (per-identity) QUERIES, NOT ONE FREE-VARIABLE QUERY. A universally
+   quantified inj-event(RespAcceptInit(xpk,t)) ==> inj-event(InitCommit(xpk,t)) is
+   FALSE here (empirically), and CORRECTLY so: the accept-any responder lets the
+   Dolev-Yao attacker generate its OWN keypair, run the initiator role honestly, and
+   complete a session recorded under its own key with no honest InitCommit. That is
+   the attacker being recorded as ITSELF — by design, not a UKS. UKS-freedom is a
+   claim about the HONEST identities only, so the queries fix the identity to each
+   honest signer. Misattribution to a corrupt key is impossible (the AEAD/signature
+   binding above), so no corrupt principal is needed: ProVerif's built-in attacker
+   already registers keys and completes as itself, and Q_I/Q_I2 holding in its
+   presence is exactly registered-key-UKS resistance for the honest parties.
+
+   Non-vacuity (lane convention: a `true` is textually identical to an unreachable
+   event) is machine-witnessed by the SAME-WORLD twins: uks_broken (leak skI2 ->
+   Q_I2 FALSE, so RespAcceptInit(spk(skI2),.) IS reachable) and uks_broken_sym (leak
+   skI -> Q_I FALSE, so RespAcceptInit(spk(skI),.) IS reachable). Both honest accept
+   events are therefore proven reachable, so the two TRUEs above are genuine.
+
+   run-proverif.sh asserts (mode uks): Q_I true, Q_I2 true, probe-secrecy true.
+   ------------------------------------------------------------------------- *)
+
+free skI2:sskey [private].     (* second honest initiator identity *)
+
+(* (1) UKS-freedom for I: R never records a session as I unless I committed to t. *)
+query t:bitstring;
+  inj-event(RespAcceptInit(spk(skI),  t)) ==> inj-event(InitCommit(spk(skI),  t)).
+
+(* (2) UKS-freedom for I2: symmetric. The presence of a competing honest initiator
+   does not let R cross-attribute one initiator's session to the other. *)
+query t:bitstring;
+  inj-event(RespAcceptInit(spk(skI2), t)) ==> inj-event(InitCommit(spk(skI2), t)).
+
+(* (3) session-key secrecy survives the multi-principal world. *)
+query attacker(probe).
+
+process
+  out(c, spk(skI)); out(c, spk(skI2)); out(c, spk(skR));   (* long-term public keys are public *)
+  ( !P_init(skI,  spk(skR))
+  | !P_init(skI2, spk(skR))
+  | !P_resp(skR) )

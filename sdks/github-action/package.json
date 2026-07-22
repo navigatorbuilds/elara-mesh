@@ -1,0 +1,12 @@
+{
+  "name": "@elara/agent-register-action",
+  "version": "0.1.0",
+  "description": "GitHub Action: verify an Elara agent identity in CI and emit its account proof as job outputs.",
+  "private": true,
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node test/smoke.test.js"
+  }
+}

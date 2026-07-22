@@ -1,0 +1,11 @@
+{
+ "kind": "design_decision",
+ "project": "elara-protocol",
+ "date": "2026-06-10",
+ "decision": "read-side-strategy",
+ "statement": "Strategy adopted (Nenad: 'you are right on every point, you do it'): the verifier is the product (offline plain-language verdict tool); EU AI Act Article 12 + agent liability insurance are the forcing-function buyers; eIDAS-qualified TSA braid leg gives statutory legal presumption; elara-mcp is the agent-economy distribution channel; we are the first Validation IPO (deliberate dogfood, starting with these records).",
+ "decided_by": "Nenad Vasic (go), Elara (strategy)",
+ "refs": [
+  "docs/READ-SIDE-STRATEGY.md"
+ ]
+}

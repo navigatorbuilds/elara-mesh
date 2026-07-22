@@ -1,0 +1,58 @@
+[package]
+name = "elara-verify"
+version = "0.1.0"
+edition = "2021"
+# Extraction COMPLETE (Steps 1–4, 2026-07-10; see
+# docs/VERIFIER-EXTRACTION-AUDIT-2026-07-07.md) — the CLI bin, wasm exports,
+# mandate/bundle evaluator, and anchor-proof codec all live here. Manifest is
+# publish-READY (2026-07-11): path deps carry versions, repo URL is the public
+# mirror. Actual publish = the E3 ceremony, held ONLY on the operator's
+# CARGO_REGISTRY_TOKEN. Publish order: elara-smt → elara-record → elara-verify
+# (path deps resolve from the registry once siblings are live).
+description = "Elara Protocol offline verifier: record/receipt checks, account-SMT walk binding, anchor-pinned seal verification, agent-mandate bundle verdicts, and (feature `verify-anchor`) the drand BLS + OTS anchor legs with receipt grading; CLI behind `cli`, browser exports behind `wasm`. Pure-Rust, wasm32-portable, signing-incapable by design — a verifier cannot forge."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/navigatorbuilds/elara-mesh"
+readme = "README.md"
+keywords = ["post-quantum", "verify", "offline", "drand", "merkle"]
+categories = ["cryptography", "data-structures"]
+
+[features]
+# Anchor-leg verification (drand BLS + OTS→Bitcoin) — pulls sha2 + drand-verify,
+# both pure-Rust and wasm32-clean. Off by default so record/seal verification
+# doesn't pay for BLS12-381.
+# `sha2` here and `clap` in `cli` are bare refs (implicit features), NOT `dep:`:
+# the workspace root cfg's features named `sha2`/`clap` in release builds, and
+# cargo-auditable replays those names through `cargo metadata --features`, which
+# validates them against every workspace member — a dep:-suppressed implicit
+# feature here hard-fails the release train (v0.2.1 run 29141738050). Keep dep:
+# only for names the workspace never uses as a feature name (drand-verify,
+# wasm-bindgen, serde-wasm-bindgen).
+verify-anchor = ["sha2", "dep:drand-verify"]
+# The `elara-verify` CLI (argv parsing + file IO + prose/JSON render around the
+# library checks). Requires the anchor legs — the CLI's --anchor/--receipt modes
+# are the flagship path. Library/wasm consumers never enable this.
+cli = ["clap", "verify-anchor"]
+# The browser/wasm exports (`wasm_api` module) — the verify-demo page's whole
+# API. Requires the anchor legs for receipt full-chain parity with the CLI.
+wasm = ["dep:wasm-bindgen", "dep:serde-wasm-bindgen", "verify-anchor"]
+
+[[bin]]
+name = "elara-verify"
+path = "src/bin/elara-verify.rs"
+required-features = ["cli"]
+
+[dependencies]
+# `path` for workspace builds, `version` so the PUBLISHED manifest carries a
+# real registry dep — cargo strips `path` on publish and REJECTS a version-less
+# dep (same trap as elara-light-client's dev-dep, fixed 2026-06-21).
+elara-record = { path = "../elara-record", version = "0.1.0" }
+elara-smt = { path = "../elara-smt", version = "0.1.0" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", features = ["float_roundtrip"] }
+hex = "0.4"
+base64 = "0.22"
+sha2 = { version = "0.10", optional = true }
+drand-verify = { version = "0.6.2", optional = true }
+clap = { version = "4", features = ["derive"], optional = true }
+wasm-bindgen = { version = "0.2", optional = true }
+serde-wasm-bindgen = { version = "0.6", optional = true }

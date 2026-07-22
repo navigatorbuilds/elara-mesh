@@ -1,0 +1,233 @@
+(* ===========================================================================
+   Elara REALM ADMISSION — symbolic model (SHARED CORE)
+   ---------------------------------------------------------------------------
+   This file is NOT run directly. run-proverif.sh concatenates it with one
+   scenario header from scenarios/admission_*.pvh (which adds the query + the
+   top-level `process`).
+
+   WHAT THIS MODELS — the post-handshake REALM ADMISSION exchange.
+     A `Federated` realm admits a peer only when the peer presents a membership
+     certificate signed by the federation ROOT key, AND the cert's member field
+     matches the identity the PQ HANDSHAKE just authenticated. The cert is
+     Dilithium3-signed over (domain-tag || member_identity_hash); the federation
+     root key is offline and never touches the wire (certs are handed to members
+     out of band — modelled by the private `certchan`).
+
+   THE DESIGN CLAIM UNDER TEST (src/network/realm.rs:10-17, verbatim):
+     "The cert does NOT need to ride inside the handshake transcript. The PQ
+      handshake already proves the peer possesses the secret key behind
+      peer_identity_hash; the cert binds that identity to the realm root. A
+      stolen cert fails the identity match, and a forged cert fails
+      root-signature verification — each check covers the other's gap."
+     So this model deliberately presents the cert IN CLEARTEXT on the public
+     wire (NOT inside the established AEAD session). That is the STRONGEST
+     attacker model for the integrity argument: the Dolev-Yao attacker reads,
+     replays, and re-presents any cert it observes. If admission integrity holds
+     with cleartext certs, it holds a fortiori under the real AEAD-wrapped
+     exchange — and proving it here MACHINE-VALIDATES the "needn't be in the
+     transcript" claim rather than assuming it. Confidentiality of the cert in
+     transit (member-list privacy) is a SEPARATE, weaker-attacker property
+     inherited from the composed record-secrecy proof (elara_composed_core.pvi);
+     it is the documented next increment, not this core's contribution.
+
+   THE PROPERTY (correspondence): event(Admitted(mid)) ==> event(RootIssued(mid)).
+     If the responder admits a peer whose HANDSHAKE-authenticated identity-hash is
+     `mid`, then the federation root genuinely ISSUED a membership cert for `mid`.
+     This single correspondence captures BOTH halves of the realm.rs claim:
+       * UNFORGEABILITY — no Admitted without a root issuance ⇒ no cert forges
+         without the root secret key (non-vacuity twin: admission_forge_broken
+         leaks skRoot ⇒ attacker forges a cert for its OWN id ⇒ Admitted with no
+         matching RootIssued ⇒ FALSE).
+       * IDENTITY-BINDING — Admitted carries the HANDSHAKE identity idh(ipk), not
+         the cert's claimed member, so a stolen cert presented over a different
+         handshake admits the wrong id (non-vacuity twin: admission_bind_broken
+         drops the `midc = idh(ipk)` check ⇒ attacker's stolen-cert session is
+         admitted under the attacker's id ⇒ no matching RootIssued ⇒ FALSE).
+     REALM ISOLATION (admission_cross_realm) is the same query holding even when
+     the attacker fully OWNS a foreign federation root: a foreign cert never
+     verifies against OUR configured root, so owning realm B cannot cross into
+     realm A.
+
+   Code under analysis:
+     src/network/realm.rs                         — RealmMembershipCert::{issue,
+       verify}: root-sig check, member==peer-identity binding, realm-root match;
+       AdmissionMsg::{Challenge,Response,Verdict} exchange.
+     src/network/pq_transport/stream.rs           — runs the admission exchange
+       after the handshake establishes the authenticated peer identity.
+     crates/elara-pq-transport/src/handshake.rs   — the 3-message hybrid
+       handshake that authenticates the peer identity the binding check pins.
+
+   WHY STANDALONE (not an include of the handshake core): ProVerif has no
+   #include; run-proverif.sh simulates one by `cat`-ing a single core ahead of
+   the header. The handshake message flow below is a VERBATIM MIRROR of
+   elara_handshake_core.pvi / elara_composed_core.pvi (P_init / P_resp) and MUST
+   stay in sync with them; only the post-handshake tail differs — the record
+   layer is replaced by the >>> ADMISSION LAYER <<< (marked below). The record
+   AEAD (raenc/radec) is intentionally absent: this core's contribution is
+   CERT/IDENTITY BINDING, which rests on the cleartext-cert attacker model above.
+
+   Design audited before authoring (2026-06-29). Dolev-Yao attacker controls c.
+   =========================================================================== *)
+
+(* ---- types (mirror handshake core) ------------------------------------- *)
+type sskey.    (* Dilithium3 / ML-DSA-65 long-term signing secret key        *)
+type spkey.    (* Dilithium3 long-term public key                            *)
+type dhsec.    (* X25519 ephemeral scalar                                    *)
+type G.        (* X25519 group element                                       *)
+type kemsec.   (* ML-KEM-768 ephemeral decapsulation key                     *)
+type kempub.   (* ML-KEM-768 ephemeral encapsulation (public) key            *)
+type key.      (* ChaCha20-Poly1305 AEAD session key                         *)
+
+(* ---- channels ---------------------------------------------------------- *)
+free c:channel.                       (* public network (attacker-controlled) *)
+free leak_dh:channel  [private].      (* X25519 shared secret leak hook       *)
+free leak_kem:channel [private].      (* ML-KEM shared secret leak hook       *)
+free certchan:channel [private].      (* OFFLINE root->member cert issuance —  *)
+                                      (* the root key never touches the wire   *)
+
+(* ---- long-term identities ---------------------------------------------- *)
+free skI:sskey   [private].   (* honest member  (initiator presenting a cert) *)
+free skR:sskey   [private].   (* honest responder (the realm admission gate)  *)
+free skRoot:sskey[private].   (* federation root (signs membership certs)     *)
+
+(* ---- realm membership-cert domain-separation tag ----------------------- *)
+(* Mirrors REALM_MEMBERSHIP_DOMAIN_TAG (realm.rs:27). Public: the tag is not a
+   secret; it only prevents cross-protocol signature reuse. *)
+free MEMBER_TAG:bitstring.
+
+(* ---- Dilithium3 signatures --------------------------------------------- *)
+fun spk(sskey):spkey.
+fun sign(bitstring, sskey):bitstring.
+reduc forall m:bitstring, k:sskey; checksig(spk(k), m, sign(m,k)) = true.
+
+(* ---- X25519 ------------------------------------------------------------- *)
+const g:G [data].
+fun exp(G, dhsec):G.
+equation forall x:dhsec, y:dhsec; exp(exp(g,x),y) = exp(exp(g,y),x).
+fun GtoB(G):bitstring [typeConverter].
+
+(* ---- ML-KEM-768 generic IND-CCA KEM (no false ct-binding equation) ------- *)
+fun kempk(kemsec):kempub.
+fun encap(kempub, bitstring):bitstring.
+fun kemss(kempub, bitstring):bitstring.
+reduc forall sk:kemsec, coins:bitstring;
+  decap(sk, encap(kempk(sk), coins)) = kemss(kempk(sk), coins).
+
+(* ---- hash / running transcript (SHA3-256) ------------------------------- *)
+fun h(bitstring):bitstring.
+
+(* ---- HKDF: two PUBLIC constructors over (x25519_ss, ml_kem_ss, transcript) *)
+fun kdf_send(bitstring, bitstring, bitstring):key.
+fun kdf_recv(bitstring, bitstring, bitstring):key.
+
+(* ---- handshake AEAD (3-arg, transcript-AD; msg2 / msg3) ----------------- *)
+fun aead(bitstring, bitstring, key):bitstring.            (* aead(ad, pt, k)  *)
+reduc forall ad:bitstring, m:bitstring, k:key;
+  adec(ad, aead(ad, m, k), k) = m.
+
+(* ---- identity hash = SHA3-256(dil_pk) ----------------------------------- *)
+fun idh(spkey):bitstring.
+
+(* ---- public timestamp (contributes no freshness) ------------------------ *)
+free ts0:bitstring.
+
+(* ---- events ------------------------------------------------------------- *)
+(* The federation root issued a membership cert for identity-hash `mid`. *)
+event RootIssued(bitstring).
+(* The responder admitted a peer whose HANDSHAKE-authenticated identity-hash is
+   `mid`. Carries idh(ipk) — what the responder authenticated in the handshake —
+   NOT the cert's claimed member field, so a stolen cert presented over a
+   different handshake is attributed to the WRONG (handshake) identity. *)
+event Admitted(bitstring).
+(* Handshake mutual-auth witnesses (kept for cross-checking against the
+   handshake core; not the admission property itself). *)
+event RespAcceptInit(spkey, bitstring).
+event InitCommit(spkey, bitstring).
+
+(* ===========================================================================
+   Federation root — issues ONE membership cert for the honest member over the
+   PRIVATE certchan (offline issuance; the root key never appears on `c`).
+   The signed payload is (MEMBER_TAG, member_identity_hash), mirroring
+   realm.rs canonical_signing_bytes (domain tag || member id; WHICH root key
+   verifies binds the cert to one realm — see admission_cross_realm).
+   =========================================================================== *)
+let P_root =
+  let mid = idh(spk(skI)) in
+  event RootIssued(mid);
+  out(certchan, sign((MEMBER_TAG, mid), skRoot)).
+
+(* ===========================================================================
+   Member (initiator) — handshake mirror of P_init, then ADMISSION-LAYER cert
+   presentation. Pinned to the honest responder identity pkRexp.
+   =========================================================================== *)
+let P_init_adm(myskI:sskey, pkRexp:spkey) =
+  new xi:dhsec;
+  new ikem:kemsec;
+  let epk_x = exp(g, xi) in
+  let epk_kem = kempk(ikem) in
+  let msg1 = (ts0, epk_x, epk_kem) in
+  out(c, msg1);
+  in(c, (repk_x:G, ct:bitstring, aead2:bitstring));
+  let dh_ss  = GtoB(exp(repk_x, xi)) in
+  let kem_ss = decap(ikem, ct) in
+  ( out(leak_dh, dh_ss) | out(leak_kem, kem_ss) |
+    ( let t1  = h((ts0, epk_x, epk_kem)) in
+      let t2  = h((t1, (repk_x, ct))) in
+      let ksend = kdf_send(dh_ss, kem_ss, t2) in       (* I.k_send = k1 *)
+      let krecv = kdf_recv(dh_ss, kem_ss, t2) in       (* I.k_recv = k2 *)
+      let (rpk:spkey, rsig:bitstring) = adec(t2, aead2, krecv) in
+      if idh(rpk) = idh(pkRexp) then
+      if checksig(rpk, t2, rsig) = true then
+      let t3 = h((t2, aead2)) in
+      let isig = sign(t3, myskI) in
+      event InitCommit(spk(myskI), t3);
+      out(c, aead(t3, (spk(myskI), isig), ksend));     (* msg3 — authenticates the member *)
+      (* >>> ADMISSION LAYER <<< — present the membership cert IN CLEARTEXT.
+         Certs are not secrets: integrity rests on the identity binding, not
+         confidentiality (realm.rs:10-17). The cert was issued offline by the
+         root over certchan; the member presents (its own identity-hash, the
+         root signature). The attacker observes and may re-present it. *)
+      in(certchan, mycert:bitstring);
+      out(c, (idh(spk(myskI)), mycert)) ) ).
+
+(* ===========================================================================
+   Responder (realm admission gate) — handshake mirror of P_resp (accepts ANY
+   initiator; auth rests on the msg3 signature over t3), then the ADMISSION
+   GATE. `enforce_bind` selects whether the identity-binding check is applied:
+     true  -> production gate (realm.rs verify(): MemberMismatch on a cert whose
+              member field != the handshake-authenticated peer identity).
+     false -> the admission_bind_broken non-vacuity twin (binding dropped).
+   The realm-root match + signature check (RootMismatch / BadSignature) is the
+   checksig against `expected_root_pk` and is ALWAYS applied.
+   =========================================================================== *)
+let P_resp_adm(myskR:sskey, expected_root_pk:spkey, enforce_bind:bool) =
+  in(c, (rts:bitstring, iepk_x:G, iepk_kem:kempub));
+  new yr:dhsec;
+  new coins:bitstring;
+  let repk_x = exp(g, yr) in
+  let ct     = encap(iepk_kem, coins) in
+  let kem_ss = kemss(iepk_kem, coins) in
+  let dh_ss  = GtoB(exp(iepk_x, yr)) in
+  ( out(leak_dh, dh_ss) | out(leak_kem, kem_ss) |
+    ( let t1 = h((rts, iepk_x, iepk_kem)) in
+      let t2 = h((t1, (repk_x, ct))) in
+      let ksendR = kdf_recv(dh_ss, kem_ss, t2) in      (* R.k_send = k2 *)
+      let krecvR = kdf_send(dh_ss, kem_ss, t2) in      (* R.k_recv = k1 = I.k_send *)
+      let rsig = sign(t2, myskR) in
+      let aead2 = aead(t2, (spk(myskR), rsig), ksendR) in
+      out(c, (repk_x, ct, aead2));
+      in(c, aead3:bitstring);
+      let t3 = h((t2, aead2)) in
+      let (ipk:spkey, isig:bitstring) = adec(t3, aead3, krecvR) in
+      if checksig(ipk, t3, isig) = true then
+      event RespAcceptInit(ipk, t3);
+      (* >>> ADMISSION GATE <<< — receive the presented cert (midc, csig).
+         (1) ALWAYS: root signature + realm match — the cert must verify against
+             the CONFIGURED realm root pk over (MEMBER_TAG, midc). A cert from a
+             foreign root, or a forged one, fails here (RootMismatch/BadSignature).
+         (2) enforce_bind: the cert's member field must equal the
+             HANDSHAKE-authenticated peer identity idh(ipk) (MemberMismatch). *)
+      in(c, (midc:bitstring, csig:bitstring));
+      if checksig(expected_root_pk, (MEMBER_TAG, midc), csig) = true then
+      if (enforce_bind = false) || (midc = idh(ipk)) then
+      event Admitted(idh(ipk)) ) ).

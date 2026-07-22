@@ -1,0 +1,58 @@
+(* SCENARIO: uks_broken — SAME-WORLD non-vacuity twin for `uks`, second honest
+   initiator I2's long-term key skI2 leaked to the attacker UP-FRONT (phase 0, no
+   `phase` guard — exactly as kci leaks skI). Everything else identical to `uks`:
+   skI private, skR private, the same two-initiator + responder process. This is the
+   lane-convention same-world twin (one varied parameter = whether skI2 is public),
+   NOT a cross-world borrow.
+
+   EXPECT (machine-checked):
+   - Q_I  (spk(skI))  -> TRUE   cross-KEY signature separation: leaking I2's key does
+                                NOT let the attacker drive RespAcceptInit(spk(skI),.)
+                                without a real I commit — forging I's msg3 needs
+                                sign(t3, skI), i.e. skI, which stays private. This is
+                                signature unforgeability holding per-key between two
+                                DISTINCT identities (the registered-key-UKS-resistance
+                                instance), stated precisely — not a broad "isolation".
+   - Q_I2 (spk(skI2)) -> FALSE  the non-vacuity witness. With skI2 public the attacker
+                                runs a FRESH session AS I2 — its OWN ephemerals, so it
+                                legitimately derives that session's key — and signs t3
+                                with the leaked skI2. R accepts and fires
+                                RespAcceptInit(spk(skI2), t) with NO honest InitCommit.
+                                (Note the mechanism: the attacker does NOT forge into a
+                                relayed honest I2<->R session — it never holds that
+                                session's key; it completes its own session as I2.)
+                                This is key-disclosure self-impersonation, the
+                                accept-any responder's by-design behaviour (the direct
+                                analogue of kci's RespAcceptInit FALSE), and it proves
+                                RespAcceptInit(spk(skI2),.) IS reachable — so Q_I2's
+                                TRUE in `uks` is non-vacuous.
+   - probe-secrecy   -> TRUE    honest I and honest I2 still complete only with the
+                                honest R (pin needs sign(t2, skR) = skR, never leaked),
+                                so their probes stay secret. This is NOT a
+                                secrecy-breaking twin like kci_broken; its sole job is
+                                event reachability.
+
+   NOTE on the encoding (as in kci): out(c, skI2) hands the attacker a COPY of skI2;
+   the honest !P_init(skI2, .) KEEPS running, so honest I2 sessions still complete and
+   fire their events normally. "Attacker holds skI2" does not disable honest I2.
+
+   run-proverif.sh asserts (mode uks_broken): Q_I true, Q_I2 false (matched by event
+   NAME, like the kci mode), probe-secrecy true.
+   ------------------------------------------------------------------------- *)
+
+free skI2:sskey [private].
+
+query t:bitstring;
+  inj-event(RespAcceptInit(spk(skI),  t)) ==> inj-event(InitCommit(spk(skI),  t)).
+
+query t:bitstring;
+  inj-event(RespAcceptInit(spk(skI2), t)) ==> inj-event(InitCommit(spk(skI2), t)).
+
+query attacker(probe).
+
+process
+  out(c, spk(skI)); out(c, spk(skI2)); out(c, spk(skR));
+  out(c, skI2);                                  (* second initiator's OWN key compromised, UP-FRONT *)
+  ( !P_init(skI,  spk(skR))
+  | !P_init(skI2, spk(skR))
+  | !P_resp(skR) )

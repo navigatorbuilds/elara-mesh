@@ -1,0 +1,12 @@
+[package]
+name = "elara-active-inference"
+version = "0.1.0"
+edition = "2021"
+description = "Active inference (free-energy-principle) agent over discrete POMDPs: variational free-energy state inference plus expected-free-energy action selection. Pure std, zero dependencies. Extracted from the Elara Protocol."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/navigatorbuilds/elara-mesh"
+readme = "README.md"
+keywords = ["active-inference", "free-energy", "pomdp", "bayesian", "agent"]
+categories = ["science", "algorithms"]
+
+[dependencies]
