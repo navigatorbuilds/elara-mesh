@@ -1,0 +1,14 @@
+(* SCENARIO: X25519 fully broken — the attacker is handed every session's ECDH
+   shared secret (leak_dh bridged to the public channel). ML-KEM holds.
+   EXPECT: session-key secrecy STILL holds (the ML-KEM half carries it).
+   This is the SYMMETRIC direction the code only asserts in kem.rs:6-7 ("and
+   vice versa") but never argues in the handshake — so a PASS here is a genuinely
+   NEW result, not a confirmation of an existing comment.
+   run-proverif.sh asserts the RESULT is "true".
+   ------------------------------------------------------------------------- *)
+query attacker(probe).
+
+process
+  out(c, spk(skI)); out(c, spk(skR));
+  ( !P_init(skI, spk(skR)) | !P_resp(skR)
+  | !( in(leak_dh, x:bitstring); out(c, x) ) )      (* X25519 broken: ss -> attacker *)

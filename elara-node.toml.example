@@ -1,0 +1,120 @@
+# ═══════════════════════════════════════════════════════════════════════
+# Elara Node Configuration
+# ═══════════════════════════════════════════════════════════════════════
+#
+# Copy to elara-node.toml and customize. Every field can be overridden
+# with an ELARA_* environment variable (noted in comments).
+#
+# Usage:
+#   elara-node --config elara-node.toml
+#   ELARA_LISTEN=0.0.0.0:9999 elara-node   # env overrides file
+
+# ─── Network ──────────────────────────────────────────────────────────
+
+# Address and port the PUBLIC HTTP listener binds to. With the data plane split
+# on (default, below), this serves only the public surface (health/metrics/ping/
+# status/version + light-client reads); a path gate 404s everything else off-host.
+# Env: ELARA_LISTEN
+listen_addr = "0.0.0.0:9473"
+
+# Full data/submit/admin API listener. Loopback-only by default — front it with a
+# reverse proxy (Caddy/nginx) to expose chosen paths over HTTPS. Set EMPTY to
+# collapse everything onto listen_addr (single-listener; simplest for local use).
+# Env: ELARA_DATA_PLANE_LISTEN  (empty string = single-listener mode)
+data_plane_listen_addr = "127.0.0.1:9472"
+
+# Node role: "leaf", "relay", or "witness".
+# Witnesses sign attestations; relays forward without witnessing.
+# Env: ELARA_NODE_TYPE
+node_type = "leaf"
+
+# Embed a League-of-Entropy drand pulse in the seals this node produces (when
+# a fresh pulse is cached) — a BLS-verifiable *not-before* bound (see
+# docs/KNOWN-LIMITATIONS.md §2). Opt-in
+# by design (a producer never emits new seal metadata by surprise); needs
+# outbound HTTPS to the drand relays. Seal-producing nodes only.
+# Env: ELARA_DRAND_PULSE
+# drand_pulse_enabled = true
+
+# Seed peer addresses for bootstrap (comma-separated in env).
+# Env: ELARA_SEEDS="host1:port,host2:port"
+seed_peers = []
+
+# Realm identity — MUST match the network you are joining. A node whose
+# network_id differs from the seed is rejected at the handshake. When joining an
+# existing network, ask the operator for the realm's value.
+# Env: ELARA_NETWORK_ID
+network_id = "testnet"
+
+# Consensus zone topology — NOT a local preference. Records route by
+# hash(record_id) % zone_count, so a value that disagrees with the network
+# silently forks your node onto different routing. The default 0 ("auto") is a
+# join-fork trap: when joining an existing network, set this to the network's
+# current canonical zone_count (ask the operator; 1 for a single-zone dev-net).
+# Env: ELARA_ZONE_COUNT
+zone_count = 1
+
+# ─── Identity & Storage ──────────────────────────────────────────────
+
+# Base directory for all node data (identity, DB, certs).
+# Other relative paths resolve against this.
+# Env: ELARA_DATA_DIR
+data_dir = "."
+
+# Path to the identity JSON file (Dilithium3 keypair).
+# Generate with: elara-node --data-dir ./mynode --generate-identity
+# Env: ELARA_IDENTITY
+identity_path = "identity.json"
+
+# Legacy field — retained for config compatibility but unused. The node's
+# primary store is RocksDB, kept in the `rocksdb/` subdirectory of data_dir.
+# Env: ELARA_DB
+db_path = "elara.db"
+
+# Identity hash of the genesis authority (required for ledger validation).
+# Must match the identity that will mint the initial supply.
+# Env: ELARA_GENESIS
+genesis_authority = ""
+
+# ─── Gossip ──────────────────────────────────────────────────────────
+
+# Interval (seconds) between gossip pull cycles.
+# Lower = faster sync, higher = less bandwidth.
+# Env: ELARA_GOSSIP_INTERVAL
+gossip_pull_interval_secs = 30
+
+# Automatically witness records created by other identities.
+# Only relevant for "witness" node_type.
+# Env: ELARA_AUTO_WITNESS (true/false or 1/0)
+auto_witness = false
+
+# ─── TLS ─────────────────────────────────────────────────────────────
+# The node speaks plain HTTP. TLS is terminated by a reverse proxy
+# (Caddy/nginx) in front of the loopback data-plane listener — there are no
+# in-node TLS settings. See the README "Two listeners" section.
+
+# ─── Rate Limiting ───────────────────────────────────────────────────
+
+# Max POST (write) requests per IP per minute. 0 = disabled.
+# Env: ELARA_RATE_LIMIT_WRITE
+rate_limit_write = 120
+
+# Max GET (read) requests per IP per minute. 0 = disabled.
+# Env: ELARA_RATE_LIMIT_READ
+rate_limit_read = 600
+
+# ─── Admin API ───────────────────────────────────────────────────────
+
+# Bearer token for the PROXIED node-RPC surface (/rpc/*) ONLY. EMPTY = a random
+# token is auto-generated at boot (printed once in the log). /admin/* does
+# NOT use bearer tokens: it requires a Dilithium3-signed X-PQ-Admin header
+# (keys via `elara-cli pq-admin-keygen`, allowed via ELARA_ADMIN_PUBKEYS) —
+# see docs/RPC-API.md.
+# Env: ELARA_ADMIN_TOKEN
+admin_token = ""
+
+# ─── DNS seed discovery (optional) ───────────────────────────────────
+# Hostnames resolved to A/AAAA at startup and merged into seed peers
+# (port = dns_seed_port, default 9473). EMPTY by default — the project
+# ships no public DNS seed. Env: ELARA_DNS_SEEDS (comma-separated).
+# dns_seeds = ["seeds.example.org"]

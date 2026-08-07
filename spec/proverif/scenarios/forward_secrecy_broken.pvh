@@ -1,0 +1,33 @@
+(* SCENARIO: forward_secrecy_broken — NON-VACUITY / timing gate for
+   forward_secrecy. The honest responder's long-term key skR is known to the
+   attacker from the START (phase 0, no `phase` guard) instead of leaking later.
+   EXPECT: session-key secrecy FAILS — an INTENTIONAL violation, the forward-
+   secrecy analogue of both_broken / spec/tla/MCTightBreak.
+
+   This is the SAME honest process as forward_secrecy (`!P_init | !P_resp`); the
+   ONLY change is WHEN the attacker obtains skR — during the sessions rather than
+   after. With skR in hand, the attacker MITMs the pinned initiator as the
+   responder: it picks its own ephemerals (so it knows dh_ss, kem_ss, hence the
+   session keys), forges rsig = sign(t2, skR), and ships aead2. The initiator's
+   pin check idh(spk(skR)) = idh(spk(skR)) passes and checksig(spk(skR), t2,
+   sign(t2,skR)) reduces to true (elara_handshake_core.pvi:128-129), so it
+   accepts and emits the probe under a key the attacker computed.
+
+   Two things this proves: (1) probe IS reachable, so forward_secrecy's "is
+   true" is NOT vacuously true (had probe been unreachable, this gate would also
+   report "true" and the pair would be meaningless); (2) the property is
+   TIMING-dependent — reveal-during breaks secrecy, reveal-after (forward_secrecy)
+   does not. That flip is precisely what forward secrecy means.
+
+   Only skR is revealed: it alone is sufficient (the initiator pins the responder
+   identity). Revealing skI too would still fail, but skR isolates the cause.
+
+   run-proverif.sh asserts: not attacker(probe[]) is false   (mode secret_false)
+   ------------------------------------------------------------------------- *)
+
+query attacker(probe).
+
+process
+  out(c, spk(skI)); out(c, spk(skR));
+  out(c, skR);                                   (* responder identity compromised UP-FRONT *)
+  ( !P_init(skI, spk(skR)) | !P_resp(skR) )

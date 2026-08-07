@@ -1,0 +1,26 @@
+(* SCENARIO: admission_bind_broken — NON-VACUITY twin of admission_baseline.
+   Same world, root key SECRET (no forgery possible), but the responder runs with
+   the identity-binding check DROPPED (enforce_bind = false): it admits on cert
+   validity alone, skipping the `midc = idh(ipk)` match. This is the pre-design
+   gate the realm.rs comment warns against — admitting a peer because it waves a
+   valid cert, without checking the cert names THAT peer.
+
+   EXPECT (run-proverif.sh mode adm_fails): admission integrity FAILS —
+     event(Admitted(mid)) ==> event(RootIssued(mid)) is false.
+   The honest member presents its valid cert in CLEARTEXT, so the attacker
+   obtains it (a "stolen cert"). The attacker runs the handshake as ITSELF
+   (idh(spk(skAtt))), then re-presents the stolen cert (member field =
+   idh(spk(skI)), a valid root signature). With no binding check the responder
+   admits, emitting Admitted(idh(spk(skAtt))) — the HANDSHAKE identity — for which
+   no RootIssued exists. This proves the IDENTITY-BINDING half of the realm.rs
+   claim is load-bearing: the root signature ALONE does not authorise the
+   presenter; the cert must name the handshake-authenticated peer. (Contrast the
+   baseline, where this exact attack is rejected by the binding check.)
+   ------------------------------------------------------------------------- *)
+
+query mid:bitstring;
+  event(Admitted(mid)) ==> event(RootIssued(mid)).
+
+process
+  out(c, spk(skI)); out(c, spk(skR)); out(c, spk(skRoot));
+  ( !P_root | !P_init_adm(skI, spk(skR)) | !P_resp_adm(skR, spk(skRoot), false) )  (* BINDING DROPPED *)

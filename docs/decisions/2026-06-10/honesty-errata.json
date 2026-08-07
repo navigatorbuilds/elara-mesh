@@ -1,0 +1,12 @@
+{
+ "kind": "design_decision",
+ "project": "elara-protocol",
+ "date": "2026-06-10",
+ "decision": "honesty-errata",
+ "statement": "Three paper defects found and corrected same night: false age-proof claim (tokenomics v0.5.0), missing anchor semantics (whitepaper v0.7.11 anchor_trail + v0.7.12 anchor-media requirements), MESH-BFT single-network scope + undefined disjoint-DAG merge (8.1 limitation + interim publication-as-attested-bundle rule). Merge THEOREM remains future work, design-first track.",
+ "decided_by": "Elara (audit + fixes), Nenad (directive: fix fundamentals)",
+ "refs": [
+  "elara-protocol@bc60985",
+  "elara-protocol@102cad1"
+ ]
+}

@@ -1,0 +1,11 @@
+{
+ "kind": "design_decision",
+ "project": "elara-protocol",
+ "date": "2026-06-10",
+ "decision": "launch-voice-project-fronted",
+ "statement": "Public voice = the project itself; Nenad's name appears only where it must (whitepapers, grant applications, legal). No founder performance, no personal promotion. The launch story is told matter-of-fact with verifiable receipts: solo builder + AI agent who co-designs, audits, ships, and records her own actions under mandate on the ledger she is building. Elara drafts the flip-day announcement set (Show HN, README story section, how-this-was-built page with on-mesh proofs).",
+ "decided_by": "Nenad ('all yes'), recommendation Elara",
+ "refs": [
+  "docs/READ-SIDE-STRATEGY.md"
+ ]
+}

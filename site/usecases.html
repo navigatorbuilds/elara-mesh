@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Use cases — Elara</title>
+<meta name="description" content="What a post-quantum validation mesh is for: AI-agent accountability, manufacturing provenance, proof of priority, sybil resistance, offline-first operations, and the coming fleet of personal AI machines.">
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='38' fill='none' stroke='%2336e2c4' stroke-width='9'/><circle cx='50' cy='50' r='10' fill='%2336e2c4'/></svg>">
+<script src="reveal.js" defer></script>
+</head>
+<body>
+
+<header class="nav">
+  <a class="nav-brand" href="index.html">ELARA</a>
+  <nav class="nav-links">
+    <a href="index.html#why">Why</a>
+    <a href="how.html">How it works</a>
+    <a href="usecases.html" class="nav-on">Use cases</a>
+    <a href="verify/">Verify</a>
+    <a href="receipts.html">Receipts</a>
+    <a href="index.html#papers">Papers</a>
+    <a class="nav-gh" href="https://github.com/navigatorbuilds/elara-mesh" rel="noopener">GitHub →</a>
+  </nav>
+</header>
+
+<main class="page">
+
+<header class="page-head">
+  <canvas id="mesh" class="page-mesh" aria-hidden="true"></canvas>
+  <p class="hero-kicker">Use cases</p>
+  <h1>One primitive. <em class="grad-text">Every domain that needs proof.</em></h1>
+  <p class="hero-sub">Elara does one thing: a signed, independently witnessed, time-bracketed
+  record of <em>who did what, when</em> — cheap enough to attach to any action, strong enough
+  to still be checkable decades from now. What follows is where that primitive carries weight.</p>
+</header>
+
+<!-- ── 01 · AGENT ACCOUNTABILITY ─────────────────────────────── -->
+<section id="agents" class="block">
+  <h2><span class="sec-n">01</span> AI-agent accountability</h2>
+  <div class="cols">
+    <div class="col">
+      <p>Autonomous agents already write code, move money, file documents, and operate
+      equipment. When one of them causes damage — or is accused of it — the only evidence
+      today is the operator's own logs: mutable, private, and written by the party under
+      suspicion.</p>
+      <p>On Elara, each action an agent takes is signed with the agent's own post-quantum
+      identity, attested by independent witnesses with no stake in the outcome, and sealed
+      into a history that the operator cannot quietly rewrite. Authorization is explicit:
+      an action can carry a <strong>mandate</strong> — a signed, revocable grant proving
+      the agent was permitted to act, with the revocation window part of the proof.</p>
+    </div>
+    <div class="col">
+      <p>The result is a neutral record that all sides can check after the fact: which
+      agent acted, under whose authority, inside or outside its mandate, at what time —
+      answers that survive the operator's incentives, and survive the quantum decade.</p>
+      <p class="uc-punch">Liability for autonomous systems becomes an evidence question
+      with actual evidence.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ── 02 · PROVENANCE ───────────────────────────────────────── -->
+<section id="factory" class="block block-alt">
+  <h2><span class="sec-n">02</span> Manufacturing &amp; supply-chain provenance</h2>
+  <div class="cols">
+    <div class="col">
+      <p>A production line is a sequence of custody hand-offs: cut, weld, paint, test, ship.
+      Each station signs what it did to which unit at which second, and the unit accumulates
+      a verifiable history — not a database entry someone can edit after a recall notice,
+      but a chain of independently witnessed records.</p>
+    </div>
+    <div class="col">
+      <p>When a defect surfaces months later, tracing it is a lookup, not an investigation:
+      the record identifies the station, the machine, and the moment. The same mechanism
+      covers any custody chain — components, food, pharmaceuticals, evidence lockers.</p>
+      <p class="uc-punch">Quality control gains an audit trail that doesn't depend on
+      trusting the factory's own database.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ── 03 · PRIORITY ─────────────────────────────────────────── -->
+<section id="authorship" class="block">
+  <h2><span class="sec-n">03</span> Proof of priority</h2>
+  <div class="cols">
+    <div class="col">
+      <p>A creator finishes a work and seals its fingerprint — a hash that could only come
+      from those exact bytes — into the timeline. The time bound cites a drand pulse,
+      so it cannot be back-dated by anyone, including the network itself. The work stays
+      private; only the fingerprint is public.</p>
+    </div>
+    <div class="col">
+      <p>When a dispute comes — a copy posted later, a design claimed by a competitor,
+      a dataset's training cut-off contested — the earlier seal settles the ordering.
+      To be precise about what this proves: <strong>registration priority</strong>, not
+      authorship. Whoever sealed the bytes first, sealed them first; in most real disputes,
+      that ordering is the whole fight.</p>
+      <p class="uc-punch">Priority disputes end with a timestamp, not a shouting match.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ── 04 · SYBIL RESISTANCE ─────────────────────────────────── -->
+<section id="spamfarm" class="block block-alt">
+  <h2><span class="sec-n">04</span> Sybil resistance as arithmetic</h2>
+  <div class="cols">
+    <div class="col">
+      <p>A thousand bot identities behind one operator are a single voice pretending to be
+      a crowd. Most systems fight this with CAPTCHAs and heuristics. Elara's consensus
+      (MESH-BFT) treats it as arithmetic: witnesses that share an organization, a subnet,
+      or an operator are <strong>correlation-penalized</strong> — their combined weight
+      collapses toward a single vote.</p>
+    </div>
+    <div class="col">
+      <p>Independence is what counts. A thousand clones settle roughly one vote's worth of
+      weight; three genuinely independent witnesses settle three. The property is proved in
+      the MESH-BFT paper and enforced in the consensus hot path, not in a moderation queue.</p>
+      <p class="uc-punch">Buying a crowd stops working when the mesh can count.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ── 05 · OFFLINE-FIRST ────────────────────────────────────── -->
+<section id="offline" class="block">
+  <h2><span class="sec-n">05</span> Offline-first field operations</h2>
+  <div class="cols">
+    <div class="col">
+      <p>A research vessel mid-ocean, a sensor grid in a dead zone, an inspection team in a
+      basement: work doesn't stop where connectivity does. Elara records are created and
+      signed fully offline, each carrying a causal clock that fixes its place in the
+      sequence of events.</p>
+    </div>
+    <div class="col">
+      <p>When a connection returns — hours or weeks later — the backlog syncs, and the mesh
+      weaves it into history in the order it was created, not the order it arrived. Offline
+      operation is the designed-for case, not a degraded mode.</p>
+      <p class="uc-punch">Disconnection is a delay in reporting, never a gap in the record.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ── 06 · THE AI-BOX FLEET ─────────────────────────────────── -->
+<section id="aiboxes" class="block block-alt">
+  <h2><span class="sec-n">06</span> The coming fleet of personal AI machines</h2>
+  <div class="cols">
+    <div class="col">
+      <p>The hardware shift is already visible: AI-class personal machines with large
+      unified memory, built to run local models around the clock. As they spread, two
+      things follow. Millions of always-on agents will act on their owners' behalf —
+      and millions of capable machines will sit idle most of the day.</p>
+      <p>Elara is built for both halves. Agent actions get the mandate treatment from
+      use case 01 — signed, revocable, provable authorization. Idle machines become
+      witnesses: spare cycles that attest to their neighbourhood's records make the mesh
+      stronger with every box that joins.</p>
+    </div>
+    <div class="col">
+      <p>To be exact about the claim: this is the direction the architecture is built for,
+      not a deployed fleet. What exists today is the runtime you can run on such a machine,
+      the mandate mechanism in code, and a network design whose capacity targets assume
+      exactly this hardware wave.</p>
+      <p class="uc-punch">Elara is positioned to be the trust fabric <em>between</em> the
+      world's local AIs — the record they check each other against, never a model
+      competing with them.</p>
+    </div>
+  </div>
+</section>
+
+<section class="cta-band">
+  <h2>Your world has records. <em class="grad-text">Seal them.</em></h2>
+  <p>Every use case above runs on the same open-source runtime — one clone, one build, no permission needed.</p>
+  <span class="code-line">git clone https://github.com/navigatorbuilds/elara-mesh.git</span><br>
+  <a class="btn btn-solid" href="how.html">See how the mesh does it</a>
+</section>
+
+</main>
+
+<footer class="footer">
+  <div><strong>ELARA</strong> — an open-source post-quantum validation mesh.</div>
+  <div class="footer-links">
+    <a href="index.html">Home</a>
+    <a href="how.html">How it works</a>
+    <a href="https://github.com/navigatorbuilds/elara-mesh" rel="noopener">GitHub</a>
+    <a href="papers/ELARA-PROTOCOL-WHITEPAPER.pdf">Whitepaper</a>
+  </div>
+  <div class="footer-fine">© 2026 Elara Protocol contributors · AGPL-3.0 node, MIT/Apache SDK · No cookies, no trackers, no token.</div>
+</footer>
+
+</body>
+</html>

@@ -1,0 +1,110 @@
+# cargo-deny — supply-chain gate for the dependency graph.
+#
+# Backs the project's trust story: a post-quantum *validation* mesh is judged on
+# its own supply chain, not just its consensus core. This config is the machine-
+# checked policy behind that claim. It runs four checks:
+#   advisories — RustSec vulnerabilities / unmaintained / unsound crates
+#   licenses   — every dependency carries a license we have vetted
+#   bans       — no wildcard version requirements; duplicate versions surfaced
+#   sources    — every crate comes from crates.io, nothing from an unknown git/registry
+#
+# Enforced in CI by the `supply-chain` job in .github/workflows/ci.yml (turns the
+# build red on a new advisory or an unvetted license) and runnable locally with
+# `cargo deny check`. Authored against cargo-deny 0.19.x; all fields used here are
+# stable across 0.16+.
+
+[graph]
+# Scan the union of all feature flags and all target platforms — a supply-chain
+# gate must see every crate the project *could* compile (node + mobile/wasm +
+# python bindings + windows/macos/linux targets), not just the default build.
+# Empty `targets` = all targets.
+all-features = true
+targets = []
+
+[output]
+feature-depth = 1
+
+# ----------------------------------------------------------------------------
+[advisories]
+# Vulnerabilities, unmaintained, unsound and yanked crates are all denied by
+# default in cargo-deny 0.16+. We keep that strict default; the only entries
+# below are explicit, justified exceptions reviewed at the time of writing.
+ignore = [
+    # paste 1.0.15 — RUSTSEC-2024-0436, "no longer maintained". No fixed version
+    # exists (the crate is archived upstream). It is a *build-time* proc-macro
+    # pulled transitively by tikv-jemalloc-ctl; it ships no runtime code and has
+    # zero attacker-reachable surface. Re-evaluate if jemalloc-ctl drops it or a
+    # maintained fork lands. This is the ONLY advisory we accept — the three live
+    # ones surfaced on first run (quinn-proto RUSTSEC-2026-0185 remote DoS,
+    # memmap2 RUSTSEC-2026-0186, rand RUSTSEC-2026-0097) were FIXED by upgrading,
+    # not ignored.
+    "RUSTSEC-2024-0436",
+]
+
+# ----------------------------------------------------------------------------
+[licenses]
+# Allow-list = exactly the permissive licenses actually present in the tree
+# (enumerated with `cargo deny list`). A dependency under any other license
+# fails the gate, so a future copyleft transitive can never slip in unnoticed
+# and impose its terms on the MIT/Apache-licensed SDK crates.
+#
+# Dual/multi-licensed crates resolve via their permissive arm automatically:
+#   self_cell = "Apache-2.0 OR GPL-2.0-only"        -> satisfied by Apache-2.0
+#   r-efi     = "MIT OR Apache-2.0 OR LGPL-2.1-..." -> satisfied by MIT/Apache
+# so GPL-2.0-only / LGPL are deliberately NOT allowed here.
+allow = [
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-1-Clause",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "ISC",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "Unicode-3.0",
+    "Unlicense",
+]
+confidence-threshold = 0.8
+# AGPL-3.0-only is the node's own license — allowed ONLY for our own crate, so a
+# new AGPL *dependency* still trips the gate (we do not want to inherit AGPL from
+# a third party into the published mirror without an explicit decision).
+# elara-verify-wasm's exception was REMOVED in extraction Step 4d: the wasm
+# verifier is MIT/Apache over elara-verify + elara-record alone — this removal
+# is the machine-checked proof that no AGPL code links into the demo artifact
+# (elara-runtime stays listed: it reaches verify-wasm's graph as a
+# dev-dependency for signing test fixtures, which never ship).
+exceptions = [
+    { allow = ["AGPL-3.0-only"], name = "elara-runtime" },
+]
+
+[licenses.private]
+# We publish; there is no unpublished private crate to skip.
+ignore = false
+
+# ----------------------------------------------------------------------------
+[bans]
+# Wildcard (`*`) version requirements are a supply-chain smell — they let a
+# future publish silently pull a new major. Deny them. Our 8 workspace crates
+# are `path` deps (no version requirement); `allow-wildcard-paths` keeps those
+# from being mis-flagged as wildcards.
+wildcards = "deny"
+allow-wildcard-paths = true
+# Duplicate versions are surfaced (warn) but not denied: a real tree the size of
+# this one legitimately carries several windows-sys / rand_core / thiserror major
+# versions via different deps. Hard-denying would be churn, not security.
+multiple-versions = "warn"
+highlight = "all"
+workspace-default-features = "allow"
+external-default-features = "allow"
+
+# ----------------------------------------------------------------------------
+[sources]
+# Every dependency must come from crates.io. An unknown registry or a git
+# dependency (a common vector for typosquat / unreviewed code) fails the gate.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

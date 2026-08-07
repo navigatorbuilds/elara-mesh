@@ -1,0 +1,13 @@
+(* SCENARIO: ML-KEM-768 fully broken — the attacker is handed every session's
+   ML-KEM shared secret (leak_kem bridged to the public channel). X25519 holds.
+   EXPECT: session-key secrecy STILL holds (the X25519 half carries it).
+   This is the direction the code comments actually assert
+   (handshake.rs:16 "MITM killer even if ML-KEM is broken").
+   run-proverif.sh asserts the RESULT is "true".
+   ------------------------------------------------------------------------- *)
+query attacker(probe).
+
+process
+  out(c, spk(skI)); out(c, spk(skR));
+  ( !P_init(skI, spk(skR)) | !P_resp(skR)
+  | !( in(leak_kem, x:bitstring); out(c, x) ) )    (* ML-KEM broken: ss -> attacker *)

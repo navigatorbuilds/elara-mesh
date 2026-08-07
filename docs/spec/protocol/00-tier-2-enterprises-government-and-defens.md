@@ -1,0 +1,16 @@
+#### Tier 2: Enterprises, Government, and Defense
+
+For enterprises — defense contractors, pharmaceutical companies, semiconductor manufacturers, intelligence agencies — longevity means **permanent proof that validation occurred, with permanent secrecy about what was validated**:
+
+- **SOVEREIGN classification:** The validation record stores only a one-way cryptographic hash of the content, never the content itself. A future civilization reading a SOVEREIGN record can verify that a specific entity signed a specific hash at a specific time — the mathematical proof is eternal and readable. But the content behind that hash is irreversibly hidden.
+
+- **Encrypt-then-hash (recommended):** For maximum forward secrecy, enterprises store `Hash(Encrypt(content, K))` where K is an enterprise-controlled encryption key. Even if future advances break the hash function's preimage resistance (reversing a hash to its original content), the reversed hash yields only ciphertext — encrypted data that is useless without the key. The enterprise controls the key: they can rotate it, escrow it, or destroy it. This creates an irreversible double barrier — both the hash AND the encryption must be independently broken, and one of the keys may no longer exist.
+
+- **Zero-knowledge proof path (design-stage, strongest):** For the most sensitive content, the zero-knowledge proof layer specified in Section 5 is *designed to* eliminate the content hash entirely — the DAM would store a proof of properties ("this firmware passed integrity checks," "this drug trial met statistical thresholds") without revealing the content OR its hash, leaving nothing to reverse. This is the design target, not a shipped capability: Phase 1 binds a SHA3-256 content hash to the record, and the Groth16/STARK constructions that would deliver predicate-proof-without-hash are not yet implemented (see §5.3).
+
+- **Algorithm agility as active defense:** The protocol's algorithm agility (Section 4.4) provides a third defense layer. When hash algorithms show signs of weakening — decades before they actually break — enterprises create new validation records with stronger hashes binding to the same content. Old records remain on the DAM (immutability), but the content is now also protected by the new, stronger algorithm.
+
+- **Validate and destroy:** The enterprise validates the content, obtains permanent proof on the DAM, then destroys the original content. The DAM proves "entity X validated something at time T." Nobody — not even the enterprise — can ever reconstruct what it was. This is the nuclear option: permanent proof of existence without existence. Applicable to military operation logs after declassification, drug trial data after regulatory review, trade secrets after expiration.
+
+**The enterprise chooses their level.** The protocol does not force exposure. It provides a spectrum from full transparency (PUBLIC, readable forever) to absolute secrecy (validate and destroy, content gone forever). The Rosetta Stone makes the proof format readable. It does not make the secret readable. An enterprise's content can be verifiably validated and permanently sealed — both properties surviving for the lifetime of the protocol.
+

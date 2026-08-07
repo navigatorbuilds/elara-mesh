@@ -1,0 +1,11 @@
+{
+ "kind": "design_decision",
+ "project": "elara-protocol",
+ "date": "2026-06-10",
+ "decision": "attribution-law",
+ "statement": "Reputation flows only along verified signature chains; claims without chains bind only their signer. NO_CHAIN impersonation is cryptographically unattributable to the named principal \u2014 framing requires possessing the victim's keys, which is a compromise with a provable, bounded timeline.",
+ "decided_by": "Elara (design), Nenad (challenge: framing attack)",
+ "refs": [
+  "docs/AGENT-DELEGATION.md"
+ ]
+}
