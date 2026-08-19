@@ -1,0 +1,58 @@
+[package]
+name = "elara-pq-transport"
+version = "0.1.0"
+edition = "2021"
+description = "Post-quantum network transport core: a downgrade-proof ELPQ wire frame, the session key schedule (HKDF-SHA256 over X25519 || ML-KEM-768) with ChaCha20-Poly1305 direction-separated keys, and a hand-rolled Noise_XX-style hybrid handshake with Dilithium3 identity binding. Extracted from the Elara Protocol node."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/navigatorbuilds/elara-mesh"
+readme = "README.md"
+keywords = ["post-quantum", "transport", "ml-kem", "dilithium", "no-downgrade"]
+categories = ["network-programming", "cryptography"]
+
+[dependencies]
+# Frame + crypto error types.
+thiserror = "2"
+# Session crypto: HKDF-SHA256 key schedule, ChaCha20-Poly1305 AEAD, SHA3-256
+# transcript hash, and key-zeroization on drop. All pure Rust — versions are
+# pinned to the same minors the workspace resolves so the wire vectors stay
+# byte-identical to the node.
+# default-features off drops the `getrandom` feature (AeadCore::generate_nonce,
+# which we don't use — nonces are counter-derived). `alloc` keeps the Vec-
+# returning Aead encrypt/decrypt + Payload. Keeps the crate's wasm build
+# getrandom-free; native/node-wasm consumers still get getrandom via feature
+# unification where they need it.
+chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
+hkdf = "0.12"
+sha2 = "0.10"
+sha3 = "0.10"
+zeroize = "1"
+# Identity-hash rendering in CompletedHandshake's Debug impl + wire-vector
+# pins in the crypto/sig known-answer tests.
+hex = "0.4"
+
+# Native-only deps. The `kem`/`sig`/`handshake` modules are cfg'd out on wasm32,
+# so their backends are target-gated here — the crate's wasm footprint stays
+# pure-Rust frame+crypto with no liboqs and no getrandom backend forced on wasm
+# consumers (e.g. browser-node via elara-runtime).
+#   - oqs:          ML-KEM-768 via liboqs (vendored C). Feature-gated default-on
+#                   so a future pure-Rust ML-KEM can replace liboqs behind it.
+#   - x25519-dalek: X25519 ECDH ephemeral half of the hybrid handshake.
+#   - rand_core:    OS RNG for handshake ephemerals.
+#   - dilithium-rs: Dilithium3 / ML-DSA-65 signatures (pulls getrandom). Pinned
+#                   exact so signatures stay byte-identical to the node's
+#                   crypto::pqc.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+dilithium-rs = "=0.2.0"
+oqs = { version = "0.11", default-features = false, features = ["vendored", "ml_kem"], optional = true }
+x25519-dalek = { version = "2", optional = true }
+rand_core = { version = "0.6", features = ["getrandom"], optional = true }
+
+[features]
+default = ["oqs"]
+# ML-KEM-768 via liboqs + the hybrid handshake that drives it (pulls X25519 +
+# OS RNG). On by default; disable for a pure-Rust (frame + crypto + sig) build.
+oqs = ["dep:oqs", "dep:x25519-dalek", "dep:rand_core"]
+# Exposes AeadKey::key_bytes() for cross-crate tests (the node's handshake
+# tests assert ephemeral key distinctness). Off by default → never in a
+# production build.
+test-helpers = []

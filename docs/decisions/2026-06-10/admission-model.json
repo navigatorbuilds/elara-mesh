@@ -1,0 +1,11 @@
+{
+ "kind": "design_decision",
+ "project": "elara-protocol",
+ "date": "2026-06-10",
+ "decision": "admission-model",
+ "statement": "Realm tier is self-declared and powerless; no global tier registry exists. Boundaries enforced inside-out: member nodes verify Dilithium3 membership certs against their own realm root (M-of-N capable, expiry, revocation). Founding a realm is permissionless; joining one is the realm's call.",
+ "decided_by": "Elara (design), Nenad (challenge: who decides tiers)",
+ "refs": [
+  "docs/REALMS-SELF-ASSEMBLY.md"
+ ]
+}

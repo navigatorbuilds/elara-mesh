@@ -1,0 +1,5 @@
+# TLC scratch output (run-tlc.sh uses a temp metadir; these guard manual runs)
+states/
+*.out
+*.toolbox/
+*_TTrace_*.tla

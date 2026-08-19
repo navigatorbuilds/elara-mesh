@@ -1,0 +1,34 @@
+(* SCENARIO: forward_secrecy — the long-term Dilithium3 signing keys leak AFTER
+   the sessions complete. The session secret stays hidden.
+   EXPECT: session-key secrecy HOLDS (forward secrecy).
+
+   ProVerif `phase` models a global clock. Unboundedly many honest sessions run
+   in phase 0 (the `!P_init | !P_resp` replication); each derives its keys from
+   the per-session ephemerals (X25519 `new xi`/`new yr`, ML-KEM `new ikem`/`new
+   coins` in elara_handshake_core.pvi). Only in phase 1 are BOTH long-term
+   signing keys handed to the attacker. The query is checked against the phase-1
+   attacker (`attacker_p1`), i.e. one that already holds skI and skR.
+
+   This is the textbook ProVerif forward-secrecy idiom: actions with no `phase`
+   prefix execute only in phase 0, so the replication spawns only PRE-compromise
+   sessions — there is no honest party still running in phase 1 to be MITM'd, and
+   no fresh post-compromise session emitting the global probe. The pass therefore
+   means exactly "every session that completed before the key leak stays secret",
+   for unboundedly many concurrent such sessions.
+
+   Why it holds: skI/skR are used ONLY to sign the transcript (handshake.rs:304
+   responder, :332 initiator); they NEVER enter kdf_send/kdf_recv (whose only
+   secret inputs are dh_ss and kem_ss). Revealing them later grants the attacker
+   no path to a past session key. Non-vacuity (probe really is reachable, so this
+   is not a vacuous "true") is proven by forward_secrecy_broken: the SAME honest
+   structure with skR known DURING the sessions leaks probe.
+
+   run-proverif.sh asserts: not attacker_p1(probe[]) is true   (mode fs_true)
+   ------------------------------------------------------------------------- *)
+
+query attacker(probe).
+
+process
+  out(c, spk(skI)); out(c, spk(skR));            (* long-term public keys are public *)
+  ( !P_init(skI, spk(skR)) | !P_resp(skR)
+  | ( phase 1; out(c, skI); out(c, skR) ) )       (* identities leak AFTER the sessions *)

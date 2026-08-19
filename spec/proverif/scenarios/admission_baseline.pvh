@@ -1,0 +1,25 @@
+(* SCENARIO: admission_baseline — realm admission, all primitives intact.
+   The honest member runs the genuine handshake (authenticating its identity to
+   the responder) and presents its root-issued membership cert IN CLEARTEXT; the
+   responder admits it via the production gate (root-sig + realm match + the
+   identity binding midc = idh(ipk)). The Dolev-Yao attacker controls `c`, knows
+   every long-term PUBLIC key (incl. the realm root pk), and observes/replays the
+   honest member's cert — but holds neither skI (so it cannot handshake as the
+   member) nor skRoot (so it cannot forge a cert for its own identity).
+
+   EXPECT (run-proverif.sh mode adm_holds): admission integrity HOLDS —
+     event(Admitted(mid)) ==> event(RootIssued(mid)) is true.
+   Every admitted identity was genuinely issued a cert by the federation root.
+   Non-vacuity twins: admission_forge_broken (leak skRoot ⇒ forgery) and
+   admission_bind_broken (drop the binding ⇒ stolen-cert admission) both FALSIFY
+   this exact query; the honest member reaching Admitted(idh(spk(skI))) with its
+   matching RootIssued makes the baseline TRUE non-vacuously.
+   ------------------------------------------------------------------------- *)
+
+(* admission integrity: admission implies genuine root issuance of THAT identity *)
+query mid:bitstring;
+  event(Admitted(mid)) ==> event(RootIssued(mid)).
+
+process
+  out(c, spk(skI)); out(c, spk(skR)); out(c, spk(skRoot));   (* public keys, incl. realm root pk *)
+  ( !P_root | !P_init_adm(skI, spk(skR)) | !P_resp_adm(skR, spk(skRoot), true) )

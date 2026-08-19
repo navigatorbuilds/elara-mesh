@@ -1,0 +1,19 @@
+(* record_direction_confusion — NON-VACUITY twin for record_direction. Collapse
+   the two direction keys to one (drop the HKDF label split). Now a frame the
+   initiator sent I->R can be reflected back and accepted by the initiator's own
+   R->I receiver: RecvRI fires for a frame no responder sent. Injective (and
+   even non-injective) agreement FAILS in BOTH directions — the label split is
+   load-bearing, not decorative. *)
+free n1: nonce.
+event SendIR(key, nonce, bitstring). event RecvIR(key, nonce, bitstring).
+event SendRI(key, nonce, bitstring). event RecvRI(key, nonce, bitstring).
+let session =
+  new k1: key; let k2 = k1 in                (* COLLAPSE: k_send = k_recv *)
+  new mIR: bitstring; new mRI: bitstring;
+    ( event SendIR(k1, n1, mIR); out(net, (TYPE_DATA, aenc(TYPE_DATA, mIR, k1, n1))) )
+  | ( in(net, (t: bitstring, c: bitstring)); let m = adec(t, c, k1, n1) in event RecvIR(k1, n1, m) )
+  | ( event SendRI(k2, n1, mRI); out(net, (TYPE_DATA, aenc(TYPE_DATA, mRI, k2, n1))) )
+  | ( in(net, (t: bitstring, c: bitstring)); let m = adec(t, c, k2, n1) in event RecvRI(k2, n1, m) ).
+query k: key, n: nonce, m: bitstring; inj-event(RecvIR(k,n,m)) ==> inj-event(SendIR(k,n,m)).
+query k: key, n: nonce, m: bitstring; inj-event(RecvRI(k,n,m)) ==> inj-event(SendRI(k,n,m)).
+process ( !session )

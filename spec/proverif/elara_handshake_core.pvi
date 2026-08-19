@@ -1,0 +1,170 @@
+(* ===========================================================================
+   Elara PQ handshake — ProVerif symbolic model (SHARED CORE)
+   ---------------------------------------------------------------------------
+   This file is NOT run directly. run-proverif.sh concatenates it with one
+   scenario header from scenarios/*.pvh (which adds the queries + the top-level
+   `process`) so the protocol body has a SINGLE source of truth across the
+   secrecy/auth/hybrid-degradation models.
+
+   Models crates/elara-pq-transport/src/handshake.rs (3-message Noise-XX-style
+   hybrid handshake). Correspondence table + the Modeled/Abstracted/Omitted
+   ledger live in README.md (this directory). Design audited before authoring
+   (2026-06-29).
+
+   Dolev-Yao attacker controls channel c. All `fun` are PUBLIC (attacker-
+   applicable) unless [private]; secrecy therefore rests on the attacker
+   MISSING an input, never on a function being secret — this is what makes the
+   "both primitives broken => secrecy MUST FAIL" sanity gate meaningful.
+   =========================================================================== *)
+
+(* ---- types ------------------------------------------------------------- *)
+type sskey.    (* Dilithium3 / ML-DSA-65 long-term signing secret key        *)
+type spkey.    (* Dilithium3 long-term public key                            *)
+type dhsec.    (* X25519 ephemeral scalar                                    *)
+type G.        (* X25519 group element (public key / shared point)           *)
+type kemsec.   (* ML-KEM-768 ephemeral decapsulation key                     *)
+type kempub.   (* ML-KEM-768 ephemeral encapsulation (public) key            *)
+type key.      (* ChaCha20-Poly1305 AEAD session key                         *)
+
+(* ---- channels ---------------------------------------------------------- *)
+free c:channel.                       (* public network (attacker-controlled) *)
+(* Private "primitive-broken" hooks. Honest parties always emit their ephemeral
+   shared secrets here; with NO bridge (baseline) the attacker never reads them.
+   A scenario header adds a leak-to-public bridge to model that primitive
+   being broken for every session. *)
+free leak_dh:channel  [private].
+free leak_kem:channel [private].
+
+(* ---- long-term identities (honest initiator I, honest responder R) ------ *)
+free skI:sskey [private].             (* honest initiator signing key          *)
+free skR:sskey [private].             (* honest responder signing key          *)
+
+(* ---- secrecy probe ----------------------------------------------------- *)
+(* A single global secret each completed party encrypts under its derived
+   send-key. Reachable by the attacker IFF some session key is computable. *)
+free probe:bitstring [private].
+
+(* ---- timestamp (handshake.rs:179) -------------------------------------- *)
+(* Modeled as a PUBLIC value: a coarse clock reading is attacker-predictable
+   and forgeable inside the 30s window, so it contributes NO freshness. The
+   real freshness comes from the per-session ephemerals + injective agreement,
+   not the timestamp. The 30s skew check itself is a DoS fast-abort with no
+   cryptographic role and is deliberately omitted (Dolev-Yao has no clock). *)
+free ts0:bitstring.
+
+(* ---- Dilithium3 signatures (sig.rs) ------------------------------------ *)
+(* Empty FIPS-204 context string => no context arg in the symbolic model.
+   Unforgeability: checksig only reduces for a signature really made with sk. *)
+fun spk(sskey):spkey.
+fun sign(bitstring, sskey):bitstring.
+reduc forall m:bitstring, k:sskey; checksig(spk(k), m, sign(m,k)) = true.
+
+(* ---- X25519 (crypto.rs ECDH) ------------------------------------------- *)
+const g:G [data].
+fun exp(G, dhsec):G.
+equation forall x:dhsec, y:dhsec; exp(exp(g,x),y) = exp(exp(g,y),x).
+fun GtoB(G):bitstring [typeConverter].   (* public coercion; the SECRET is the point *)
+
+(* ---- ML-KEM-768 generic KEM (kem.rs) ----------------------------------- *)
+(* Generic IND-CCA KEM. Deliberately NO global injectivity equation on the
+   shared secret over ciphertexts: we do NOT grant ML-KEM a ciphertext-binding
+   property it does not have. Safety net is that the ct is folded into the
+   transcript before key derivation (see t1), so KEM malleability is caught by
+   the signed transcript, not by KEM binding. *)
+fun kempk(kemsec):kempub.
+fun encap(kempub, bitstring):bitstring.   (* ct  from (peer_pk, fresh coins)   *)
+fun kemss(kempub, bitstring):bitstring.   (* ss the encapsulator computes      *)
+reduc forall sk:kemsec, coins:bitstring;
+  decap(sk, encap(kempk(sk), coins)) = kemss(kempk(sk), coins).
+
+(* ---- hash / running transcript (crypto.rs TranscriptHash, SHA3-256) ----- *)
+fun h(bitstring):bitstring.
+
+(* ---- HKDF (crypto.rs:194-228) ------------------------------------------ *)
+(* IKM = x25519_ss || ml_kem_ss ; salt = SHA3-256 transcript ; two labels.
+   Modeled as two PUBLIC constructors over (x25519_ss, ml_kem_ss, transcript).
+   Public => the attacker can apply them to anything it knows, so secrecy of a
+   derived key holds exactly when the attacker lacks one of the two ss inputs.
+   (Argument order pins the code's concatenation order.) *)
+fun kdf_send(bitstring, bitstring, bitstring):key.
+fun kdf_recv(bitstring, bitstring, bitstring):key.
+
+(* ---- AEAD ChaCha20-Poly1305 with associated data (crypto.rs:111-150) ---- *)
+(* adec requires the SAME associated data => binds the ciphertext to the exact
+   transcript snapshot used as AD. *)
+fun aead(bitstring, bitstring, key):bitstring.            (* aead(ad, pt, k)  *)
+reduc forall ad:bitstring, m:bitstring, k:key;
+  adec(ad, aead(ad, m, k), k) = m.
+
+(* ---- identity hash = SHA3-256(dil_pk) (handshake.rs:391) ---------------- *)
+fun idh(spkey):bitstring.
+
+(* ---- authentication events --------------------------------------------- *)
+event RespCommit(spkey, bitstring).      (* R signs msg2 over t2  -> (R_id, t2) *)
+event InitAcceptResp(spkey, bitstring).  (* I verified R's msg2 sig -> (R_id,t2) *)
+event InitCommit(spkey, bitstring).      (* I signs msg3 over t3  -> (I_id, t3) *)
+event RespAcceptInit(spkey, bitstring).  (* R verified I's msg3 sig -> (I_id,t3) *)
+
+(* ===========================================================================
+   Initiator role (handshake.rs new_initiator / initiator_process_msg2)
+   Pinned to the honest responder identity pkRexp (PeerExpectation::Pinned).
+   =========================================================================== *)
+let P_init(myskI:sskey, pkRexp:spkey) =
+  new xi:dhsec;                            (* X25519 ephemeral (handshake.rs:174) *)
+  new ikem:kemsec;                         (* ML-KEM ephemeral keypair (:176)     *)
+  let epk_x = exp(g, xi) in
+  let epk_kem = kempk(ikem) in
+  let msg1 = (ts0, epk_x, epk_kem) in      (* :179 timestamp||eX||eKEM            *)
+  out(c, msg1);
+  in(c, (repk_x:G, ct:bitstring, aead2:bitstring));     (* msg2 :274-316           *)
+  let dh_ss  = GtoB(exp(repk_x, xi)) in    (* X25519 ECDH                         *)
+  let kem_ss = decap(ikem, ct) in          (* ML-KEM decapsulate (:364)           *)
+  ( out(leak_dh, dh_ss) | out(leak_kem, kem_ss) |
+    ( let t1  = h((ts0, epk_x, epk_kem)) in            (* absorb msg1   (:266)     *)
+      let t2  = h((t1, (repk_x, ct))) in               (* absorb msg2pub(:292)     *)
+      let ksend = kdf_send(dh_ss, kem_ss, t2) in       (* I.k_send = k1            *)
+      let krecv = kdf_recv(dh_ss, kem_ss, t2) in       (* I.k_recv = k2            *)
+      let (rpk:spkey, rsig:bitstring) = adec(t2, aead2, krecv) in  (* decrypt blob  *)
+      if idh(rpk) = idh(pkRexp) then                   (* PIN check (:392-395)     *)
+      if checksig(rpk, t2, rsig) = true then           (* verify R sig (:402)      *)
+      event InitAcceptResp(rpk, t2);
+      let t3 = h((t2, aead2)) in                        (* absorb aead2  (:409)     *)
+      let isig = sign(t3, myskI) in                     (* sign t3       (:415)     *)
+      event InitCommit(spk(myskI), t3);
+      out(c, aead(t3, (spk(myskI), isig), ksend));      (* msg3          (:422-425) *)
+      (* session-key secrecy probe — tested on the PINNED side only: the
+         initiator has a guarantee it speaks to the honest responder, so a
+         secret under either derived key is shared only between honest I and R.
+         (The accept-any responder shares keys with the attacker by design, so
+         a probe on its side would leak trivially and prove nothing.) Both
+         direction-keys are probed. *)
+      out(c, aead(t3, probe, ksend));
+      out(c, aead(t3, probe, krecv)) ) ).
+
+(* ===========================================================================
+   Responder role (handshake.rs responder_process_msg1 / _process_msg3)
+   Accepts ANY initiator (peer_expectation = None, handshake.rs:213) — there is
+   no pin check; authentication rests solely on the msg3 signature over t3.
+   =========================================================================== *)
+let P_resp(myskR:sskey) =
+  in(c, (rts:bitstring, iepk_x:G, iepk_kem:kempub));    (* msg1                     *)
+  new yr:dhsec;                            (* responder X25519 ephemeral          *)
+  new coins:bitstring;                     (* ML-KEM encaps randomness            *)
+  let repk_x = exp(g, yr) in
+  let ct     = encap(iepk_kem, coins) in   (* encapsulate (:278)                  *)
+  let kem_ss = kemss(iepk_kem, coins) in
+  let dh_ss  = GtoB(exp(iepk_x, yr)) in     (* ECDH (:274)                         *)
+  ( out(leak_dh, dh_ss) | out(leak_kem, kem_ss) |
+    ( let t1 = h((rts, iepk_x, iepk_kem)) in           (* absorb msg1              *)
+      let t2 = h((t1, (repk_x, ct))) in                (* absorb msg2pub (:292)    *)
+      let ksendR = kdf_recv(dh_ss, kem_ss, t2) in      (* R.k_send = k2            *)
+      let krecvR = kdf_send(dh_ss, kem_ss, t2) in      (* R.k_recv = k1            *)
+      let rsig = sign(t2, myskR) in                    (* sign t2       (:304)     *)
+      event RespCommit(spk(myskR), t2);
+      let aead2 = aead(t2, (spk(myskR), rsig), ksendR) in (* (:313-316)            *)
+      out(c, (repk_x, ct, aead2));                      (* msg2                     *)
+      in(c, aead3:bitstring);                           (* msg3                     *)
+      let t3 = h((t2, aead2)) in                        (* absorb aead2  (:319)     *)
+      let (ipk:spkey, isig:bitstring) = adec(t3, aead3, krecvR) in
+      if checksig(ipk, t3, isig) = true then            (* verify I sig  (:458)     *)
+      event RespAcceptInit(ipk, t3) ) ).

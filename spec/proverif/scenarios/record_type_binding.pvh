@@ -1,0 +1,20 @@
+(* record_type_binding — TYPE-DISPATCH INTEGRITY (the fix). The frame TYPE rides
+   in the cleartext header (frame.rs), so the attacker can relabel a Data frame
+   as Admission on the wire. Binding the type into the AEAD AD (stream.rs
+   send_typed/decrypt_frame) means the receiver re-binds the OBSERVED type, so a
+   relabelled Data frame fails to open under the Admission AD. The misroute event
+   AdmissionDispatched can therefore only fire for a genuinely Admission-sent
+   record — and the sender sends none, so it is UNREACHABLE. *)
+free n1: nonce.
+event AdmissionSent(bitstring).
+event AdmissionDispatched(bitstring).
+let session =
+  new k: key; new appdata: bitstring;
+  ( (* sender emits ONE Data frame; never an Admission frame *)
+    out(net, (TYPE_DATA, aenc(TYPE_DATA, appdata, k, n1))) )
+  |
+  ( (* receiver dispatches by the OBSERVED (attacker-mutable) type byte *)
+    in(net, (t: bitstring, c: bitstring));
+    if t = TYPE_ADMISSION then ( let m = adec(TYPE_ADMISSION, c, k, n1) in event AdmissionDispatched(m) ) ).
+query m: bitstring; event(AdmissionDispatched(m)) ==> event(AdmissionSent(m)).
+process ( !session )

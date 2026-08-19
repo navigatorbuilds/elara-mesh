@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Elara Node
+GenericName=Elara Protocol Node
+Comment=Run an Elara Protocol DAM mesh node
+Exec=elara-node
+Icon=elara-node
+Terminal=true
+Categories=Network;
+StartupNotify=false

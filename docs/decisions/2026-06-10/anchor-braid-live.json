@@ -1,0 +1,13 @@
+{
+ "kind": "design_decision",
+ "project": "elara-protocol",
+ "date": "2026-06-10",
+ "decision": "anchor-braid-live",
+ "statement": "Bootstrap-of-truth anchoring live from epoch 28102 (2026-06-10T18:50:30Z): hourly braid of OTS->Bitcoin (hash-based, quantum-durable), RFC3161 TSA token, drand pulse round 6189546; daily proof upgrade + Bitcoin header self-archival from two sources; proofs replicated off-site. Truth bootstraps by leaning on older truth; Bitcoin is the ladder, not the building.",
+ "decided_by": "Nenad (demand: concrete evidence from the beginning; objection: BTC not PQ), Elara (design + ship)",
+ "refs": [
+  "scripts/elara-epoch-anchor.sh",
+  "scripts/elara-anchor-upgrade.sh",
+  "docs/REALMS-SELF-ASSEMBLY.md"
+ ]
+}

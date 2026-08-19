@@ -1,0 +1,45 @@
+# Rust
+target/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+*.so
+
+# Local node runtime state — never commit
+data/
+identity.json
+*.db
+*.db-shm
+*.db-wal
+
+# WASM build artifacts — built by wasm-pack from source; never commit
+# (a compiled .wasm embeds absolute build paths from the build machine)
+web/pkg/
+web/elara_browser_node.js
+web/elara_browser_node_bg.wasm
+browser-node/verify-demo/pkg/
+
+# Node tooling
+node_modules/
+package-lock.json
+!sdks/**/package.json
+!sdks/github-action/dist/
+
+# LaTeX build artifacts
+docs/*.aux
+docs/*.log
+docs/*.out
+docs/*.synctex.gz

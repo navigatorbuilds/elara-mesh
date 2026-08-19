@@ -1,0 +1,23 @@
+(* SCENARIO: admission_forge_broken — NON-VACUITY twin of admission_baseline.
+   Same world, but the federation ROOT SECRET KEY leaks to the attacker
+   (out(c, skRoot)). The production gate is unchanged (enforce_bind = true).
+
+   EXPECT (run-proverif.sh mode adm_fails): admission integrity FAILS —
+     event(Admitted(mid)) ==> event(RootIssued(mid)) is false.
+   With skRoot in hand the attacker FORGES a membership cert for its OWN identity
+   idh(spk(skAtt)) — sign((MEMBER_TAG, idh(spk(skAtt))), skRoot) — runs the
+   handshake as itself (so the binding midc = idh(ipk) is satisfied for its own
+   id), and is admitted: Admitted(idh(spk(skAtt))) fires with NO matching
+   RootIssued (the root never issued for that identity). This proves the
+   UNFORGEABILITY half of the realm.rs claim is load-bearing: admission rests on
+   the secrecy of the federation root key. It also witnesses that Admitted is
+   reachable, so admission_baseline's `is true` is non-vacuous.
+   ------------------------------------------------------------------------- *)
+
+query mid:bitstring;
+  event(Admitted(mid)) ==> event(RootIssued(mid)).
+
+process
+  out(c, spk(skI)); out(c, spk(skR)); out(c, spk(skRoot));
+  out(c, skRoot);                                            (* FEDERATION ROOT SECRET KEY LEAKS *)
+  ( !P_root | !P_init_adm(skI, spk(skR)) | !P_resp_adm(skR, spk(skRoot), true) )

@@ -1,0 +1,25 @@
+[package]
+name = "elara-smt"
+version = "0.1.2"
+edition = "2021"
+# 0.1.2 (2026-07-28): v2 compact store format (R37, SMT-DEPTH-FOLD audit stage 2)
+# — additive API only: migrate_legacy_to_v2 + MigrateOutcome + FORMAT_V2_TAG.
+# Roots/proofs bit-identical across formats; legacy stores keep the full walk.
+# 0.1.1 (2026-07-24): description-only republish — name-collision disambiguator
+# (unrelated "ELARA Protocol" suite + elara-math families exist on crates.io).
+description = "Key-addressed sparse Merkle tree (256-bit path, SHA3-256, identity-bound domain-separated leaves) with empty-subtree-compressed inclusion AND non-membership proofs (~log2(N) siblings), generic over a pluggable key-value store. Extracted from the Elara Protocol node. Part of the navigatorbuilds Elara Protocol (post-quantum validation mesh, github.com/navigatorbuilds/elara-mesh); not affiliated with any other elara-* crates on crates.io."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/navigatorbuilds/elara-mesh"
+readme = "README.md"
+keywords = ["merkle", "sparse-merkle-tree", "smt", "proof", "authenticated"]
+categories = ["data-structures", "cryptography", "algorithms"]
+
+[dependencies]
+# SHA3-256 for node/leaf hashing — the only crypto dependency. The proof and
+# node types also derive serde for transporting proofs over any serde format.
+sha3 = "0.10"
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+# Proof serde round-trip test only.
+serde_json = "1"

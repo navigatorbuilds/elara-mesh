@@ -1,0 +1,33 @@
+(* SCENARIO: composed_baseline — handshake ∘ record layer, primitives intact.
+   The record-layer key is the GENUINE handshake output (kdf_send/kdf_recv over
+   the real ephemeral shared secrets + transcript), NOT a fresh name.
+   EXPECT (all four hold; run-proverif.sh mode all_true → >=3 true, none false):
+     (1) record payload secrecy: the post-handshake `probe` frame stays secret —
+         i.e. it rests on the genuine handshake send-key being secret;
+     (2) record injective agreement (anti-replay): every record the responder
+         accepts under its derived recv-key was sent by the honest initiator,
+         injectively — no forgery, no replay — at the genuine key;
+     (3) initiator→responder injective authentication still holds;
+     (4) responder→initiator injective authentication still holds.
+   The non-vacuity twin is composed_broken (break both primitives ⇒ (1) FAILS).
+   ------------------------------------------------------------------------- *)
+
+(* (1) record payload secrecy rests on handshake key secrecy *)
+query attacker(probe).
+
+(* (2) record-layer anti-replay under the genuine per-session key, R->I
+   (attributable direction: the initiator pins the responder) *)
+query k:key, n:nonce, m:bitstring;
+  inj-event(RtoI_Recv(k,n,m)) ==> inj-event(RtoI_Send(k,n,m)).
+
+(* (3) initiator authenticates the pinned honest responder, injectively *)
+query t:bitstring;
+  inj-event(InitAcceptResp(spk(skR), t)) ==> inj-event(RespCommit(spk(skR), t)).
+
+(* (4) accept-any responder authenticates the initiator via the msg3 signature *)
+query t:bitstring;
+  inj-event(RespAcceptInit(spk(skI), t)) ==> inj-event(InitCommit(spk(skI), t)).
+
+process
+  out(c, spk(skI)); out(c, spk(skR));            (* long-term public keys are public *)
+  ( !P_init_composed(skI, spk(skR)) | !P_resp_composed(skR) )

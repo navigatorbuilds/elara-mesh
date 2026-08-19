@@ -1,0 +1,18 @@
+(* record_nonce_reuse — NON-VACUITY twin. Sender AND receiver reuse counter n1
+   for both records (the catastrophic AEAD nonce-reuse error). The strictly-
+   sequential receiver's DISTINCT-counter discipline is what record_baseline's
+   anti-replay rests on; remove it and the attacker replays record 1 into slot
+   2, so injective agreement FAILS (non-injective still holds — no forgery). *)
+free n1: nonce.
+free probe: bitstring [private].
+event Send(key, nonce, bitstring).
+event Recv(key, nonce, bitstring).
+let session =
+  new k: key; new s2: bitstring;
+  ( event Send(k, n1, probe); out(net, (TYPE_DATA, aenc(TYPE_DATA, probe, k, n1)));
+    event Send(k, n1, s2);    out(net, (TYPE_DATA, aenc(TYPE_DATA, s2,    k, n1))) )   (* REUSE n1 *)
+  |
+  ( in(net, (t1: bitstring, c1: bitstring)); let m1 = adec(t1, c1, k, n1) in event Recv(k, n1, m1);
+    in(net, (t2: bitstring, c2: bitstring)); let m2 = adec(t2, c2, k, n1) in event Recv(k, n1, m2) ).
+query k: key, n: nonce, m: bitstring; inj-event(Recv(k,n,m)) ==> inj-event(Send(k,n,m)).
+process ( !session )

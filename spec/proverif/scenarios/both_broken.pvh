@@ -1,0 +1,16 @@
+(* SCENARIO: BOTH primitives broken — the attacker is handed every session's
+   X25519 AND ML-KEM shared secret (both leak channels bridged).
+   EXPECT: session-key secrecy FAILS. This is an INTENTIONAL violation, the
+   analogue of spec/tla/MCTightBreak: it proves the hybrid claim is non-vacuous
+   and that the KDF abstraction is sound. If this model ever reported secrecy
+   "true", the kdf functions would be a non-attacker-applicable abstraction and
+   EVERY hybrid PASS above would be meaningless. run-proverif.sh asserts the
+   RESULT is "false" (i.e. an attack exists) — a "true" here FAILS the gate.
+   ------------------------------------------------------------------------- *)
+query attacker(probe).
+
+process
+  out(c, spk(skI)); out(c, spk(skR));
+  ( !P_init(skI, spk(skR)) | !P_resp(skR)
+  | !( in(leak_dh,  x:bitstring); out(c, x) )       (* X25519 broken *)
+  | !( in(leak_kem, y:bitstring); out(c, y) ) )     (* ML-KEM broken *)

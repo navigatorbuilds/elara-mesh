@@ -1,0 +1,23 @@
+[package]
+name = "elara-itc"
+version = "0.1.0"
+edition = "2021"
+description = "Interval Tree Clocks (Almeida et al. 2008) — space-efficient logical clocks with fork/join/event/leq and a compact, depth-bounded binary wire format. Extracted from the Elara Protocol node."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/navigatorbuilds/elara-mesh"
+readme = "README.md"
+keywords = ["itc", "logical-clock", "causality", "crdt", "vector-clock"]
+categories = ["data-structures", "algorithms"]
+
+[dependencies]
+# Only serde — the Id/Event/Stamp types derive Serialize/Deserialize. The
+# compact wire codec (Stamp::to_bytes / from_bytes) is hand-rolled and
+# dependency-free.
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+# Test-only: exercises the depth-bounded `Deserialize` guard through a real
+# serde data format. `unbounded_depth` lets a test disable serde_json's own
+# 128-deep limit so OUR guard is what must catch over-nesting. Not a runtime
+# dependency of the published crate.
+serde_json = { version = "1", features = ["unbounded_depth"] }

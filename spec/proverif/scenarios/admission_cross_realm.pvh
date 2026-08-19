@@ -1,0 +1,28 @@
+(* SCENARIO: admission_cross_realm — REALM ISOLATION (a "holds" companion).
+   Same production gate as the baseline (enforce_bind = true), but the attacker
+   FULLY OWNS a foreign federation: a second root keypair skRootB whose SECRET
+   key is handed to the attacker (out(c, skRootB)). The attacker can therefore
+   mint perfectly valid realm-B membership certs for any identity, including its
+   own, and complete the handshake as that identity.
+
+   EXPECT (run-proverif.sh mode adm_holds): admission integrity STILL HOLDS —
+     event(Admitted(mid)) ==> event(RootIssued(mid)) is true.
+   Our responder verifies presented certs against OUR configured root pk
+   (spk(skRoot)); a realm-B cert is signed by skRootB, so checksig against
+   spk(skRoot) fails (RootMismatch/BadSignature) and the attacker is never
+   admitted. RootIssued fires only for our root's genuine issuance, so the only
+   admitted identity remains the honest member's. Owning an entire foreign
+   federation does not cross into ours — the cert binds to ONE realm by WHICH
+   root key verifies it (realm.rs realm_root_pk match). Non-vacuity of the query
+   itself is established by the forge/bind broken twins.
+   ------------------------------------------------------------------------- *)
+
+free skRootB:sskey [private].   (* a FOREIGN federation root, fully attacker-owned *)
+
+query mid:bitstring;
+  event(Admitted(mid)) ==> event(RootIssued(mid)).
+
+process
+  out(c, spk(skI)); out(c, spk(skR)); out(c, spk(skRoot));
+  out(c, spk(skRootB)); out(c, skRootB);                    (* attacker OWNS foreign realm B *)
+  ( !P_root | !P_init_adm(skI, spk(skR)) | !P_resp_adm(skR, spk(skRoot), true) )

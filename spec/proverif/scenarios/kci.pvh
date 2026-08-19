@@ -1,0 +1,61 @@
+(* SCENARIO: kci — Key-Compromise-Impersonation resistance. The INITIATOR's own
+   long-term Dilithium3 signing key skI is handed to the attacker UP-FRONT
+   (phase 0, no `phase` guard — known DURING the sessions, exactly like
+   forward_secrecy_broken leaks skR). The honest responder key skR stays private.
+   EXPECT: session-key secrecy HOLDS and the initiator still injectively
+   authenticates the honest pinned responder — even though the attacker holds the
+   initiator's own long-term key.
+
+   KCI is the property that an attacker holding a VICTIM's long-term key still
+   cannot impersonate OTHER honest parties TO that victim. The victim here is the
+   INITIATOR: it is the only party that pins (idh(rpk)=idh(pkRexp) +
+   checksig(rpk,t2,rsig) over the honest responder identity, elara_handshake_core
+   lines 128-129), so it is the only party with a peer-identity decision an
+   attacker could try to subvert. The responder accepts ANY initiator, so
+   "impersonate party X to the responder" is not a coherent KCI target on that
+   side (considered and N/A — see README "Modeled/abstracted/omitted").
+
+   Why secrecy HOLDS — this is the structural README argument now MACHINE-CHECKED:
+   the probe is emitted ONLY by the honest initiator (core lines 141-142),
+   encrypted under ksend/krecv = kdf_{send,recv}(dh_ss, kem_ss, t2). skI is used
+   ONLY to sign(t3, skI); it never enters the KDF. So holding skI gives the
+   attacker no path to dh_ss/kem_ss (the per-session ephemerals). And to MITM the
+   pinned initiator AS the responder the attacker must forge sign(t2, skR) — that
+   needs skR, not skI. The honest initiator therefore completes only with the
+   honest R, over ephemerals the attacker never sees.
+
+   NOTE on the encoding: the top-level out(c, skI) hands the attacker a COPY of
+   the key; the honest !P_init KEEPS running, so its events fire and its probe is
+   emitted normally. "Attacker holds skI" does not disable the honest initiator.
+
+   run-proverif.sh asserts (mode kci): probe secrecy is true, the InitAcceptResp
+   injective auth is true, and the RespAcceptInit injective auth is FALSE.
+   ------------------------------------------------------------------------- *)
+
+(* (1) KCI session-key secrecy: the attacker, holding the initiator's OWN
+   long-term key, still cannot learn the probe of an honest I<->R session. *)
+query attacker(probe).
+
+(* (2) KCI authentication: the initiator still injectively authenticates the
+   honest pinned responder R. Same query string as baseline's
+   initiator-authenticates-responder check — the delta is the THREAT MODEL (skI
+   leaked), not the query: forging R's msg2 signature needs skR, not skI. *)
+query t:bitstring;
+  inj-event(InitAcceptResp(spk(skR), t)) ==> inj-event(RespCommit(spk(skR), t)).
+
+(* (3) INTENTIONAL violation — asserted FALSE. With skI public the attacker forges
+   I's msg3 signature and drives the accept-any responder to RespAcceptInit(
+   spk(skI), .) with no honest InitCommit. That is the attacker impersonating the
+   COMPROMISED PARTY ITSELF (key-disclosure impersonation) — by definition outside
+   KCI, and an expected, by-design consequence of the accept-any responder. We
+   assert it false rather than omit it: it documents that the model SEES the
+   obvious attack (so the two "true" results above are not a dead model) and
+   pre-empts "did you check the responder side?". Probe-reachability non-vacuity
+   is the job of the kci_broken twin. *)
+query t:bitstring;
+  inj-event(RespAcceptInit(spk(skI), t)) ==> inj-event(InitCommit(spk(skI), t)).
+
+process
+  out(c, spk(skI)); out(c, spk(skR));            (* long-term public keys are public *)
+  out(c, skI);                                   (* INITIATOR's OWN key compromised, UP-FRONT *)
+  ( !P_init(skI, spk(skR)) | !P_resp(skR) )

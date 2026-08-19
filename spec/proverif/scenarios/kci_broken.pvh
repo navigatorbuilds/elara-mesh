@@ -1,0 +1,37 @@
+(* SCENARIO: kci_broken — NON-VACUITY twin for kci, and the second half of the
+   KCI demonstration. Same skI-compromised world as kci (out(c, skI) up-front),
+   but the pinned responder's key skR is ALSO leaked during the sessions.
+   EXPECT: session-key secrecy FAILS — an INTENTIONAL violation, the analogue of
+   both_broken / forward_secrecy_broken.
+
+   Two things this proves, BOTH inside the skI-PUBLIC world — which is exactly why
+   kci cannot borrow forward_secrecy_broken for its non-vacuity: that twin lives
+   in a DIFFERENT world (skR leaked, skI private), and ProVerif's "true" is
+   textually identical for a secure model and for one where the probe is simply
+   unreachable. Non-vacuity must be witnessed in the SAME world kci runs in.
+
+   (1) NON-VACUITY of kci's "secrecy is true": the ONLY change from kci is the
+   extra out(c, skR). If the probe path were unreachable in the skI-public world,
+   this scenario would ALSO report secrecy "true" and the pair would be vacuous.
+   Its FALSE proves the probe genuinely flows here, so kci's "true" is a real
+   secrecy guarantee.
+
+   (2) THE KCI BOUNDARY: leak skI alone (kci) -> secrecy HOLDS; additionally leak
+   the PINNED PEER's key skR (kci_broken) -> secrecy FAILS. The only varied
+   parameter between the two is "is the pinned peer's long-term key also
+   compromised", so the flip isolates exactly the KCI hypothesis: it is the peer's
+   key, never the victim's own, that is load-bearing for the victim's session
+   secrecy. With skR the attacker forges sign(t2, skR), passes the initiator's
+   pin+sig check (core 128-129), MITMs the pinned initiator with its own
+   ephemerals, and reads the probe.
+
+   run-proverif.sh asserts: not attacker(probe[]) is false   (mode secret_false)
+   ------------------------------------------------------------------------- *)
+
+query attacker(probe).
+
+process
+  out(c, spk(skI)); out(c, spk(skR));
+  out(c, skI);                                   (* initiator's OWN key compromised *)
+  out(c, skR);                                   (* AND the PINNED PEER's key -> MITM path *)
+  ( !P_init(skI, spk(skR)) | !P_resp(skR) )

@@ -1,0 +1,11 @@
+{
+ "kind": "design_decision",
+ "project": "elara-protocol",
+ "date": "2026-06-10",
+ "decision": "adoption-wedge-elara-mcp",
+ "statement": "User #1 = AI-agent developers via elara-mcp (MCP server exposing sign-action/fetch-provenance tools). Smallest integration in the ecosystem; use case proven by the project itself (agent_audit records live on-mesh); AI-Act Article 12 + agent-liability insurance are the unpaid forcing functions. Flip-day headline: provable agent work log in 5 minutes, verifier verdict as the money shot. Factory/government come later through realms.",
+ "decided_by": "Nenad ('all yes'), strategy Elara",
+ "refs": [
+  "docs/READ-SIDE-STRATEGY.md"
+ ]
+}
