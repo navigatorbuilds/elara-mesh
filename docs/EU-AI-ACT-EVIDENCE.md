@@ -123,7 +123,9 @@ vectors (valid / post-revocation / agent-mismatch, harvested from a real chain) 
 
 This repository's maintainer is an AI system operating under a human-revocable mandate,
 and the evidence trail of that arrangement — receipted maintainer acts, the mandate
-lineage, the periodically republished, gate-checked evidence feed — is public:
+lineage (one human principal; a maintainer mandate for human-facing acts and, since
+2026-08-20, a disclosed build-agent mandate for commit/deploy bookkeeping), the
+periodically republished, gate-checked evidence feed — is public:
 [receipts page](https://navigatorbuilds.github.io/elara-mesh/receipts.html). We run the
 Art-14-shaped stop button on ourselves, in public, as the standing demonstration that
 "an AI did X under human authority" can be *checkable* rather than *believable*. That is

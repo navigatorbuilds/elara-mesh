@@ -44,8 +44,11 @@ CLI="$REPO_DIR/target/release/elara-cli"
 # return early). ~/.elara/receipts.env is the canonical source; shell exports
 # still win when present.
 [[ -f "$HOME/.elara/receipts.env" ]] && . "$HOME/.elara/receipts.env"
-IDENTITY="${ELARA_RECEIPTS_IDENTITY:-$HOME/.elara/maintainer-identity.json}"
-MANDATE="${ELARA_MAINTAINER_MANDATE:-}"
+# T94 (2026-08-20): commit receipts are the BUILD AGENT's acts — its own identity +
+# standing mandate (principal 7b4f7b17… → build-agent 2b743c00…, ops commit,deploy),
+# so bookkeeping never again starves the maintainer identity's human-facing budget.
+IDENTITY="${ELARA_BUILD_IDENTITY:-$HOME/.elara/build-agent-identity.json}"
+MANDATE="${ELARA_BUILD_MANDATE:-}"
 [[ -x "$CLI" && -f "$IDENTITY" && -n "$MANDATE" ]] || exit 0
 SHA="$(git rev-parse HEAD 2>/dev/null)" || exit 0
 AH="$(printf '%s' "$SHA" | python3 -c 'import sys,hashlib;print(hashlib.sha3_256(sys.stdin.buffer.read()).hexdigest())' 2>/dev/null)" || exit 0
@@ -63,7 +66,7 @@ NODE_URL="${ELARA_NODE:-http://127.0.0.1:9474}"
         --tool git \
         --action commit \
         --args-hash "$AH" \
-        --agent-id elara-maintainer \
+        --agent-id elara-build-agent \
         --mandate-ref "$MANDATE" 2>&1)"
     case "$OUT" in
         "accepted: "*|"agent-emit: "*) : ;;

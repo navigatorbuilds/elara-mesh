@@ -44,7 +44,7 @@ the engagement. Priced after a short scoping call or email thread.
 
 ## How payment and "done" work
 
-EUR invoice (SEPA) or USDC on Base — either works, stated up front. Half on
+USD, EUR, or GBP invoice (SEPA / international wire) or USDC on Base — any of these works, stated up front. Half on
 start, half when the agreed acceptance criteria pass. The acceptance criteria
 ship as an **executable runner**, so "done" is checkable, not arguable — the
 same standard we hold our own public claims to.

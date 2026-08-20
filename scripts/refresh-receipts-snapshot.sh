@@ -74,11 +74,18 @@ ACTS_JSON="$(curl -sf --max-time 15 "$NODE/mandate/$MANDATE/acts?limit=$LIMIT")"
     exit 1
 }
 
+# T94 (2026-08-20): the public feed is the UNION of the maintainer mandate (human-facing
+# acts) and the build mandate (commit/deploy bookkeeping, build-agent identity). The union
+# happens INSIDE the pagination walker below — both chains are walked to their tails and
+# the newest LIMIT across BOTH survive (a bash-level first-page merge gets evicted by the
+# walker's deque; found in anger 2026-08-20). Build-chain fetch failure is fail-CLOSED
+# there: no partial feed that silently drops commit rows.
+
 TMP="$(mktemp "${OUT}.XXXXXX")"
 trap 'rm -f "$TMP"' EXIT
 
 # NOTE: acts page goes in via env (NOT stdin — the heredoc IS python's stdin).
-if ! ACTS_JSON="$ACTS_JSON" NODE="$NODE" MANDATE="$MANDATE" TMP_OUT="$TMP" \
+if ! ACTS_JSON="$ACTS_JSON" NODE="$NODE" MANDATE="$MANDATE" BUILD_MANDATE="${ELARA_BUILD_MANDATE:-}" TMP_OUT="$TMP" \
     VERIFY_N="$VERIFY_N" VERIFY_DIR="$VERIFY_DIR" DECODER="$DECODER" \
     VERIFY_BIN="$VERIFY_BIN" ANCHOR_PK="$ANCHOR_PK" LIMIT="$LIMIT" \
     OUT_PATH="$OUT" \
@@ -203,28 +210,51 @@ def decode_wire(wire):
 # pages, memory O(limit). `next_from: null` ends the walk.
 from collections import deque
 limit = max(1, int(os.environ.get("LIMIT") or "50"))
-window = deque(maxlen=limit)
-auth_complete = True
-page = acts_page
-pages_walked = 0
 MAX_PAGES = 10000  # backstop against a pathological/looping next_from
-while True:
-    for it in page.get("acts") or []:
-        window.append(it)
-    auth_complete = auth_complete and bool(page.get("authoritative_complete", False))
-    nxt = page.get("next_from")
-    pages_walked += 1
-    if not nxt or pages_walked >= MAX_PAGES:
-        break
-    nextpage = fetch(f"{node}/mandate/{mandate}/acts?from={nxt}&limit={limit}")
-    if not isinstance(nextpage, dict) or nextpage.get("error"):
-        # Mid-walk fetch failure: stop with the newest-seen window rather than
-        # write a torn snapshot. Mark not-authoritative so the page says so.
-        auth_complete = False
-        break
-    page = nextpage
-# Feed is oldest-first; emit newest-first for the page.
-windowed_items = list(window)[::-1]
+
+def walk_mandate(mid, first_page):
+    """Walk one mandate's acts feed to its tail; return (newest-limit items, complete)."""
+    w = deque(maxlen=limit)
+    complete = True
+    page = first_page
+    pages_walked = 0
+    while True:
+        for it in page.get("acts") or []:
+            w.append(it)
+        complete = complete and bool(page.get("authoritative_complete", False))
+        nxt = page.get("next_from")
+        pages_walked += 1
+        if not nxt or pages_walked >= MAX_PAGES:
+            break
+        nextpage = fetch(f"{node}/mandate/{mid}/acts?from={nxt}&limit={limit}")
+        if not isinstance(nextpage, dict) or nextpage.get("error"):
+            # Mid-walk fetch failure: stop with the newest-seen window rather than
+            # write a torn snapshot. Mark not-authoritative so the page says so.
+            complete = False
+            break
+        page = nextpage
+    return list(w), complete
+
+maint_items, auth_complete = walk_mandate(mandate, acts_page)
+
+# T94: union the build mandate's chain (commit/deploy bookkeeping). Fail-CLOSED on a
+# missing first page — a feed written without the build chain silently drops every
+# commit row, the exact regression the T94 audit forbade.
+build_mandate = os.environ.get("BUILD_MANDATE") or ""
+build_items = []
+if build_mandate:
+    bpage = fetch(f"{node}/mandate/{build_mandate}/acts?limit={limit}")
+    if not isinstance(bpage, dict) or bpage.get("error"):
+        print(f"receipts: FAILED to fetch build-mandate acts — refusing partial feed",
+              file=sys.stderr)
+        sys.exit(1)
+    build_items, bcomplete = walk_mandate(build_mandate, bpage)
+    auth_complete = auth_complete and bcomplete
+
+# Merge both chains, keep the newest `limit` overall, emit newest-first for the page.
+merged = maint_items + build_items
+merged.sort(key=lambda it: (it.get("act_timestamp_ms") or 0) if isinstance(it, dict) else 0)
+windowed_items = merged[-limit:][::-1]
 
 entries = []
 wires = {}      # rid -> record wire bytes (for the harvest step)
