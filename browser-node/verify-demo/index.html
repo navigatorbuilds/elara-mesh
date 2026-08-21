@@ -72,9 +72,20 @@
     border: 1px dashed var(--border); color: var(--fg); font-size: .92rem;
   }
   textarea.pins { min-height: 72px; margin-top: .6rem; }
+  /* whole-page drop target: overlay is visible only while a file is over the page */
+  #drop-overlay {
+    display: none; position: fixed; inset: 0; z-index: 50;
+    background: rgba(10,14,18,.88); border: 3px dashed var(--accent);
+    align-items: center; justify-content: center; text-align: center;
+    font-size: 1.15rem; color: var(--fg); pointer-events: none; padding: 2rem;
+  }
+  body.dragging #drop-overlay { display: flex; }
+  .droplink { color: var(--accent); cursor: pointer; text-decoration: underline; }
 </style>
 </head>
 <body>
+<div id="drop-overlay" aria-hidden="true"><div>Drop to verify — the file lands in the right box and is checked automatically.</div></div>
+<input type="file" id="filepick" accept=".json,.elara-receipt,application/json" multiple hidden />
 <main>
   <h1>Elara — <span class="tag">verify it yourself</span></h1>
   <p class="lede">
@@ -85,6 +96,13 @@
     <strong>never prints a green it can't prove</strong>: an unproven bound shows
     <span style="color:var(--partial)">⚠&nbsp;PARTIAL</span>, a forged one shows
     <span style="color:var(--fail)">✗&nbsp;FAILED</span>.
+  </p>
+  <p class="lede">
+    <strong>Holding a proof file someone sent you?</strong> Drop it anywhere on
+    this page — a record, an <code>.elara-receipt</code>, trust pins, or a
+    mandate bundle (or <span class="droplink" id="pickfile">choose a file</span>).
+    The page reads its shape, puts it in the right box below, and verifies it
+    automatically. Drop a receipt and its pins file together and both land.
   </p>
   <p class="lede" style="margin-top:-0.9rem">
     This box checks the record's own integrity — structure, identity binding, and
@@ -514,6 +532,68 @@
       $("minput").value = JSON.stringify(bundle, null, 2);
       mreset();
     } catch (e) { $("minput").value = mLoadErr; }
+  });
+
+  // ── Drop any proof file anywhere on the page ─────────────────────────────
+  // Detection is structural (top-level keys), never filename-based. A file that
+  // parses but matches no known shape lands in the record box, so the verifier
+  // itself states the failure instead of this page guessing.
+  function classifyProof(text) {
+    let o; try { o = JSON.parse(text); } catch { return "record"; }
+    if (o && typeof o === "object" && !Array.isArray(o)) {
+      if (o.receipt_version !== undefined && o.legs !== undefined) return "receipt";
+      if (o.bundle_version !== undefined && o.mandates !== undefined) return "mandate";
+      if (o.trusted_anchor !== undefined || o.expected_hash !== undefined ||
+          o.expect_root !== undefined || o.expect_identity !== undefined) return "pins";
+    }
+    return "record";
+  }
+  const ROUTE = {
+    record:  { box: "input",  btn: "verify"  },
+    receipt: { box: "rinput", btn: "rverify" },
+    pins:    { box: "rpins",  btn: "rverify" },
+    mandate: { box: "minput", btn: "mverify" },
+  };
+  async function routeProofFiles(files) {
+    const touched = new Set();
+    for (const f of files) {
+      const text = await f.text();
+      const kind = classifyProof(text);
+      $(ROUTE[kind].box).value = text;
+      touched.add(kind);
+    }
+    // Pins alone must not fire a verify on an empty receipt box.
+    if (touched.has("pins") && !$("rinput").value.trim()) touched.delete("pins");
+    const fired = new Set();
+    let firstBtn = null;
+    for (const kind of touched) {
+      const btn = $(ROUTE[kind].btn);
+      if (fired.has(btn.id)) continue;
+      fired.add(btn.id);
+      if (!btn.disabled) btn.click();
+      if (!firstBtn) firstBtn = btn;
+    }
+    if (firstBtn) firstBtn.scrollIntoView({ behavior: "smooth", block: "center" });
+  }
+  let dragDepth = 0;
+  window.addEventListener("dragenter", (e) => {
+    if ([...(e.dataTransfer?.types || [])].includes("Files")) {
+      e.preventDefault(); dragDepth++; document.body.classList.add("dragging");
+    }
+  });
+  window.addEventListener("dragover", (e) => { e.preventDefault(); });
+  window.addEventListener("dragleave", () => {
+    if (--dragDepth <= 0) { dragDepth = 0; document.body.classList.remove("dragging"); }
+  });
+  window.addEventListener("drop", (e) => {
+    e.preventDefault(); dragDepth = 0; document.body.classList.remove("dragging");
+    const files = [...((e.dataTransfer && e.dataTransfer.files) || [])];
+    if (files.length) routeProofFiles(files);
+  });
+  $("pickfile").addEventListener("click", () => $("filepick").click());
+  $("filepick").addEventListener("change", (e) => {
+    const files = [...e.target.files]; e.target.value = "";
+    if (files.length) routeProofFiles(files);
   });
 </script>
 </body>

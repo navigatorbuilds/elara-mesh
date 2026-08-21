@@ -18,7 +18,8 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use elara_runtime::identity::{
-    write_identity_file, CryptoProfile, EntityType, Identity, MAX_POW_DIFFICULTY,
+    is_encrypted_identity, write_identity_file, CryptoProfile, EntityType, Identity,
+    MAX_POW_DIFFICULTY,
 };
 
 const USAGE: &str = "\
@@ -29,6 +30,7 @@ USAGE:
                        [--pow-difficulty N] [--quiet]
     elara-keygen verify <PATH>
     elara-keygen pubkey <PATH> [--output <PUB_PATH>] [--quiet]
+    elara-keygen rekey <PATH>       (env: ELARA_OLD_PASSPHRASE, ELARA_NEW_PASSPHRASE)
     elara-keygen -h | --help
 
 SUBCOMMANDS:
@@ -360,7 +362,7 @@ fn run_with_args(mut args: Vec<String>) -> std::result::Result<(), String> {
 
     let subcommand = if let Some(first) = args.first() {
         match first.as_str() {
-            "gen" | "verify" | "pubkey" => {
+            "gen" | "verify" | "pubkey" | "rekey" => {
                 let s = first.clone();
                 args.remove(0);
                 s
@@ -370,7 +372,7 @@ fn run_with_args(mut args: Vec<String>) -> std::result::Result<(), String> {
             other if other.starts_with('-') => "gen".to_string(),
             other => {
                 return Err(format!(
-                    "unknown subcommand '{other}' — valid: gen, verify, pubkey"
+                    "unknown subcommand '{other}' — valid: gen, verify, pubkey, rekey"
                 ));
             }
         }
@@ -382,8 +384,76 @@ fn run_with_args(mut args: Vec<String>) -> std::result::Result<(), String> {
         "gen" => run_gen(parse_gen(args)?),
         "verify" => run_verify(args),
         "pubkey" => run_pubkey(parse_pubkey(args)?),
+        "rekey" => run_rekey(args),
         _ => Err(format!("unexpected subcommand: {subcommand}")),
     }
+}
+
+/// Rotate the passphrase of an ENCRYPTED identity file in place.
+///
+/// Born 2026-08-20: the authority passphrase touched a conversation transcript
+/// during its escrow walk — a secret that touched a transcript gets rotated.
+/// Passphrases ride ONLY in env vars (ELARA_OLD_PASSPHRASE / ELARA_NEW_PASSPHRASE)
+/// so they never appear in argv (visible in `ps`) or shell-history arguments.
+/// Order of operations is fail-safe: decrypt → re-encrypt → ROUND-TRIP VERIFY the
+/// new ciphertext in memory → backup the original → atomic tmp+rename replace.
+/// Disk is untouched until the round trip proves the new file will load.
+fn run_rekey(rest: Vec<String>) -> std::result::Result<(), String> {
+    let path = match rest.as_slice() {
+        [p] => PathBuf::from(p),
+        _ => return Err("rekey takes exactly one path argument".to_string()),
+    };
+    let old = std::env::var("ELARA_OLD_PASSPHRASE")
+        .map_err(|_| "ELARA_OLD_PASSPHRASE not set".to_string())?;
+    let new = std::env::var("ELARA_NEW_PASSPHRASE")
+        .map_err(|_| "ELARA_NEW_PASSPHRASE not set".to_string())?;
+    if new.trim().is_empty() {
+        return Err("new passphrase is empty".to_string());
+    }
+    if old == new {
+        return Err("new passphrase equals old — nothing to rotate".to_string());
+    }
+
+    let data = read_identity_file(&path)?;
+    if !is_encrypted_identity(&data) {
+        return Err(
+            "identity file is PLAINTEXT — rekey only handles encrypted identities".to_string(),
+        );
+    }
+    let identity = Identity::from_encrypted_json(&data, old.as_bytes())
+        .map_err(|e| format!("decrypt with OLD passphrase failed: {e}"))?;
+    let reenc = identity
+        .to_encrypted_json(new.as_bytes())
+        .map_err(|e| format!("re-encrypt failed: {e}"))?;
+    let roundtrip = Identity::from_encrypted_json(&reenc, new.as_bytes())
+        .map_err(|e| format!("round-trip verify failed — aborting, disk untouched: {e}"))?;
+    if roundtrip.identity_hash != identity.identity_hash {
+        return Err("round-trip identity hash mismatch — aborting, disk untouched".to_string());
+    }
+
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let bak = path.with_extension(format!("bak-rekey-{ts}"));
+    std::fs::copy(&path, &bak).map_err(|e| format!("backup failed: {e}"))?;
+    let tmp = path.with_extension("rekey-tmp");
+    let json = serde_json::to_string_pretty(&reenc).map_err(|e| format!("serialize: {e}"))?;
+    std::fs::write(&tmp, &json).map_err(|e| format!("write tmp failed: {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("chmod tmp failed: {e}"))?;
+    }
+    std::fs::rename(&tmp, &path).map_err(|e| format!("atomic rename failed: {e}"))?;
+
+    eprintln!("elara-keygen rekey: OK");
+    eprintln!("  file:            {}", path.display());
+    eprintln!("  identity_hash:   {}…", &identity.identity_hash[..16]);
+    eprintln!("  backup (OLD passphrase — delete after the service restarts clean):");
+    eprintln!("                   {}", bak.display());
+    Ok(())
 }
 
 fn run() -> std::result::Result<(), String> {
@@ -636,6 +706,71 @@ mod tests {
     }
 
     // ─── pubkey strips secrets (the security-critical invariant) ──────────
+
+    #[test]
+    fn rekey_rotates_passphrase_and_refuses_bad_inputs() {
+        let dir = tmp_dir("rekey");
+        let id_path = dir.join("enc-ident.json");
+
+        // Build an ENCRYPTED identity file under the OLD passphrase (in-code:
+        // gen writes plaintext, and rekey must refuse plaintext — tested below).
+        let identity =
+            Identity::generate_with_pow(EntityType::Device, CryptoProfile::ProfileB, 0)
+                .expect("gen identity");
+        let enc = identity
+            .to_encrypted_json(b"old-passphrase")
+            .expect("encrypt");
+        write_identity_file(&id_path, &enc).expect("write");
+
+        // Refusal: plaintext file.
+        let plain_path = dir.join("plain-ident.json");
+        write_identity_file(&plain_path, &identity.to_json()).expect("write plain");
+        std::env::set_var("ELARA_OLD_PASSPHRASE", "old-passphrase");
+        std::env::set_var("ELARA_NEW_PASSPHRASE", "new-passphrase");
+        let err = run_rekey(vec![plain_path.display().to_string()])
+            .expect_err("plaintext must refuse");
+        assert!(err.contains("PLAINTEXT"), "got: {err}");
+
+        // Refusal: old == new.
+        std::env::set_var("ELARA_NEW_PASSPHRASE", "old-passphrase");
+        let err =
+            run_rekey(vec![id_path.display().to_string()]).expect_err("same pass must refuse");
+        assert!(err.contains("nothing to rotate"), "got: {err}");
+
+        // Refusal: wrong old passphrase — disk untouched.
+        std::env::set_var("ELARA_OLD_PASSPHRASE", "wrong");
+        std::env::set_var("ELARA_NEW_PASSPHRASE", "new-passphrase");
+        let err = run_rekey(vec![id_path.display().to_string()])
+            .expect_err("wrong old must refuse");
+        assert!(err.contains("decrypt with OLD"), "got: {err}");
+        let still = read_identity_file(&id_path).expect("read");
+        Identity::from_encrypted_json(&still, b"old-passphrase")
+            .expect("file must still open with the ORIGINAL passphrase after a refused rekey");
+
+        // The real rotation.
+        std::env::set_var("ELARA_OLD_PASSPHRASE", "old-passphrase");
+        std::env::set_var("ELARA_NEW_PASSPHRASE", "new-passphrase");
+        run_rekey(vec![id_path.display().to_string()]).expect("rekey");
+        let rotated = read_identity_file(&id_path).expect("read rotated");
+        let opened = Identity::from_encrypted_json(&rotated, b"new-passphrase")
+            .expect("opens with NEW passphrase");
+        assert_eq!(opened.identity_hash, identity.identity_hash, "same identity");
+        assert!(
+            Identity::from_encrypted_json(&rotated, b"old-passphrase").is_err(),
+            "old passphrase must no longer open the file"
+        );
+        // A backup with the old encryption exists alongside.
+        let baks: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains("bak-rekey-"))
+            .collect();
+        assert_eq!(baks.len(), 1, "exactly one backup");
+
+        std::env::remove_var("ELARA_OLD_PASSPHRASE");
+        std::env::remove_var("ELARA_NEW_PASSPHRASE");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn pubkey_strips_secret_material() {
