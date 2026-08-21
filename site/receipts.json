@@ -18905,7 +18905,7 @@
  "archived_count": 428,
  "authoritative_complete": false,
  "count": 478,
- "generated_at_utc": "2026-08-21T10:00:07Z",
+ "generated_at_utc": "2026-08-21T16:00:06Z",
  "mandate_id": "605d8e66b16b0cae072b494f23ab2eeee6870111e9401c3c436fa4825fcd67cc",
  "note": "Static convenience snapshot of the PUBLIC mandate-acts feed. Not a trust root: check any live row against a mesh node via /record/{record_id} and /mandate/status/{record_id}, or fully offline with elara-verify. Rows marked archived have aged out of the node's bounded hot tier (records prune into sealed history by design) \u2014 the live routes no longer serve them; their offline envelopes, where present, remain verifiable."
 }
