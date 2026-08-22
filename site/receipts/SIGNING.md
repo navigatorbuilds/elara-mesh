@@ -1,0 +1,72 @@
+# What exactly is signed — the rule beside the vectors
+
+2026-08-22. An independent implementer verifying these bundles with their own
+code had to recover the signing rule from source comments. That is a
+documentation defect: the rule belongs next to the artifacts it governs. This
+file is that fix. If anything here disagrees with the code, the code is
+normative and this file has a bug — tell us on the SCITT list or open an issue.
+
+## The one rule
+
+Every signature you will find in a published bundle is the **carrier record's**
+ML-DSA-65 (Dilithium3) signature over `ValidationRecord::signable_bytes()` —
+crate [`elara-record`](https://crates.io/crates/elara-record) (0.2.x),
+`src/record.rs`. The preimage is domain-separated (a constant tag leads it from
+record version 6 on, followed by the length-prefixed network id), every
+variable-length field is length-prefixed, every integer fixed-width big-endian.
+The byte layout is pinned by frozen known-answer tests
+(`tests/kat_frozen_preimages.rs` in the same crate) — those KATs, not any prose,
+are the compatibility contract.
+
+For a mandate bundle specifically: the mandate JSON rides **inside** that
+preimage, as part of the record's canonical-JSON metadata
+(`json.dumps(metadata, sort_keys=True, separators=(",", ":"))` shape). The
+carrier's signature covers it. There is no separate signature over the mandate
+object itself.
+
+## The trap, named so you do not repeat it
+
+`MandateRecord::canonical_signing_bytes` (crate
+[`elara-verify`](https://crates.io/crates/elara-verify), `src/mandate.rs`) is an
+**id-derivation** preimage: `mandate_id` is SHA3-256 of those bytes, and that is
+the only thing they are used for. Despite the name, nothing anywhere verifies a
+signature over them. Its same-named neighbour `RealmCert::canonical_signing_bytes`
+IS genuinely signed and verified — so anyone who greps the method name finds a
+real sign/verify pair first and assumes it applies to mandates. It does not.
+The in-source correction is dated 2026-07-29 (`elara-verify/src/mandate.rs`,
+doc comment on the method); on 2026-08-22 it caught an independent implementer
+mid-mistake, which is why this paragraph now also lives here.
+
+## How the principal binds, if not by signing the mandate preimage
+
+An ingest-time equality rule, re-checked by the verifier:
+`sha3_256(carrier record's creator_public_key) == mandate.principal_identity_hash`
+(`elara-verify/src/mandate.rs`, chain-of-authority path). A mandate is
+unforgeable by a third party because only the principal's key can create the
+carrier record that the mandate must arrive in — not because the mandate
+preimage carries its own signature.
+
+## Key and signature encoding (independent-toolchain note)
+
+Published keys are raw ML-DSA-65: 1952-byte public key, 3309-byte signature.
+Wrapping the raw public key in a bare SPKI structure parses as `ml-dsa-65`
+under OpenSSL 3.5.6 (e.g. Node v24.16); under OpenSSL 3.5.1 the identical wrap
+yields a key object with no algorithm name. If you report interop results,
+name your toolchain versions. (Established by Emek Can Dogru, Conarium,
+2026-08-22, verifying these bundles with non-Elara code — the first independent
+toolchain to do so.)
+
+## What a CONSISTENT verdict does not say (scope_deferred)
+
+A CONSISTENT verdict on a mandate bundle proves the chain of authority and its
+validity at the act's signed time. It does **not** check the act against the
+scope string the principal wrote; that field ships marked `scope_deferred`, and
+no released verifier enforces it. Do not represent scope as enforced policy.
+
+---
+
+Verify offline: `cargo install elara-verify`, then
+`elara-verify --receipt <record_id>.receipt.json` against any bundle in this
+directory. The in-browser verifier at
+<https://navigatorbuilds.github.io/elara-mesh/verify/> runs the same crate
+compiled to WASM.
