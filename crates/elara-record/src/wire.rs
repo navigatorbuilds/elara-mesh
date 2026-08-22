@@ -9,7 +9,9 @@
 //! [timestamp:8]                          — IEEE 754 double, big-endian
 //! [num_parents:2][parent_ids...]         — DAG edges (each: [len:1][id:N])
 //! [classification:1]                     — 0=PUBLIC, 1=PRIVATE, 2=RESTRICTED, 3=SOVEREIGN
-//! [meta_len:4][metadata:N]              — sorted compact JSON
+//! [meta_count:2][entries...]            — binary metadata map (BTreeMap order;
+//!                                          encode_metadata_binary. JSON metadata
+//!                                          died with v≤3 wire — WIRE_VERSION_MIN=4)
 //! [zk_len:4][zk_proof:N]               — ZK proof (future)
 //! [sig_len:2][signature:N]              — Dilithium3 signature
 //! [sphincs_len:2][sphincs_sig:N]        — SPHINCS+ signature

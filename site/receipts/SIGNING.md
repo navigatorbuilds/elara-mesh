@@ -8,15 +8,25 @@ normative and this file has a bug — tell us on the SCITT list or open an issue
 
 ## The one rule
 
-Every signature you will find in a published bundle is the **carrier record's**
-ML-DSA-65 (Dilithium3) signature over `ValidationRecord::signable_bytes()` —
-crate [`elara-record`](https://crates.io/crates/elara-record) (0.2.x),
-`src/record.rs`. The preimage is domain-separated (a constant tag leads it from
-record version 6 on, followed by the length-prefixed network id), every
-variable-length field is length-prefixed, every integer fixed-width big-endian.
-The byte layout is pinned by frozen known-answer tests
-(`tests/kat_frozen_preimages.rs` in the same crate) — those KATs, not any prose,
-are the compatibility contract.
+> **Correction 2026-08-23.** The first published version of this page
+> (2026-08-22) said every signature in a bundle is ML-DSA-65. That omitted the
+> record's **SLH-DSA co-signature** — records are dual-signed (Profile A), and
+> our own verifier prints so on every run. The preimage rule below was and is
+> correct; the signature count was not. Same page, fixed the next day, stated
+> here rather than silently.
+
+A published record carries **two** signatures from its creator — an
+**ML-DSA-65** (Dilithium3, FIPS 204) signature and an **SLH-DSA-SHA2-192f**
+(SPHINCS+, FIPS 205) co-signature — and **both cover the identical preimage**:
+`ValidationRecord::signable_bytes()` — crate
+[`elara-record`](https://crates.io/crates/elara-record) (0.2.x),
+`src/record.rs`. The verifier requires the ML-DSA-65 signature and grades the
+SLH-DSA leg as the dual-signature profile check ("Profile A"). The preimage is
+domain-separated (a constant tag leads it from record version 6 on, followed by
+the length-prefixed network id), every variable-length field is
+length-prefixed, every integer fixed-width big-endian. The byte layout is
+pinned by frozen known-answer tests (`tests/kat_frozen_preimages.rs` in the
+same crate) — those KATs, not any prose, are the compatibility contract.
 
 For a mandate bundle specifically: the mandate JSON rides **inside** that
 preimage, as part of the record's canonical-JSON metadata
@@ -48,7 +58,10 @@ preimage carries its own signature.
 
 ## Key and signature encoding (independent-toolchain note)
 
-Published keys are raw ML-DSA-65: 1952-byte public key, 3309-byte signature.
+Published key material is raw bytes, two legs per record: ML-DSA-65
+(1,952-byte public key, 3,309-byte signature) and SLH-DSA-SHA2-192f
+(48-byte public key, 35,664-byte signature — 86% of a typical record's wire
+bytes; the hash-based leg is the size story).
 Wrapping the raw public key in a bare SPKI structure parses as `ml-dsa-65`
 under OpenSSL 3.5.6 (e.g. Node v24.16); under OpenSSL 3.5.1 the identical wrap
 yields a key object with no algorithm name. If you report interop results,
