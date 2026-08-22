@@ -50,6 +50,15 @@ pub struct EpochHeader {
     /// headers emitted by nodes running this version or later.
     #[serde(default)]
     pub seal_record_hash: Option<[u8; 32]>,
+    /// Wire version of the seal record this header was built from
+    /// (Merkle fold-tag Phase 3, S3-F4 law: the client-visible dispatch
+    /// signal ships BEFORE the v7 flip ever emits it). 0 = header came
+    /// from a pre-Phase-3 node or legacy payload (0 is not a valid wire
+    /// version — real range starts at `WIRE_VERSION_MIN`); consumers MUST
+    /// treat 0 as "unknown, pre-fold-tag era", never as a fold selector.
+    /// Read by no verification path until the v7 flip.
+    #[serde(default)]
+    pub seal_wire_version: u16,
 }
 
 /// Gap 3: a single zone's accepted super-seal checkpoint, recorded on the
@@ -1238,10 +1247,16 @@ pub(crate) fn parse_header_json(v: &serde_json::Value) -> Option<EpochHeader> {
     let seal_record_hash = v.get("seal_record_hash")
         .and_then(|a| a.as_str())
         .and_then(decode_hex32);
+    // Phase 3: absent on pre-Phase-3 seeds → 0 ("unknown, pre-fold-tag era").
+    let seal_wire_version = v.get("seal_wire_version")
+        .and_then(|a| a.as_u64())
+        .and_then(|n| u16::try_from(n).ok())
+        .unwrap_or(0);
 
     Some(EpochHeader {
         zone, epoch_number, merkle_root, previous_seal_hash,
         record_count, start, end, account_smt_root, seal_record_hash,
+        seal_wire_version,
     })
 }
 
@@ -1526,6 +1541,7 @@ pub fn header_from_seal(seal: &super::epoch::ParsedEpochSeal) -> EpochHeader {
         end: seal.end,
         account_smt_root: seal.account_smt_root,
         seal_record_hash: None,
+        seal_wire_version: seal.wire_version,
     }
 }
 
@@ -1706,6 +1722,7 @@ mod tests {
             end: (epoch + 1) as f64 * 100.0,
             account_smt_root: None,
             seal_record_hash,
+            seal_wire_version: 0,
         }
     }
 
@@ -2246,6 +2263,7 @@ mod tests {
             start: 0.0,
             end: 100.0,
             seal_record_hash: None,
+            seal_wire_version: 0,
         }).unwrap();
 
         assert!(state.verify_record(&ZoneId::from_legacy(0), 0, &proof));
@@ -2286,6 +2304,7 @@ mod tests {
             start: 0.0,
             end: 100.0,
             seal_record_hash: None,
+            seal_wire_version: 0,
         };
         assert!(
             verify_account_proof_against_header(&proof_alice, &bound_header),
@@ -2808,7 +2827,7 @@ mod tests {
     // ────────────────────────────────────────────────────────────────────
 
     #[test]
-    fn batch_b_epoch_header_serde_round_trip_pins_nine_field_wire_shape_with_serde_defaults() {
+    fn batch_b_epoch_header_serde_round_trip_pins_ten_field_wire_shape_with_serde_defaults() {
         // PIN: light.rs:23 — EpochHeader is the wire body for every
         // /epochs/headers + /headers/from/{epoch} response. 9 pub fields.
         // Two of them (account_smt_root, seal_record_hash) carry
@@ -2827,20 +2846,22 @@ mod tests {
             end: 2000.5,
             account_smt_root: Some([3u8; 32]),
             seal_record_hash: Some([4u8; 32]),
+            seal_wire_version: 0,
         };
 
         let v = serde_json::to_value(&header).expect("EpochHeader must serialize");
         let map = v.as_object().expect("serializes to an object");
         assert_eq!(
             map.len(),
-            9,
-            "EpochHeader MUST be exactly 9 fields — got {} ({:?})",
+            10,
+            "EpochHeader MUST be exactly 10 fields (Phase 3 added seal_wire_version) — got {} ({:?})",
             map.len(),
             map.keys().collect::<Vec<_>>(),
         );
         for k in [
             "zone", "epoch_number", "merkle_root", "previous_seal_hash",
             "record_count", "start", "end", "account_smt_root", "seal_record_hash",
+            "seal_wire_version",
         ] {
             assert!(map.contains_key(k), "EpochHeader wire MUST carry `{k}` — SDK pins on this name");
         }
@@ -3003,6 +3024,7 @@ mod tests {
             end: 100.0,
             account_smt_root: None,
             seal_record_hash: None, // ← header_from_seal would emit THIS
+            seal_wire_version: 0,
         };
         let h1_wild = EpochHeader {
             zone: zone.clone(),
@@ -3015,6 +3037,7 @@ mod tests {
             end: 200.0,
             account_smt_root: None,
             seal_record_hash: None,
+            seal_wire_version: 0,
         };
         state_pre_fix.add_header(h0_pre_fix).expect("first header always accepted");
         state_pre_fix
@@ -3035,6 +3058,7 @@ mod tests {
             end: 100.0,
             account_smt_root: None,
             seal_record_hash: Some(real_seal_hash), // ← header_from_seal_with_hash emits THIS
+            seal_wire_version: 0,
         };
         let h1_wrong_link = EpochHeader {
             zone: zone.clone(),
@@ -3046,6 +3070,7 @@ mod tests {
             end: 200.0,
             account_smt_root: None,
             seal_record_hash: None,
+            seal_wire_version: 0,
         };
         state_post_fix.add_header(h0_post_fix).expect("first header always accepted");
         let chain_err = state_post_fix
@@ -3119,6 +3144,7 @@ mod tests {
             end: 100.0,
             account_smt_root: None, // ← pre-Gap-1
             seal_record_hash: None,
+            seal_wire_version: 0,
         };
 
         // Build a syntactically valid but trivial AccountStateProof.

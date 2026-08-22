@@ -1,6 +1,6 @@
 [package]
 name = "elara-light-client"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Stateless, wasm-portable light-client verification for the Elara Protocol: fold a compressed 256-bit account-SMT inclusion OR non-membership proof back to a signed root, bind it to an epoch header, and check a state-delta against a trusted seal. No I/O, no async, no node runtime. Extracted from the Elara Protocol node."
 license = "MIT OR Apache-2.0"

@@ -158,7 +158,7 @@
       "name": "merkle-inclusion/sample-record-in-zone",
       "primitive": "merkle-inclusion",
       "spec_ref": "§11.22.1 / Appendix A.4.1",
-      "note": "Fold a record-inclusion proof in the zone record-membership tree (network::merkle) to its sealed root — the cross-zone settlement evidence path, and the proof `elara-verify verify-inclusion` checks. UNLIKE the account-SMT (smt-*), this tree carries NO domain tags: the leaf is the record hash verbatim (here the `record-hash` vector's output) and each step combines 64 raw bytes — current||sibling when the sibling is on the right (is_right=true), else sibling||current — then SHA3-256. Fold bottom-up over `siblings` in order; the result MUST equal `expected`. Reusing the account-SMT's 0x00/0x01 tags here is the most likely cross-language mistake.",
+      "note": "Fold a record-inclusion proof in the zone record-membership tree (network::merkle) to its sealed root — the proof `elara-verify verify-inclusion` checks. (Attribution corrected 2026-08-22: the cross-zone settlement evidence path folds against a DIFFERENT structure — the epoch-seal record tree, network::sync — whose v1 fold step is byte-identical to this one but whose proofs come from the sealed epoch window and may legitimately carry ZERO siblings for a single-record epoch; that tree gets its own vectors with the seal-fold version bump.) UNLIKE the account-SMT (smt-*), this tree carries NO domain tags: the leaf is the record hash verbatim (here the `record-hash` vector's output) and each step combines 64 raw bytes — current||sibling when the sibling is on the right (is_right=true), else sibling||current — then SHA3-256. Fold bottom-up over `siblings` in order; the result MUST equal `expected`. Reusing the account-SMT's 0x00/0x01 tags here is the most likely cross-language mistake.",
       "input": {
         "leaf": "31914b5a7109a0df2f25286e74a6a81f93489835e131055bd263056996892326",
         "record_id": "019f4e4f-22a8-74b2-82c4-69350e210fe9",
@@ -180,7 +180,7 @@
       "name": "merkle-inclusion-reject/tampered-sibling",
       "primitive": "merkle-inclusion-reject",
       "spec_ref": "§11.22.1 / Appendix A.4.1",
-      "note": "MUST-REJECT twin of merkle-inclusion — identical inputs EXCEPT the first sibling has its lowest bit flipped. Fold it exactly as `merkle-inclusion`: a correct fold does NOT reach `expected` (the sealed root this tampered proof falsely claims), so a verifier binding the fold to the trusted sealed root REJECTS it. The check passes iff your fold does NOT equal `expected`. An implementation that still reaches it is fail-OPEN — it would admit forged cross-zone inclusion evidence.",
+      "note": "MUST-REJECT twin of merkle-inclusion — identical inputs EXCEPT the first sibling has its lowest bit flipped. Fold it exactly as `merkle-inclusion`: a correct fold does NOT reach `expected` (the sealed root this tampered proof falsely claims), so a verifier binding the fold to the trusted sealed root REJECTS it. The check passes iff your fold does NOT equal `expected`. An implementation that still reaches it is fail-OPEN — it would admit forged inclusion evidence.",
       "input": {
         "leaf": "31914b5a7109a0df2f25286e74a6a81f93489835e131055bd263056996892326",
         "record_id": "019f4e4f-22a8-74b2-82c4-69350e210fe9",
@@ -197,6 +197,102 @@
         "tree": "zone record-membership (network::merkle) — no domain tags"
       },
       "expected": "438b93f583a4936c68633fe0e127dd8270bd09776aadf7f195c35ab40265acdc"
+    },
+    {
+      "name": "seal-merkle-fold-v2/tagged-roots",
+      "primitive": "seal-merkle-fold-v2",
+      "spec_ref": "§11.22.1 / Appendix A.4.1 (v7 fold, pre-published)",
+      "note": "The v2 (wire v7+) EPOCH-SEAL record-tree fold — the third Merkle recipe in this set, distinct from BOTH the account-SMT (0x00/0x01 byte tags) and the untagged merkle-inclusion fold. Interior node = SHA3-256(ASCII tag ELARA_SEAL_MERKLE_NODE_V1 || left || right); leaves are raw record hashes (NO leaf tag); an odd element is PROMOTED unchanged (no combine, no tag), so a single-leaf tree's root still equals its leaf. Build the tree over `leaves` in the given (sorted) order; the result MUST equal `expected`. NOTE for reimplementers: the super-seal tree uses its own distinct tag ELARA_SUPER_SEAL_MERKLE_NODE_V1 and the committee tree ELARA/COMMITTEE_NODE/v1 (duplicate-last odd rule, tagged leaves) — never mix tags across trees. Until a seal's own wire version is >= 7, its tree remains the UNTAGGED v1 fold: dispatch on the seal's version, never on the current date or software version.",
+      "input": {
+        "leaves": [
+          "1111111111111111111111111111111111111111111111111111111111111111",
+          "2222222222222222222222222222222222222222222222222222222222222222",
+          "3333333333333333333333333333333333333333333333333333333333333333",
+          "4444444444444444444444444444444444444444444444444444444444444444",
+          "5555555555555555555555555555555555555555555555555555555555555555"
+        ],
+        "tag_ascii": "ELARA_SEAL_MERKLE_NODE_V1",
+        "tree": "epoch-seal record tree, v2 tagged (network::sync at wire v7)"
+      },
+      "expected": "efaa484ad65ee2dde26ed56d2e495c8d8c4e5e691a3990ea98fbb1655747ad4f"
+    },
+    {
+      "name": "seal-merkle-inclusion-v2/proof-walk",
+      "primitive": "seal-merkle-inclusion-v2",
+      "spec_ref": "§11.22.1 / Appendix A.4.1 (v7 fold, pre-published)",
+      "note": "Inclusion-proof walk in the v2 tagged seal tree: same sibling-order semantics as merkle-inclusion (current||sibling when is_right, else sibling||current) but every combine is prefixed by the ELARA_SEAL_MERKLE_NODE_V1 tag before hashing. The leaf is leaves[0] of the tagged-roots vector; interior siblings differ from the v1 walk because interiors are tagged. Fold bottom-up over `siblings`; the result MUST equal `expected` (the tagged-roots root). A proof from a PROMOTED element skips levels — proof length is NOT tree depth.",
+      "input": {
+        "leaf": "1111111111111111111111111111111111111111111111111111111111111111",
+        "siblings": [
+          {
+            "hash": "2222222222222222222222222222222222222222222222222222222222222222",
+            "is_right": true
+          },
+          {
+            "hash": "06024457c633c3a95e0335558f4a260f41ae85dfdf202dfb05d5f3320d72dc27",
+            "is_right": true
+          },
+          {
+            "hash": "5555555555555555555555555555555555555555555555555555555555555555",
+            "is_right": true
+          }
+        ],
+        "tag_ascii": "ELARA_SEAL_MERKLE_NODE_V1",
+        "tree": "epoch-seal record tree, v2 tagged"
+      },
+      "expected": "efaa484ad65ee2dde26ed56d2e495c8d8c4e5e691a3990ea98fbb1655747ad4f"
+    },
+    {
+      "name": "seal-merkle-inclusion-v2-reject/v1-proof-vs-v2-root",
+      "primitive": "seal-merkle-inclusion-v2-reject",
+      "spec_ref": "§11.22.1 / Appendix A.4.1 (v7 fold, pre-published)",
+      "note": "Cross-version MUST-REJECT: the siblings are the VALID v1 (bare) proof of the same leaf in the same tree, replayed against the v2 tagged root. Fold them under the v2 recipe (tag every combine): the walk diverges at the first interior sibling (which is a BARE v1 interior) and MUST NOT reach `expected`. An implementation that reaches it is fail-OPEN across the fold-version boundary.",
+      "input": {
+        "leaf": "1111111111111111111111111111111111111111111111111111111111111111",
+        "siblings": [
+          {
+            "hash": "2222222222222222222222222222222222222222222222222222222222222222",
+            "is_right": true
+          },
+          {
+            "hash": "ae75f84cf35d9168cf43665240cc528d67b90245b19e9c284ca63111629d13b5",
+            "is_right": true
+          },
+          {
+            "hash": "5555555555555555555555555555555555555555555555555555555555555555",
+            "is_right": true
+          }
+        ],
+        "tag_ascii": "ELARA_SEAL_MERKLE_NODE_V1",
+        "tree": "epoch-seal record tree, v2 tagged"
+      },
+      "expected": "efaa484ad65ee2dde26ed56d2e495c8d8c4e5e691a3990ea98fbb1655747ad4f"
+    },
+    {
+      "name": "seal-merkle-inclusion-v2-reject/v2-proof-vs-v1-root",
+      "primitive": "seal-merkle-inclusion-v2-reject",
+      "spec_ref": "§11.22.1 / Appendix A.4.1 (v7 fold, pre-published)",
+      "note": "Cross-version MUST-REJECT, other direction: the siblings are the VALID v2 (tagged) proof, replayed against the v1 BARE root of the same five leaves. Fold under the v2 recipe: the walk reconstructs the v2 root, which MUST NOT equal `expected` (the v1 root). Together with its twin this pins that v1 and v2 folds can never validate each other's proofs — the boundary a per-seal version dispatch relies on.",
+      "input": {
+        "leaf": "1111111111111111111111111111111111111111111111111111111111111111",
+        "siblings": [
+          {
+            "hash": "2222222222222222222222222222222222222222222222222222222222222222",
+            "is_right": true
+          },
+          {
+            "hash": "06024457c633c3a95e0335558f4a260f41ae85dfdf202dfb05d5f3320d72dc27",
+            "is_right": true
+          },
+          {
+            "hash": "5555555555555555555555555555555555555555555555555555555555555555",
+            "is_right": true
+          }
+        ],
+        "tag_ascii": "ELARA_SEAL_MERKLE_NODE_V1",
+        "tree": "epoch-seal record tree, v2 tagged"
+      },
+      "expected": "f4230d2b92ba8c42c4d787969d0d7f082a6443724dca686ff9426eee4895e621"
     },
     {
       "name": "account-binding/bob-matches-signed-root",

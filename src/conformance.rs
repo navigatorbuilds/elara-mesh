@@ -14,7 +14,9 @@
 //! account-SMT empty/leaf/interior hashing, the full 256-level inclusion-proof
 //! fold, identity derivation, record-hash binding, and the *second*,
 //! domain-tag-free zone record-membership Merkle proof — `merkle-inclusion`,
-//! the cross-zone evidence fold `elara-verify verify-inclusion` checks) with no
+//! the fold `elara-verify verify-inclusion` checks; the epoch-seal record
+//! tree that carries the live cross-zone settlement evidence shares this v1
+//! fold step byte-for-byte but is a distinct structure) with no
 //! Rust, no node, and no network. The set also carries an ML-DSA-65 (FIPS 204) signature
 //! verification KAT (`mldsa65-sig` + its must-reject twin) — the one vector that
 //! needs a post-quantum verifier rather than just a hash, certifying that an
@@ -96,6 +98,29 @@ fn merkle_inclusion_step(is_right: bool, current: &[u8; 32], sib: &[u8; 32]) -> 
         combined[32..].copy_from_slice(current);
     }
     sha3_256(&combined)
+}
+
+/// One fold step of the **v2 TAGGED zone-seal record tree** (F1 at wire v7,
+/// Merkle fold-tag Phase 3): identical walk to [`merkle_inclusion_step`] but
+/// every interior combine is prefixed by the ASCII domain tag —
+/// `SHA3-256("ELARA_SEAL_MERKLE_NODE_V1" ‖ left ‖ right)`. Leaves stay RAW
+/// (no leaf tag); odd elements are PROMOTED unchanged (promotion is not a
+/// combine, so no tag applies there — a single-leaf tree's root still equals
+/// its leaf). Kept SHA3-only (no `network::` reference) so the generator
+/// stays buildable in the default, non-`node` build. The in-tree KATs pin
+/// `network::sync::MerkleTree::root_v2_seal` to these exact bytes.
+fn seal_merkle_v2_step(is_right: bool, current: &[u8; 32], sib: &[u8; 32]) -> [u8; 32] {
+    const TAG: &[u8] = b"ELARA_SEAL_MERKLE_NODE_V1";
+    let mut buf = Vec::with_capacity(TAG.len() + 64);
+    buf.extend_from_slice(TAG);
+    if is_right {
+        buf.extend_from_slice(current);
+        buf.extend_from_slice(sib);
+    } else {
+        buf.extend_from_slice(sib);
+        buf.extend_from_slice(current);
+    }
+    sha3_256(&buf)
 }
 
 /// Build the conformance vector set from the authoritative code paths.
@@ -400,9 +425,15 @@ pub fn generate_vector_set(
     // domain-separated: leaf = SHA3(0x00‖key‖value), interior = SHA3(0x01‖left‖
     // right). The zone record-membership tree (`network::merkle`) uses NO tags:
     // the leaf is the record hash verbatim and an interior node is
-    // SHA3(left‖right). This is the cross-zone settlement-evidence path
-    // (`verify_cross_zone_proof`) and exactly the proof `elara-verify
-    // verify-inclusion` checks against a sealed root.
+    // SHA3(left‖right). This is exactly the proof `elara-verify
+    // verify-inclusion` checks against a sealed root. (H3 attribution fix,
+    // MERKLE-PANEL-VERDICT-2026-08-22: the LIVE cross-zone settlement
+    // evidence path — `claim_transfer` / `XZoneTransferBundle::verify` —
+    // folds proofs from the EPOCH-SEAL record tree (`network::sync`,
+    // generated at seal time from the sealed window), a different structure
+    // whose v1 fold step happens to be byte-identical; `verify_cross_zone_proof`
+    // in network::merkle is not that path. The seal tree gets its own vectors
+    // with the seal-fold version bump.)
     //
     // The leaf is THIS set's own `record-hash` output (the sample record), so the
     // vector chains end-to-end: that record, proven into a sealed zone root. Two
@@ -421,8 +452,14 @@ pub fn generate_vector_set(
         primitive: "merkle-inclusion".into(),
         spec_ref: "§11.22.1 / Appendix A.4.1".into(),
         note: "Fold a record-inclusion proof in the zone record-membership tree \
-               (network::merkle) to its sealed root — the cross-zone settlement \
-               evidence path, and the proof `elara-verify verify-inclusion` checks. \
+               (network::merkle) to its sealed root — the proof `elara-verify \
+               verify-inclusion` checks. (Attribution corrected 2026-08-22: the \
+               cross-zone settlement evidence path folds against a DIFFERENT \
+               structure — the epoch-seal record tree, network::sync — whose v1 \
+               fold step is byte-identical to this one but whose proofs come from \
+               the sealed epoch window and may legitimately carry ZERO siblings \
+               for a single-record epoch; that tree gets its own vectors with the \
+               seal-fold version bump.) \
                UNLIKE the account-SMT (smt-*), this tree carries NO domain tags: the \
                leaf is the record hash verbatim (here the `record-hash` vector's \
                output) and each step combines 64 raw bytes — current||sibling when \
@@ -460,7 +497,7 @@ pub fn generate_vector_set(
                binding the fold to the trusted sealed root REJECTS it. The check \
                passes iff your fold does NOT equal `expected`. An implementation \
                that still reaches it is fail-OPEN — it would admit forged \
-               cross-zone inclusion evidence."
+               inclusion evidence."
             .into(),
         input: serde_json::json!({
             "tree": "zone record-membership (network::merkle) — no domain tags",
@@ -472,6 +509,127 @@ pub fn generate_vector_set(
             ],
         }),
         expected: hex::encode(incl_root),
+    });
+
+    // ── v2 TAGGED seal-tree fold (wire v7, Merkle fold-tag Phase 3) ──────────
+    // Published BEFORE any node emits a v7 seal (decode-everywhere-before-
+    // emit-anywhere for third parties). Constant leaves [0x11;32]..[0x55;32] —
+    // the same set the in-tree v1 KATs use, so v1/v2 divergence is visible in
+    // the vectors themselves. Five leaves exercise the PROMOTED odd rule at
+    // two levels. All values also pinned in-tree against an independent
+    // Python computation (`sync.rs` `f1_seal_fold_v2_kat_roots_frozen`).
+    let v2l: Vec<[u8; 32]> = [0x11u8, 0x22, 0x33, 0x44, 0x55].iter().map(|&b| [b; 32]).collect();
+    let v2_h01 = seal_merkle_v2_step(true, &v2l[0], &v2l[1]);
+    let v2_h23 = seal_merkle_v2_step(true, &v2l[2], &v2l[3]);
+    let v2_h03 = seal_merkle_v2_step(true, &v2_h01, &v2_h23);
+    let v2_root5 = seal_merkle_v2_step(true, &v2_h03, &v2l[4]);
+    // v1 (bare) equivalents of the same tree, for the cross-version rejects.
+    let v1_h23 = merkle_inclusion_step(true, &v2l[2], &v2l[3]);
+    let v1_h01 = merkle_inclusion_step(true, &v2l[0], &v2l[1]);
+    let v1_h03 = merkle_inclusion_step(true, &v1_h01, &v1_h23);
+    let v1_root5 = merkle_inclusion_step(true, &v1_h03, &v2l[4]);
+
+    vectors.push(ConformanceVector {
+        name: "seal-merkle-fold-v2/tagged-roots".into(),
+        primitive: "seal-merkle-fold-v2".into(),
+        spec_ref: "§11.22.1 / Appendix A.4.1 (v7 fold, pre-published)".into(),
+        note: "The v2 (wire v7+) EPOCH-SEAL record-tree fold — the third Merkle \
+               recipe in this set, distinct from BOTH the account-SMT (0x00/0x01 \
+               byte tags) and the untagged merkle-inclusion fold. Interior node = \
+               SHA3-256(ASCII tag ELARA_SEAL_MERKLE_NODE_V1 || left || right); \
+               leaves are raw record hashes (NO leaf tag); an odd element is \
+               PROMOTED unchanged (no combine, no tag), so a single-leaf tree's \
+               root still equals its leaf. Build the tree over `leaves` in the \
+               given (sorted) order; the result MUST equal `expected`. NOTE for \
+               reimplementers: the super-seal tree uses its own distinct tag \
+               ELARA_SUPER_SEAL_MERKLE_NODE_V1 and the committee tree \
+               ELARA/COMMITTEE_NODE/v1 (duplicate-last odd rule, tagged leaves) \
+               — never mix tags across trees. Until a seal's own wire version \
+               is >= 7, its tree remains the UNTAGGED v1 fold: dispatch on the \
+               seal's version, never on the current date or software version."
+            .into(),
+        input: serde_json::json!({
+            "tree": "epoch-seal record tree, v2 tagged (network::sync at wire v7)",
+            "tag_ascii": "ELARA_SEAL_MERKLE_NODE_V1",
+            "leaves": v2l.iter().map(hex::encode).collect::<Vec<_>>(),
+        }),
+        expected: hex::encode(v2_root5),
+    });
+
+    vectors.push(ConformanceVector {
+        name: "seal-merkle-inclusion-v2/proof-walk".into(),
+        primitive: "seal-merkle-inclusion-v2".into(),
+        spec_ref: "§11.22.1 / Appendix A.4.1 (v7 fold, pre-published)".into(),
+        note: "Inclusion-proof walk in the v2 tagged seal tree: same \
+               sibling-order semantics as merkle-inclusion (current||sibling \
+               when is_right, else sibling||current) but every combine is \
+               prefixed by the ELARA_SEAL_MERKLE_NODE_V1 tag before hashing. \
+               The leaf is leaves[0] of the tagged-roots vector; interior \
+               siblings differ from the v1 walk because interiors are tagged. \
+               Fold bottom-up over `siblings`; the result MUST equal `expected` \
+               (the tagged-roots root). A proof from a PROMOTED element skips \
+               levels — proof length is NOT tree depth."
+            .into(),
+        input: serde_json::json!({
+            "tree": "epoch-seal record tree, v2 tagged",
+            "tag_ascii": "ELARA_SEAL_MERKLE_NODE_V1",
+            "leaf": hex::encode(v2l[0]),
+            "siblings": [
+                { "hash": hex::encode(v2l[1]), "is_right": true },
+                { "hash": hex::encode(v2_h23), "is_right": true },
+                { "hash": hex::encode(v2l[4]), "is_right": true },
+            ],
+        }),
+        expected: hex::encode(v2_root5),
+    });
+
+    vectors.push(ConformanceVector {
+        name: "seal-merkle-inclusion-v2-reject/v1-proof-vs-v2-root".into(),
+        primitive: "seal-merkle-inclusion-v2-reject".into(),
+        spec_ref: "§11.22.1 / Appendix A.4.1 (v7 fold, pre-published)".into(),
+        note: "Cross-version MUST-REJECT: the siblings are the VALID v1 (bare) \
+               proof of the same leaf in the same tree, replayed against the v2 \
+               tagged root. Fold them under the v2 recipe (tag every combine): \
+               the walk diverges at the first interior sibling (which is a BARE \
+               v1 interior) and MUST NOT reach `expected`. An implementation \
+               that reaches it is fail-OPEN across the fold-version boundary."
+            .into(),
+        input: serde_json::json!({
+            "tree": "epoch-seal record tree, v2 tagged",
+            "tag_ascii": "ELARA_SEAL_MERKLE_NODE_V1",
+            "leaf": hex::encode(v2l[0]),
+            "siblings": [
+                { "hash": hex::encode(v2l[1]), "is_right": true },
+                { "hash": hex::encode(v1_h23), "is_right": true },
+                { "hash": hex::encode(v2l[4]), "is_right": true },
+            ],
+        }),
+        expected: hex::encode(v2_root5),
+    });
+
+    vectors.push(ConformanceVector {
+        name: "seal-merkle-inclusion-v2-reject/v2-proof-vs-v1-root".into(),
+        primitive: "seal-merkle-inclusion-v2-reject".into(),
+        spec_ref: "§11.22.1 / Appendix A.4.1 (v7 fold, pre-published)".into(),
+        note: "Cross-version MUST-REJECT, other direction: the siblings are the \
+               VALID v2 (tagged) proof, replayed against the v1 BARE root of the \
+               same five leaves. Fold under the v2 recipe: the walk reconstructs \
+               the v2 root, which MUST NOT equal `expected` (the v1 root). \
+               Together with its twin this pins that v1 and v2 folds can never \
+               validate each other's proofs — the boundary a per-seal version \
+               dispatch relies on."
+            .into(),
+        input: serde_json::json!({
+            "tree": "epoch-seal record tree, v2 tagged",
+            "tag_ascii": "ELARA_SEAL_MERKLE_NODE_V1",
+            "leaf": hex::encode(v2l[0]),
+            "siblings": [
+                { "hash": hex::encode(v2l[1]), "is_right": true },
+                { "hash": hex::encode(v2_h23), "is_right": true },
+                { "hash": hex::encode(v2l[4]), "is_right": true },
+            ],
+        }),
+        expected: hex::encode(v1_root5),
     });
 
     // ── Account-proof → signed-header BINDING (§11.22) ───────────────────────
@@ -514,6 +672,7 @@ pub fn generate_vector_set(
             end: 0.0,
             account_smt_root: Some(bob_proof.root),
             seal_record_hash: None,
+            seal_wire_version: 0,
         };
         // A header committing to a DIFFERENT root (one bit flipped) → bind fails,
         // even though the proof itself remains perfectly valid.
@@ -1364,6 +1523,7 @@ mod tests {
             end: 0.0,
             account_smt_root: Some(header_root),
             seal_record_hash: None,
+            seal_wire_version: 0,
         };
         assert!(
             verify_account_proof_against_header(&proof, &header),
@@ -1432,6 +1592,7 @@ mod tests {
             end: 0.0,
             account_smt_root: Some(header_root),
             seal_record_hash: None,
+            seal_wire_version: 0,
         };
         assert!(
             !verify_account_proof_against_header(&proof, &header),
@@ -1561,6 +1722,10 @@ mod tests {
             "seal-anchor-sig-reject",
             // T63 Phase C — the v6 domain-separation prefix vector class
             "domain-separation",
+            // Merkle fold-tag Phase 3 — v2 tagged seal-tree fold, pre-published
+            "seal-merkle-fold-v2",
+            "seal-merkle-inclusion-v2",
+            "seal-merkle-inclusion-v2-reject",
         ];
         assert!(!set.vectors.is_empty());
         for v in &set.vectors {

@@ -4095,6 +4095,9 @@ pub async fn compute_epoch_headers(
                         "end": header.end,
                         "account_smt_root": header.account_smt_root.map(hex::encode),
                         "seal_record_hash": header.seal_record_hash.map(hex::encode),
+                        // Phase 3 (S3-F4): per-seal fold-dispatch input, on the
+                        // wire BEFORE the v7 flip ever emits a tagged seal.
+                        "seal_wire_version": header.seal_wire_version,
                         "seal_id": rec.id.clone(),
                     }));
                 }

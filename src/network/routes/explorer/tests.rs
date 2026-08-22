@@ -1008,6 +1008,7 @@ async fn compute_account_proof_post_seal_proof_round_trips() {
         end: 1.0,
         account_smt_root: Some(proof_root),
         seal_record_hash: Some([0u8; 32]),
+        seal_wire_version: 0,
     };
 
     assert!(
@@ -1744,7 +1745,7 @@ async fn seed_seal_at(
 /// assertion is robust against concurrent tests poisoning the
 /// process-global `EPOCH_HEADERS_CACHE`.
 #[tokio::test]
-async fn compute_epoch_headers_envelope_has_two_keys_and_each_header_ten_keys() {
+async fn compute_epoch_headers_envelope_has_two_keys_and_each_header_eleven_keys() {
     use std::collections::BTreeSet;
     let state = test_state();
     let smt_root = [0xCDu8; 32];
@@ -1790,13 +1791,14 @@ async fn compute_epoch_headers_envelope_has_two_keys_and_each_header_ten_keys() 
         "end",
         "account_smt_root",
         "seal_record_hash",
+        "seal_wire_version",
         "seal_id",
     ]
     .into_iter()
     .collect();
     assert_eq!(
         header_keys, expected_header,
-        "header must have exactly the 10 wire keys (defends against skip_serializing_if drift)",
+        "header must have exactly the 11 wire keys (defends against skip_serializing_if drift)",
     );
     assert_eq!(headers[0]["seal_id"].as_str(), Some(seal_id.as_str()));
     assert_eq!(headers[0]["epoch_number"].as_u64(), Some(5));
@@ -3680,6 +3682,7 @@ async fn light_client_e2e_verifies_balance_against_header_proof_only() {
         end: 1_700_000_060.0,
         account_smt_root: Some(sealed_root),
         seal_record_hash: Some([0xAB; 32]),
+        seal_wire_version: 0,
     };
 
     // 4. Light-client side: call the same compute_* the HTTP route wraps.
@@ -3769,6 +3772,7 @@ async fn light_client_e2e_tampered_header_root_rejected() {
         end: 1_700_000_060.0,
         account_smt_root: Some(tampered_root),
         seal_record_hash: Some([0xAB; 32]),
+        seal_wire_version: 0,
     };
 
     assert!(
@@ -3819,6 +3823,7 @@ async fn light_client_e2e_pre_gap1_header_rejected() {
         end: 1_700_000_060.0,
         account_smt_root: None,
         seal_record_hash: Some([0xAB; 32]),
+        seal_wire_version: 0,
     };
 
     assert!(

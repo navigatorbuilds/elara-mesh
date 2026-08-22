@@ -378,6 +378,12 @@ fn parse_header_json(v: &Value) -> Option<EpochHeader> {
         .get("seal_record_hash")
         .and_then(|a| a.as_str())
         .and_then(decode_hex32);
+    // Phase 3: absent on pre-Phase-3 seeds → 0 ("unknown, pre-fold-tag era").
+    let seal_wire_version = v
+        .get("seal_wire_version")
+        .and_then(|a| a.as_u64())
+        .and_then(|n| u16::try_from(n).ok())
+        .unwrap_or(0);
     Some(EpochHeader {
         zone,
         epoch_number,
@@ -388,6 +394,7 @@ fn parse_header_json(v: &Value) -> Option<EpochHeader> {
         end,
         account_smt_root,
         seal_record_hash,
+        seal_wire_version,
     })
 }
 
@@ -550,6 +557,7 @@ mod tests {
             end: (epoch + 1) as f64 * 100.0,
             account_smt_root: Some(account_smt_root),
             seal_record_hash: Some(seal_record_hash),
+            seal_wire_version: 0,
         }
     }
 

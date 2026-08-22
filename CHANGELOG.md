@@ -2,14 +2,53 @@
 
 All notable changes to elara-runtime.
 
-## [0.2.2] — unreleased
+## [0.3.0] — 2026-08-22
+
+*(Absorbs the unreleased 0.2.2 entries below — 0.2.2 was never tagged.)*
+
+### Changed — record wire v6 (domain-separation flag day)
+- **Every new record binds the network identity into its signing preimage.** Wire v6 prefixes
+  `signable_bytes()` with the ASCII tag `ELARA_RECORD_V1` + the length-prefixed `network_id`,
+  closing cross-network record replay structurally. Shipped decode-first (2026-08-18: nodes
+  verify v6 while still emitting v5), then the emission flip (2026-08-19); the flag day ran a
+  full day clean before this release. v4/v5 records remain fully verifiable — verification
+  dispatches on each record's OWN wire version, never on the current constant. The decode floor
+  (`WIRE_VERSION_MIN=4`) is unchanged. Conformance: a `domain-separation` vector pins the exact
+  v6 prefix bytes; `record-hash-v6` pins a full v6 record hash.
+- **`ValidationRecord` is `#[non_exhaustive]`** — downstream constructors go through
+  `ValidationRecord::create`; the next wire field lands without breaking dependents.
+- **Typed Merkle-inclusion verifiers** — the node's shared `verify_inclusion_proof` is replaced
+  by `verify_seal_inclusion_proof` / `verify_committee_inclusion_proof` (one private fold today;
+  the split makes each tree's future fold-version dispatch site unambiguous). Callers of the old
+  untyped function must pick the tree they mean.
+
+### Added — Merkle fold-tag groundwork (pre-published ahead of the future v7 fold day)
+- **Per-seal fold-dispatch signal on the wire:** `/headers/from` now carries
+  `seal_wire_version` (the seal record's own wire version; absent/0 = pre-0.3.0 peer) on every
+  header, mirrored in the light-client types (`EpochHeader`, `LiteEpochHeader`). Informational
+  in 0.3.0 — no verifier reads it yet; it ships now so clients learn the field before it ever
+  matters (a v7-tagged seal will be dispatched by ITS own version).
+- **`MerkleProof.fold_version`** (1 = v1 bare fold, 2 = v2 tagged, 0/absent = legacy emitter) —
+  same pre-publication rationale.
+- **v2 tagged seal-tree fold pre-published as conformance vectors** (set grows 21 → 25):
+  `seal-merkle-fold-v2/tagged-roots`, `seal-merkle-inclusion-v2/proof-walk`, and BOTH
+  cross-fold-version MUST-REJECT twins. Interior combine = `SHA3-256("ELARA_SEAL_MERKLE_NODE_V1"
+  ‖ left ‖ right)`; leaves stay raw; odd elements stay PROMOTED (no tag at a promotion, so a
+  single-leaf tree's root still equals its leaf). No node emits a v7 seal yet — this is
+  decode-everywhere-before-emit-anywhere for third-party implementers. The Python conformance
+  harness reproduces all four vectors from scratch.
+
+### Fixed
+- **Explorer cross-zone proof anchored to the right tree** — `/proofs/cross-zone/*` proved
+  against the live zone record tree but compared its root to the seal's per-epoch BATCH root
+  (a different tree), so `root_matches_seal` was structurally always-false. The seal's
+  `epoch_sparse_merkle_root` checkpoint is now parsed and used as the anchor; legacy seals
+  without the checkpoint yield no proof instead of a never-matching comparison.
+- **`current_epoch` reflects the live epoch tip** — `/status` and the admin surface now derive `current_epoch` from the canonical `active_zone_max_epoch` (the live tip) instead of a stale `state_core` snapshot, so a freshly-sealed epoch is visible immediately rather than lagging a snapshot cycle.
+- **Seed inbound path pinned against DHCP drift** — the local seed binds a static address with an IP-drift guard, after a DHCP lease change silently darkened its inbound path for ~35 h.
 
 ### Security
 - **Public-surface fingerprint gate** — node-local host state (`listen_addr`, `system_load`, `rss_mb`, `memory_pressure`, `disk_usage`, `peer_bandwidth`, `subscribed_zones`, `committees`, `zone_timing`, GC/auto-slash counters, continuity/reincarnation fields) and build identity (`git_sha`, `git_ref`, `git_dirty`, `build_ts_secs`) are now withheld from **non-loopback** callers across `/status`, `/version`, and `/metrics`. The build `git_sha` is the private-repo HEAD (absent from the public mirror); serving it — together with the host resource fingerprint — to anonymous callers leaked a private identifier and aided vulnerability targeting. On `/metrics` the `elara_build_info` gauge is reclassified to the loopback-only **Debug** tier: non-loopback scrapes are capped at P1 (`clamp_public_metric_tier`), which drops the whole family, while loopback operators keep it via `?tier=debug` (and via bare `/version` / `/status`). Chain-anchor discovery fields a follower needs to bootstrap (`genesis_authority`, `public_key_hex`, `network_id`, `current_epoch`, latest-seal anchor) stay public. Verified end-to-end from the external (non-loopback) view by an adversarial public-surface probe: public routes answer 200; gated routes stay 404 under 17 path-traversal/encoding/case variants; fingerprint fields null; `git_sha` gated on all three surfaces.
-
-### Fixed
-- **`current_epoch` reflects the live epoch tip** — `/status` and the admin surface now derive `current_epoch` from the canonical `active_zone_max_epoch` (the live tip) instead of a stale `state_core` snapshot, so a freshly-sealed epoch is visible immediately rather than lagging a snapshot cycle.
-- **Seed inbound path pinned against DHCP drift** — the local seed binds a static address with an IP-drift guard, after a DHCP lease change silently darkened its inbound path for ~35 h.
 
 ## [0.2.1] — 2026-07-11
 

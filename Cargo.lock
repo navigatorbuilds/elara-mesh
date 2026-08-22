@@ -1006,7 +1006,7 @@ dependencies = [
 
 [[package]]
 name = "elara-light-client"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "elara-smt",
  "hex",
@@ -1074,7 +1074,7 @@ dependencies = [
 
 [[package]]
 name = "elara-runtime"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "aes-gcm",
  "arc-swap",

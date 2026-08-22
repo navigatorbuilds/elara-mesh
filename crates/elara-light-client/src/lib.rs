@@ -396,6 +396,13 @@ pub struct LiteEpochHeader {
     pub account_smt_root: Option<[u8; 32]>,
     #[serde(default, with = "hex_or_bytes_opt")]
     pub seal_record_hash: Option<[u8; 32]>,
+    /// Wire version of the seal this header was built from (Merkle fold-tag
+    /// Phase 3). 0 = header came from a pre-Phase-3 node (serde default;
+    /// 0 is not a valid wire version). Consumers MUST treat 0 as "unknown,
+    /// pre-fold-tag era", never as a fold selector; nothing in this crate
+    /// reads it until the v7 fold dispatch ships.
+    #[serde(default)]
+    pub seal_wire_version: u16,
 }
 
 /// The 256-bit tree path of an account: the full `SHA3-256(account_id)`. A

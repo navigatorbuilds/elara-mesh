@@ -1905,6 +1905,16 @@ pub struct ParsedEpochSeal {
     /// `/proof/account/{id}` and verify it against this signed root.
     /// None for legacy seals (pre-Gap 1).
     pub account_smt_root: Option<[u8; 32]>,
+    /// Root of the zone's persisted record-membership tree (F3,
+    /// `network::merkle::SparseMerkleTree`) at seal time, parsed from
+    /// `epoch_sparse_merkle_root`. Producers have written this key every
+    /// epoch since the sparse tree shipped, but it was never parsed back
+    /// until RES-1 (MERKLE-FOLD-TAG-BRIEF-V2 2026-08-22): the cross-zone
+    /// explorer proof path needs it to compare an F3 proof against the
+    /// F3 checkpoint instead of against F1's batch root (two
+    /// independently-computed values that never coincide). Informational —
+    /// no verifier recomputes it (RES-2); None for legacy seals.
+    pub sparse_merkle_root: Option<[u8; 32]>,
     /// In-protocol drand time-bracket pulse (REALMS P1.5). Carries the
     /// verifiable not-before bound for this seal. None for legacy seals and
     /// — in this inert slice (a2) — for ALL seals: no producer populates it
@@ -1927,6 +1937,17 @@ pub struct ParsedEpochSeal {
     /// byte-identical `signable_bytes`, same legacy-safe pattern as
     /// `account_smt_root`).
     pub xzone_dest_finality_committees: Option<BTreeMap<String, ([u8; 32], u32)>>,
+    /// Wire version of the seal record this parse came from (`record.version`).
+    ///
+    /// Merkle fold-tag groundwork (MERKLE-PANEL-VERDICT-2026-08-22 R2/D5+):
+    /// the future fold-version dispatch keys on the SEAL'S OWN wire version —
+    /// self-contained for verifiers, never an out-of-band epoch table and
+    /// never `CURRENT_SIGNING_VERSION` (a replayer reads the fold recipe off
+    /// each historical seal's own signed bytes). Populated at
+    /// [`extract_epoch_seal`] and the producer's mirror construction in
+    /// `create_epoch_seal_with_balance`; read by NO consensus path until the
+    /// v7 fold flag day lands.
+    pub wire_version: u16,
 }
 
 /// A change to the zone registry (included in epoch seal delta).
@@ -2241,6 +2262,21 @@ pub fn extract_epoch_seal(record: &ValidationRecord) -> Result<Option<ParsedEpoc
             }
         });
 
+    // RES-1: the zone-record-tree (F3) checkpoint the producer writes every
+    // epoch. Same optional-hex pattern as account_smt_root; legacy → None.
+    let sparse_merkle_root = record.metadata.get("epoch_sparse_merkle_root")
+        .and_then(|v| v.as_str())
+        .and_then(|hex_str| hex::decode(hex_str).ok())
+        .and_then(|bytes| {
+            if bytes.len() == 32 {
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&bytes);
+                Some(arr)
+            } else {
+                None
+            }
+        });
+
     // B2 fix: per-dest-zone canonical finality committee `(hash, size)` bound
     // into the seal. JSON object { zone_path: [hex(committee_hash), size] }.
     // Absent in legacy seals → None. Malformed/zero-size entries are dropped
@@ -2296,6 +2332,8 @@ pub fn extract_epoch_seal(record: &ValidationRecord) -> Result<Option<ParsedEpoc
         // on absent/partial/malformed input. No consensus path reads this until a3.
         drand_pulse: DrandPulse::from_metadata(&record.metadata),
         xzone_dest_finality_committees,
+        wire_version: record.version,
+        sparse_merkle_root,
     }))
 }
 
@@ -3031,6 +3069,11 @@ pub fn create_epoch_seal_with_balance(
         // local-creation attach path (epoch.rs:5525) freezes the identical
         // value a follower parses from the seal record.
         xzone_dest_finality_committees,
+        // Mirror the just-signed record's own wire version — identical to what
+        // a follower's extract_epoch_seal reads back off the record.
+        wire_version: record.version,
+        // RES-1: mirror the F3 checkpoint written into metadata above.
+        sparse_merkle_root,
     };
 
     Ok((record, parsed))
@@ -3907,6 +3950,17 @@ pub struct ParsedSuperSeal {
     /// attestations against the correct witness set.
     #[serde(default)]
     pub committee_hash: [u8; 32],
+    /// Wire version of the super-seal record this parse came from
+    /// (`record.version`). Merkle fold-tag groundwork
+    /// (MERKLE-PANEL-VERDICT-2026-08-22 R2/D5+): the future fold-version
+    /// dispatch keys on the seal's OWN wire version. `#[serde(default)]` = 0
+    /// for payloads serialized before this field existed — 0 is not a valid
+    /// wire version (real range starts at `WIRE_VERSION_MIN`), so a future
+    /// dispatch must treat 0 as "unknown, re-derive from the record bytes",
+    /// never as a fold selector. Read by NO consensus path until the v7 fold
+    /// flag day lands.
+    #[serde(default)]
+    pub wire_version: u16,
 }
 
 /// Build the metadata BTreeMap for a super-seal record.
@@ -4013,6 +4067,7 @@ pub fn extract_super_seal(record: &ValidationRecord) -> Result<Option<ParsedSupe
         merkle_root,
         previous_super_seal_hash,
         committee_hash,
+        wire_version: record.version,
     }))
 }
 
@@ -4096,6 +4151,7 @@ pub fn create_super_seal(
     let signable = record.signable_bytes();
     record.signature = Some(identity.sign(&signable)?);
 
+    let wire_version = record.version;
     Ok((
         record,
         ParsedSuperSeal {
@@ -4106,6 +4162,7 @@ pub fn create_super_seal(
             merkle_root,
             previous_super_seal_hash,
             committee_hash,
+            wire_version,
         },
     ))
 }
@@ -8230,6 +8287,50 @@ mod tests {
         assert!(parsed.drand_pulse.is_none(), "None pulse must parse back as None");
     }
 
+    /// RES-1 (MERKLE-FOLD-TAG-BRIEF-V2 2026-08-22): the F3 zone-tree
+    /// checkpoint producers have always written (`epoch_sparse_merkle_root`)
+    /// now parses back into `ParsedEpochSeal.sparse_merkle_root`. Both arms:
+    /// Some round-trips exactly; absent key (legacy seal) parses as None.
+    #[test]
+    fn res1_sparse_merkle_root_round_trips_through_extract() {
+        let identity = test_identity();
+        let root = sha3_256(b"res1-f1-root");
+        let prev = sha3_256(b"res1-prev");
+        let f3_root = sha3_256(b"res1-zone-tree-checkpoint");
+
+        let build = |f3: Option<&[u8; 32]>| {
+            let meta = seal_metadata(SealMetadataParams {
+                zone: ZoneId::from_legacy(0),
+                epoch_number: 9,
+                start: 0.0,
+                end: 1.0,
+                record_count: 0,
+                merkle_root: &root,
+                previous_seal_hash: &prev,
+                vrf_output: None,
+                vrf_proof: None,
+                sparse_merkle_root: f3,
+                record_hashes: None,
+                zone_balance_total: None,
+                zone_registry_root: None,
+                zone_registry_delta: None,
+                aggregator_rank: 0,
+                account_smt_root: None,
+                drand_pulse: None,
+            });
+            ValidationRecord::create(
+                b"res1", identity.public_key.clone(), vec![],
+                Classification::Public, Some(meta),
+            )
+        };
+
+        let parsed = extract_epoch_seal(&build(Some(&f3_root))).unwrap().unwrap();
+        assert_eq!(parsed.sparse_merkle_root, Some(f3_root));
+
+        let legacy = extract_epoch_seal(&build(None)).unwrap().unwrap();
+        assert_eq!(legacy.sparse_merkle_root, None);
+    }
+
     /// R3-8 slice 2 — parse-time root gate on the inline enumeration.
     /// A non-empty `epoch_record_hashes` that does not recompute to the
     /// signed `epoch_merkle_root` is dropped to empty at parse time (never
@@ -8725,6 +8826,8 @@ mod tests {
             account_smt_root: None,
             drand_pulse: None,
             xzone_dest_finality_committees: None,
+            wire_version: crate::wire::WIRE_VERSION,
+            sparse_merkle_root: None,
         }
     }
 
@@ -8828,6 +8931,8 @@ mod tests {
             account_smt_root: None,
             drand_pulse: None,
             xzone_dest_finality_committees: None,
+            wire_version: crate::wire::WIRE_VERSION,
+            sparse_merkle_root: None,
         };
         let hash = sha3_256(b"seal0");
         state.register_seal(&seal, "seal-id-0", hash);
@@ -8865,6 +8970,8 @@ mod tests {
             account_smt_root: None,
             drand_pulse: None,
             xzone_dest_finality_committees: None,
+                wire_version: crate::wire::WIRE_VERSION,
+                sparse_merkle_root: None,
             };
             let hash = sha3_256(format!("seal{i}").as_bytes());
             state.register_seal(&seal, &format!("seal-{i}"), hash);
@@ -8899,6 +9006,8 @@ mod tests {
             account_smt_root: None,
             drand_pulse: None,
             xzone_dest_finality_committees: None,
+                wire_version: crate::wire::WIRE_VERSION,
+                sparse_merkle_root: None,
             };
             let hash = sha3_256(format!("z{zone_n}seal").as_bytes());
             state.register_seal(&seal, &format!("z{zone_n}-seal-0"), hash);
@@ -9284,6 +9393,8 @@ mod tests {
             account_smt_root: None,
             drand_pulse: None,
             xzone_dest_finality_committees: None,
+            wire_version: crate::wire::WIRE_VERSION,
+            sparse_merkle_root: None,
         };
         epoch_state.register_seal(&seal0, "seal-0", sha3_256(b"seal0hash"));
 
@@ -10514,6 +10625,8 @@ mod tests {
             account_smt_root: None,
             drand_pulse: None,
             xzone_dest_finality_committees: None,
+            wire_version: crate::wire::WIRE_VERSION,
+            sparse_merkle_root: None,
         };
         state.register_seal(&seal, "s0", sha3_256(b"h"));
         // epoch_start_ts is now whatever register_seal set (its own `now`),
@@ -10552,6 +10665,8 @@ mod tests {
             account_smt_root: None,
             drand_pulse: None,
             xzone_dest_finality_committees: None,
+            wire_version: crate::wire::WIRE_VERSION,
+            sparse_merkle_root: None,
         };
         let mut hash_high = [0u8; 32];
         hash_high[0] = 0xff;
@@ -10605,6 +10720,8 @@ mod tests {
             account_smt_root: None,
             drand_pulse: None,
             xzone_dest_finality_committees: None,
+            wire_version: crate::wire::WIRE_VERSION,
+            sparse_merkle_root: None,
         }
     }
 
@@ -11083,6 +11200,8 @@ mod tests {
             account_smt_root: None,
             drand_pulse: None,
             xzone_dest_finality_committees: None,
+            wire_version: crate::wire::WIRE_VERSION,
+            sparse_merkle_root: None,
         };
         state.register_seal(&seal, "seal-0", sha3_256(b"hash"));
 
@@ -11188,6 +11307,8 @@ mod tests {
             account_smt_root: None,
             drand_pulse: None,
             xzone_dest_finality_committees: None,
+            wire_version: crate::wire::WIRE_VERSION,
+            sparse_merkle_root: None,
         };
         // Should not panic — falls back to global
         assert!(seal.seal_zone_count.is_none());
@@ -11435,6 +11556,8 @@ mod tests {
             account_smt_root: None,
             drand_pulse: None,
             xzone_dest_finality_committees: None,
+            wire_version: crate::wire::WIRE_VERSION,
+            sparse_merkle_root: None,
         }
     }
 
@@ -11958,6 +12081,8 @@ mod tests {
             account_smt_root: None,
             drand_pulse: None,
             xzone_dest_finality_committees: None,
+            wire_version: crate::wire::WIRE_VERSION,
+            sparse_merkle_root: None,
         }
     }
 
@@ -12565,6 +12690,8 @@ mod tests {
             account_smt_root: None,
             drand_pulse: None,
             xzone_dest_finality_committees: None,
+            wire_version: crate::wire::WIRE_VERSION,
+            sparse_merkle_root: None,
         };
 
         // Call the helper — this is exactly what the ingest path now does.
@@ -12621,6 +12748,8 @@ mod tests {
             aggregator_rank: 0, account_smt_root: None,
             drand_pulse: None,
             xzone_dest_finality_committees: None,
+            wire_version: crate::wire::WIRE_VERSION,
+            sparse_merkle_root: None,
         };
 
         let proofed = attach_xzone_proofs_from_seal(&mut ledger, &seal);
@@ -12667,6 +12796,8 @@ mod tests {
             aggregator_rank: 0, account_smt_root: None,
             drand_pulse: None,
             xzone_dest_finality_committees: None,
+            wire_version: crate::wire::WIRE_VERSION,
+            sparse_merkle_root: None,
         };
 
         // Stage 2 finality signatures into AWC under a known seal_id.
@@ -12735,6 +12866,8 @@ mod tests {
             aggregator_rank: 0, account_smt_root: None,
             drand_pulse: None,
             xzone_dest_finality_committees: None,
+            wire_version: crate::wire::WIRE_VERSION,
+            sparse_merkle_root: None,
         };
 
         let awc = AWCConsensus::new();
@@ -12868,6 +13001,8 @@ mod tests {
             aggregator_rank: 0, account_smt_root: None,
             drand_pulse: None,
             xzone_dest_finality_committees: None,
+            wire_version: crate::wire::WIRE_VERSION,
+            sparse_merkle_root: None,
         };
 
         let mut awc = AWCConsensus::new();
@@ -12943,6 +13078,8 @@ mod tests {
             aggregator_rank: 0, account_smt_root: None,
             drand_pulse: None,
             xzone_dest_finality_committees: None,
+            wire_version: crate::wire::WIRE_VERSION,
+            sparse_merkle_root: None,
         };
         let mut awc = AWCConsensus::new();
         let seal_id = "cascade-under-21";
@@ -13024,6 +13161,8 @@ mod tests {
             aggregator_rank: 0, account_smt_root: None,
             drand_pulse: None,
             xzone_dest_finality_committees: None,
+            wire_version: crate::wire::WIRE_VERSION,
+            sparse_merkle_root: None,
         };
         let mut awc = AWCConsensus::new();
         let seal_id = "replay-31";
@@ -13274,6 +13413,8 @@ mod tests {
                 aggregator_rank: 0, account_smt_root: None,
                 drand_pulse: None,
                 xzone_dest_finality_committees: None,
+                wire_version: crate::wire::WIRE_VERSION,
+                sparse_merkle_root: None,
             };
             state.register_seal(&seal, &format!("epoch:0:{i}"), h);
         }
@@ -13394,6 +13535,8 @@ mod tests {
                     account_smt_root: None,
                     drand_pulse: None,
                     xzone_dest_finality_committees: None,
+                    wire_version: crate::wire::WIRE_VERSION,
+                    sparse_merkle_root: None,
                 };
                 epoch.register_seal(&seal, &format!("epoch:forced-fill:{i}"), h);
             }
@@ -13603,6 +13746,8 @@ mod tests {
                 aggregator_rank: 0, account_smt_root: None,
                 drand_pulse: None,
                 xzone_dest_finality_committees: None,
+                wire_version: crate::wire::WIRE_VERSION,
+                sparse_merkle_root: None,
             };
             state.register_seal(&seal, &format!("epoch:0:{i}"), h);
         }
@@ -13658,6 +13803,8 @@ mod tests {
             aggregator_rank: 0, account_smt_root: None,
             drand_pulse: None,
             xzone_dest_finality_committees: None,
+            wire_version: crate::wire::WIRE_VERSION,
+            sparse_merkle_root: None,
         };
         state.register_seal(&seal, "epoch:0:1", h);
         assert!(!state.should_create_super_seal(&zone));
@@ -13806,6 +13953,8 @@ mod tests {
             account_smt_root: None,
             drand_pulse: None,
             xzone_dest_finality_committees: None,
+            wire_version: crate::wire::WIRE_VERSION,
+            sparse_merkle_root: None,
         }
     }
 

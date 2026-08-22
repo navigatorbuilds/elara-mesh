@@ -29,6 +29,9 @@ Primitives reproduced here (the self-contained deterministic set):
   identity-derivation  SHA3-256(creator_public_key)     (§3.1)
   merkle-inclusion     fold record-membership proof → root  (NO tags: SHA3(left||right), §11.22.1)
   merkle-inclusion-reject  tampered proof MUST NOT fold to the claimed root (fail-closed)
+  seal-merkle-fold-v2  build the v2 TAGGED seal tree → root (SHA3(ASCII-tag||l||r), odd PROMOTED, v7+)
+  seal-merkle-inclusion-v2       walk a v2 tagged inclusion proof → root
+  seal-merkle-inclusion-v2-reject  a cross-fold-version proof MUST NOT reach the claimed root
   account-binding      fold proof → root, THEN bind to header's signed account_smt_root (§11.22)
   account-binding-reject   a VALID proof against the WRONG signed root MUST be rejected (fail-closed)
 
@@ -138,7 +141,10 @@ def merkle_inclusion_fold(leaf: bytes, siblings: list) -> str:
 
     This is a faithful pure-``hashlib`` reimplementation of
     ``network::merkle::verify_proof`` — the fold ``elara-verify --inclusion``
-    runs over a cross-zone inclusion proof, with no Elara code.
+    runs over an inclusion proof, with no Elara code. (The epoch-seal record
+    tree carrying live cross-zone settlement evidence is a DIFFERENT
+    structure whose v1 fold step is byte-identical to this one; it gets its
+    own vectors with the seal-fold version bump.)
     """
     current = leaf
     for node in siblings:
@@ -150,6 +156,48 @@ def merkle_inclusion_fold(leaf: bytes, siblings: list) -> str:
 
 class Skip(Exception):
     """Raised by a reproducer that intentionally does not recompute a vector."""
+
+
+
+SEAL_MERKLE_V2_TAG = b"ELARA_SEAL_MERKLE_NODE_V1"
+
+
+def seal_merkle_v2_step(is_right: bool, current: bytes, sib: bytes) -> bytes:
+    """One interior combine of the v2 TAGGED epoch-seal record tree (wire v7+):
+    ``SHA3-256(tag || left || right)`` — the ASCII tag prefixes EVERY combine.
+    Sibling-order semantics are identical to ``merkle_inclusion_fold``."""
+    if is_right:
+        return hashlib.sha3_256(SEAL_MERKLE_V2_TAG + current + sib).digest()
+    return hashlib.sha3_256(SEAL_MERKLE_V2_TAG + sib + current).digest()
+
+
+def seal_merkle_v2_root(leaves: list) -> str:
+    """Build the v2 tagged seal tree over ``leaves`` (already sorted) and
+    return the root. Leaves are RAW (no leaf tag); an odd element is PROMOTED
+    unchanged (no combine, so no tag) — a single-leaf tree's root IS its leaf.
+    Do not confuse with the account-SMT (0x00/0x01 byte tags) or the untagged
+    ``merkle-inclusion`` fold; and never apply this tag to super-seal or
+    committee trees (each has its own distinct tag)."""
+    if not leaves:
+        return (b"\x00" * 32).hex()
+    layer = list(leaves)
+    while len(layer) > 1:
+        nxt = []
+        for k in range(0, len(layer), 2):
+            if k + 1 < len(layer):
+                nxt.append(seal_merkle_v2_step(True, layer[k], layer[k + 1]))
+            else:
+                nxt.append(layer[k])  # odd: promote unchanged, no tag
+        layer = nxt
+    return layer[0].hex()
+
+
+def seal_merkle_v2_fold(leaf: bytes, siblings: list) -> str:
+    """Walk a v2 tagged inclusion proof to its root — every combine tagged."""
+    current = leaf
+    for node in siblings:
+        current = seal_merkle_v2_step(bool(node["is_right"]), current, unhex(node["hash"]))
+    return current.hex()
 
 
 def reproduce(vec: dict) -> str:
@@ -199,6 +247,17 @@ def reproduce(vec: dict) -> str:
         # inverts the comparison for `*-reject`, so a tampered proof that still
         # reaches the claimed sealed root fails loudly.
         return merkle_inclusion_fold(unhex(inp["leaf"]), inp["siblings"])
+
+    if prim == "seal-merkle-fold-v2":
+        # Build the whole v2 tagged tree from its leaves — MUST equal `expected`.
+        return seal_merkle_v2_root([unhex(x) for x in inp["leaves"]])
+
+    if prim in ("seal-merkle-inclusion-v2", "seal-merkle-inclusion-v2-reject"):
+        # Walk a v2 tagged proof. For the plain form the fold MUST equal
+        # `expected`; the `-reject` twins are CROSS-FOLD-VERSION replays (a v1
+        # proof against the v2 root, or a v2 proof against the v1 root) and the
+        # fold MUST NOT reach `expected` — main() inverts the comparison.
+        return seal_merkle_v2_fold(unhex(inp["leaf"]), inp["siblings"])
 
     if prim == "identity-derivation":
         # identity = SHA3-256(creator_public_key).

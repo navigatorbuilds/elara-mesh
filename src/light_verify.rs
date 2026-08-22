@@ -109,6 +109,7 @@ mod compat_tests {
             end: 60.0,
             account_smt_root: Some(lite.root),
             seal_record_hash: None,
+            seal_wire_version: 0,
         };
         assert!(verify_account_proof_against_header(&lite, &hdr));
 

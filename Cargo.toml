@@ -1,6 +1,6 @@
 [package]
 name = "elara-runtime"
-version = "0.2.2"
+version = "0.3.0"
 edition = "2021"
 # MSRV — matches the README "Rust 1.87+" requirement; an older rustc now gets a
 # clear "requires rustc 1.87 or newer" error instead of cryptic syntax failures.

@@ -112,10 +112,9 @@ pub fn build_zone_snapshot(
     let state_root = tree.root()?;
     let record_count = tree.leaf_count()?;
 
-    let last_seal_record_id = match super::merkle::find_latest_seal_for_zone(storage, &zone)? {
-        Some((rid, _root, _epoch)) => rid,
-        None => String::new(),
-    };
+    let last_seal_record_id = super::merkle::find_latest_seal_for_zone(storage, &zone)?
+        .map(|info| info.record_id)
+        .unwrap_or_default();
 
     Ok(ZoneSnapshot {
         zone_id: zone,

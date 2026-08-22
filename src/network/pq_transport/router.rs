@@ -1120,7 +1120,7 @@ fn guard_record_body(method: &str, body: &[u8]) -> Result<()> {
 /// inclusion proof (`Vec<ProofSibling>`, depth ~log2(committee)). Serialized as
 /// JSON a legit witness is ≈ 25 KiB even for a large committee; 256 KiB is ~10×
 /// headroom while bounding both the decode allocation AND the
-/// `verify_inclusion_proof` loop a single handshaked peer can drive per message
+/// `verify_committee_inclusion_proof` loop a single handshaked peer can drive per message
 /// (the canonical committee-hash check rejects forged committees only AFTER the
 /// body is decoded). Fail-closed: oversized ⇒ `Wire` error before any parse.
 const MAX_WITNESS_GOSSIP_BODY: usize = 256 * 1024;
@@ -2343,7 +2343,7 @@ async fn handle_submit_xzone_abort_witness(
     // signers.len() cap would instead let fakes front-fill the slots and STARVE
     // real members — the membership test bounds memory AND avoids starvation.
     let leaf = crate::accounting::cross_zone::committee_leaf_hash(&envelope.witness.witness_pk);
-    if !crate::accounting::cross_zone::verify_inclusion_proof(
+    if !crate::accounting::cross_zone::verify_committee_inclusion_proof(
         &leaf,
         &envelope.witness.committee_proof,
         &envelope.committee_hash,
@@ -4677,7 +4677,7 @@ mod tests {
 
         // Seal-frozen canonical dest-committee anchor for the transfer. The witness
         // below carries an empty proof + a pk whose committee_leaf_hash != this
-        // root, so verify_inclusion_proof(leaf, [], root) == (leaf == root) == false
+        // root, so verify_committee_inclusion_proof(leaf, [], root) == (leaf == root) == false
         // → it is a non-member even though it matches the (hash, size) snapshot.
         let canon_hash = [0xCDu8; 32];
         let canon_size = 3u32;

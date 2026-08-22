@@ -5414,6 +5414,8 @@ mod tests {
             account_smt_root: root,
             drand_pulse: None,
             xzone_dest_finality_committees: None,
+            wire_version: crate::wire::WIRE_VERSION,
+            sparse_merkle_root: None,
         }
     }
 
@@ -7006,6 +7008,8 @@ mod tests {
             account_smt_root: None,
             drand_pulse: None,
             xzone_dest_finality_committees: None,
+            wire_version: crate::wire::WIRE_VERSION,
+            sparse_merkle_root: None,
         }
     }
 

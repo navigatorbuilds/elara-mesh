@@ -500,7 +500,7 @@ impl CrossZoneState {
 
         // Verify the merkle proof: walk from leaf (lock_record_hash) up the
         // sibling path, confirm we arrive at source_merkle_root.
-        if !verify_inclusion_proof(
+        if !verify_seal_inclusion_proof(
             &transfer.lock_record_hash,
             &transfer.merkle_proof,
             &transfer.source_merkle_root,
@@ -1184,9 +1184,23 @@ impl CrossZoneState {
 
 // ─── Merkle proof verification ──────────────────────────────────────────────
 
-/// Verify a Merkle inclusion proof: walk from leaf hash up the sibling path,
+/// Raw v1 (untagged) inclusion fold: walk from leaf hash up the sibling path,
 /// confirm the computed root matches the expected root.
-pub fn verify_inclusion_proof(
+///
+/// PRIVATE by design (Merkle fold-tag groundwork H1,
+/// MERKLE-PANEL-VERDICT-2026-08-22): this one fold currently serves TWO
+/// distinct trees whose folds will diverge on the v7 flag day — route every
+/// caller through a typed wrapper so each tree gets its own dispatch site:
+/// * [`verify_seal_inclusion_proof`] — the epoch-seal record tree (F1,
+///   `network::sync::MerkleTree`, odd elements PROMOTED).
+/// * [`verify_committee_inclusion_proof`] — the committee tree (F2,
+///   `build_committee_proofs`, odd elements DUPLICATED; leaves already
+///   tagged via [`committee_leaf_hash`], interior bare).
+///
+/// The fold itself is tree-agnostic (the proof shape decides everything),
+/// which is exactly why an untyped public entry point is a hazard: a proof
+/// from one tree replays byte-identically against the other. Do NOT re-export.
+fn inclusion_fold_v1(
     leaf: &[u8; 32],
     proof: &[ProofSibling],
     expected_root: &[u8; 32],
@@ -1204,6 +1218,44 @@ pub fn verify_inclusion_proof(
         current = sha3_256(&combined);
     }
     current == *expected_root
+}
+
+/// Verify a record-inclusion proof against an epoch-seal Merkle root (F1 —
+/// the seal record tree built by `network::sync::MerkleTree` over sorted
+/// `record_hash()`es; proofs generated at seal time from the sealed window).
+///
+/// M1 (LIVE fail-open shape, pinned by test
+/// `p_d_seal_fold_empty_proof_tautology_is_the_live_m1_shape`): an EMPTY
+/// proof verifies iff `leaf == expected_root`, and for a single-record epoch
+/// the seal root legitimately EQUALS the record hash — so emptiness cannot be
+/// rejected here without breaking honest single-record epochs. The v7
+/// interior tag makes `root != leaf` structural for every multi-node tree and
+/// closes the tautology; until then callers MUST pin `expected_root` to a
+/// finality-verified seal root (both live callers do: `claim_transfer` and
+/// [`XZoneTransferBundle::verify`] run `verify_finality_quorum` on the same
+/// root).
+pub fn verify_seal_inclusion_proof(
+    leaf: &[u8; 32],
+    proof: &[ProofSibling],
+    expected_root: &[u8; 32],
+) -> bool {
+    inclusion_fold_v1(leaf, proof, expected_root)
+}
+
+/// Verify a committee-membership proof against a committee root (F2 — the
+/// tree built by [`build_committee_proofs`] over
+/// [`committee_leaf_hash`]-tagged PK leaves, duplicate-last padding).
+///
+/// Callers pass a leaf produced by [`committee_leaf_hash`] — the leaf tag
+/// (`ELARA/COMMITTEE_LEAF/v1`) plus input dedup-by-leaf-hash is what makes
+/// the duplicate-last padding safe (CVE-2012-2459 shape; pinned by
+/// `committee_dedup_is_load_bearing_against_duplicate_leaf_ambiguity`).
+pub fn verify_committee_inclusion_proof(
+    leaf: &[u8; 32],
+    proof: &[ProofSibling],
+    expected_root: &[u8; 32],
+) -> bool {
+    inclusion_fold_v1(leaf, proof, expected_root)
 }
 
 // ─── Gap 2.1: seal-finality proof verification ──────────────────────────────
@@ -1245,13 +1297,13 @@ pub fn xzone_finality_signable_bytes(
 /// 1. Hashes each PK via [`committee_leaf_hash`].
 /// 2. Sorts leaves by hash, then dedupes (a witness signs each seal once).
 /// 3. Builds a binary Merkle tree with "duplicate-last" padding for
-///    odd levels (matches the verifier in [`verify_inclusion_proof`]).
+///    odd levels (matches the verifier in [`verify_committee_inclusion_proof`]).
 /// 4. Records the inclusion proof for every leaf.
 ///
 /// The returned root **equals** [`crate::network::zone_committee::committee_hash_from_pks`]
 /// applied to the same `pks`. The returned proofs are the values the
 /// witness packs into `SealFinalityWitness.committee_proof` — they
-/// replay through `verify_inclusion_proof` against the pinned root,
+/// replay through `verify_committee_inclusion_proof` against the pinned root,
 /// which is exactly what [`verify_finality_quorum`] does on the
 /// consumer side.
 ///
@@ -1324,6 +1376,53 @@ pub fn build_committee_proofs(
         .zip(proofs)
         .collect();
     (root, proofs_by_pk)
+}
+
+/// Interior-node tag for the v2 COMMITTEE tree (F2). Slash-style — the ONE
+/// documented legacy-consistency exception to the underscore tag convention,
+/// matching this tree's frozen leaf family `ELARA/COMMITTEE_LEAF/v1`
+/// (panel R4/R6, MERKLE-PANEL-VERDICT-2026-08-22).
+pub const COMMITTEE_FOLD_V2_NODE_TAG: &[u8] = b"ELARA/COMMITTEE_NODE/v1";
+
+/// Phase 2 REFERENCE IMPLEMENTATION of the v2 committee root: identical
+/// shape to [`build_committee_proofs`]'s root leg (leaf-tag via
+/// [`committee_leaf_hash`] — unchanged at v2 — sort + dedup by leaf hash,
+/// DUPLICATE-LAST padding) with the interior combine tagged
+/// `SHA3(ELARA/COMMITTEE_NODE/v1 ‖ left ‖ right)`.
+///
+/// ZERO live callers until the v7 flip (Phase 4), when
+/// `build_committee_proofs` + the independent hand-written twin
+/// `zone_committee::committee_hash_from_pks` both dispatch to this recipe in
+/// the SAME commit (R6; cross-check test
+/// `build_committee_proofs_root_matches_committee_hash_from_pks` is the
+/// backstop). KAT-pinned by `f2_committee_fold_v2_interior_kat` against
+/// independently-computed Python values.
+pub fn committee_root_v2_interior(pks: &[Vec<u8>]) -> [u8; 32] {
+    assert!(!pks.is_empty(), "committee must be non-empty");
+    let mut leaves: Vec<[u8; 32]> = pks.iter().map(|pk| committee_leaf_hash(pk)).collect();
+    leaves.sort();
+    leaves.dedup();
+
+    let mut level = leaves;
+    while level.len() > 1 {
+        if level.len() % 2 == 1 {
+            // Duplicate-last padding — safe ONLY because of the dedup above
+            // (CVE-2012-2459 shape), exactly as in the v1 fold.
+            if let Some(last) = level.last().copied() {
+                level.push(last);
+            }
+        }
+        let mut next = Vec::with_capacity(level.len() / 2);
+        for chunk in level.chunks(2) {
+            let mut buf = Vec::with_capacity(COMMITTEE_FOLD_V2_NODE_TAG.len() + 64);
+            buf.extend_from_slice(COMMITTEE_FOLD_V2_NODE_TAG);
+            buf.extend_from_slice(&chunk[0]);
+            buf.extend_from_slice(&chunk[1]);
+            next.push(sha3_256(&buf));
+        }
+        level = next;
+    }
+    level[0]
 }
 
 /// Producer-side helper: sign a seal-finality witness with `signer`
@@ -1511,7 +1610,7 @@ pub fn verify_finality_quorum(
         }
         // (1) Committee membership
         let leaf = committee_leaf_hash(&w.witness_pk);
-        if !verify_inclusion_proof(&leaf, &w.committee_proof, committee_hash) {
+        if !verify_committee_inclusion_proof(&leaf, &w.committee_proof, committee_hash) {
             continue;
         }
         // (2) Signature
@@ -1631,7 +1730,7 @@ pub fn verify_abort_quorum(
             continue;
         }
         let leaf = committee_leaf_hash(&w.witness_pk);
-        if !verify_inclusion_proof(&leaf, &w.committee_proof, &canon_hash) {
+        if !verify_committee_inclusion_proof(&leaf, &w.committee_proof, &canon_hash) {
             continue;
         }
         let ok = crate::identity::Identity::verify(&msg, &w.signature, &w.witness_pk)
@@ -1664,7 +1763,7 @@ pub fn verify_abort_quorum(
 /// Mirrors the verification side of `claim_transfer`: bundles together the
 /// lock-leaf + inclusion proof + seal root + the seal-finality witness
 /// collection (Phase 2c), so callers can run the same checks
-/// [`verify_inclusion_proof`] + [`verify_finality_quorum`] do, in one call.
+/// [`verify_seal_inclusion_proof`] + [`verify_finality_quorum`] do, in one call.
 ///
 /// Construction:
 /// * Server-side: [`XZoneTransferBundle::from_pending`] assembles a bundle
@@ -1746,7 +1845,7 @@ impl XZoneTransferBundle {
     /// concern (e.g., account checks the claim has been observed in zone B's
     /// DAG and signed by the recipient).
     pub fn verify(&self) -> Result<()> {
-        if !verify_inclusion_proof(
+        if !verify_seal_inclusion_proof(
             &self.lock_record_hash,
             &self.merkle_proof,
             &self.source_merkle_root,
@@ -1924,12 +2023,12 @@ mod tests {
         );
         // Membership proof for the duplicated member verifies under both.
         let leaf_c = committee_leaf_hash(&c);
-        assert!(verify_inclusion_proof(&leaf_c, &proofs_odd[&c], &root_odd));
-        assert!(verify_inclusion_proof(&leaf_c, &proofs_dup[&c], &root_dup));
+        assert!(verify_committee_inclusion_proof(&leaf_c, &proofs_odd[&c], &root_odd));
+        assert!(verify_committee_inclusion_proof(&leaf_c, &proofs_dup[&c], &root_dup));
         // And a NON-member does not gain membership from the shape games.
         let d = vec![0xD4u8; 1952];
         let leaf_d = committee_leaf_hash(&d);
-        assert!(!verify_inclusion_proof(&leaf_d, &proofs_odd[&c], &root_odd));
+        assert!(!verify_committee_inclusion_proof(&leaf_d, &proofs_odd[&c], &root_odd));
     }
 
     /// P-C: the codebase carries TWO odd-element disciplines — the seal fold
@@ -2333,18 +2432,97 @@ mod tests {
     }
 
     #[test]
-    fn test_verify_inclusion_proof() {
+    fn typed_inclusion_wrappers_share_one_v1_fold() {
         let (leaf, proof, root) = make_test_proof(b"test-leaf");
-        assert!(verify_inclusion_proof(&leaf, &proof, &root));
+        assert!(verify_seal_inclusion_proof(&leaf, &proof, &root));
+        // H1 groundwork: both typed wrappers delegate to ONE v1 fold today —
+        // pinned here so the v7 flag day's divergence is a deliberate diff.
+        assert!(verify_committee_inclusion_proof(&leaf, &proof, &root));
 
         // Wrong leaf fails
         let wrong = sha3_256(b"wrong");
-        assert!(!verify_inclusion_proof(&wrong, &proof, &root));
+        assert!(!verify_seal_inclusion_proof(&wrong, &proof, &root));
 
         // Tampered proof fails
         let mut bad_proof = proof.clone();
         bad_proof[0].hash = [0u8; 32];
-        assert!(!verify_inclusion_proof(&leaf, &bad_proof, &root));
+        assert!(!verify_seal_inclusion_proof(&leaf, &bad_proof, &root));
+    }
+
+    /// P-D / M1 pin (MERKLE-PANEL-VERDICT-2026-08-22 R7): an EMPTY proof
+    /// verifies iff leaf == root — for ARBITRARY 32-byte values, not just
+    /// real record hashes. This is the LIVE v1 fail-open shape: it is
+    /// load-bearing for single-record epochs (whose seal root legitimately
+    /// equals the sole record hash) and simultaneously the tautology an
+    /// attacker replays against any claimed root. The seal-side callers
+    /// tolerate it because `expected_root` is always pinned to a
+    /// finality-verified seal root; `elara-verify`'s offline path instead
+    /// REJECTS 0 siblings outright (its tree is fixed-depth). The v7
+    /// interior tag closes the tautology for MULTI-NODE trees (a tagged
+    /// tree's root can never equal a raw leaf). NOTE (adversarial seat,
+    /// 2026-08-22): an empty-proof walk runs ZERO fold iterations, so no
+    /// recipe — v1 or v2 — is ever applied; `leaf == root` stays true here
+    /// under ANY dispatch. Do NOT "flip this assert" at v7: the correct
+    /// flag-day additions are (1) a v2 KAT asserting a multi-leaf tagged
+    /// tree's root differs from every one of its own leaves, and (2) THIS
+    /// test kept as-is — the single-leaf/empty-proof accept is legitimate
+    /// and permanent.
+    #[test]
+    fn p_d_seal_fold_empty_proof_tautology_is_the_live_m1_shape() {
+        let x = sha3_256(b"any-32-bytes-at-all");
+        assert!(
+            verify_seal_inclusion_proof(&x, &[], &x),
+            "v1 empty-proof tautology vanished — if the fold changed, this MUST be a flag-day diff"
+        );
+        let y = sha3_256(b"some-other-root");
+        assert!(!verify_seal_inclusion_proof(&x, &[], &y));
+
+        // The M7 divergence: claim_transfer refuses empty proofs at the
+        // TRANSFER layer (`merkle_proof.is_empty()` gate) and
+        // `XZoneTransferBundle::from_pending` refuses to BUILD one, but
+        // `XZoneTransferBundle::verify` itself carries no emptiness guard —
+        // the fold above is its exact inclusion leg. Pinned so the guard
+        // asymmetry stays a known, deliberate state until v7.
+        let bundle_leg_accepts_empty = verify_seal_inclusion_proof(&x, &[], &x);
+        assert!(bundle_leg_accepts_empty);
+    }
+
+    /// Phase 2: F2 committee v2-interior KATs. Expected values computed
+    /// independently (Python hashlib SHA3-256) BEFORE the reference fn
+    /// existed. The v1 assertion doubles as a model-lock: if the Python
+    /// model of the LIVE fold (leaf tag + sort + dedup + duplicate-last)
+    /// were wrong, the v1 pin would fail — so the v2 pin inherits the same
+    /// confidence.
+    #[test]
+    fn f2_committee_fold_v2_interior_kat() {
+        let kat = |hex_str: &str| {
+            let v = hex::decode(hex_str).unwrap();
+            let mut a = [0u8; 32];
+            a.copy_from_slice(&v);
+            a
+        };
+        let pks = vec![vec![0xA1u8; 1952], vec![0xB2u8; 1952], vec![0xC3u8; 1952]];
+
+        // v1 model-lock: the LIVE fold must equal the independent Python model.
+        let (v1_root, _) = build_committee_proofs(&pks);
+        assert_eq!(
+            v1_root,
+            kat("0683603c8b345eb43b2a6eb811ca002824b85daefaf1ef2aadfd6d91e8879159"),
+            "v1 committee root moved — the frozen live fold has been altered"
+        );
+
+        // v2 KAT: tagged interior, same leaves, duplicate-last odd rule.
+        let v2_root = committee_root_v2_interior(&pks);
+        assert_eq!(
+            v2_root,
+            kat("1a258b2031febc1eb4cc20af151423161c30935cbf260a883abcbdcf267624ad"),
+            "v2 committee root moved"
+        );
+        assert_ne!(v2_root, v1_root, "the interior tag must change the root");
+
+        // Dedup carries over: a duplicated PK collapses identically in v2.
+        let pks_dup = vec![pks[0].clone(), pks[1].clone(), pks[2].clone(), pks[2].clone()];
+        assert_eq!(committee_root_v2_interior(&pks_dup), v2_root);
     }
 
     #[test]
@@ -2392,7 +2570,7 @@ mod tests {
 
     /// Build a committee Merkle tree from a slice of witness PKs and return
     /// `(committee_hash, per-witness membership proofs)` aligned 1:1 with the
-    /// input. Uses the same hash construction as `verify_inclusion_proof` so
+    /// input. Uses the same hash construction as the inclusion fold so
     /// the proofs replay exactly.
     fn build_committee(witness_pks: &[Vec<u8>]) -> ([u8; 32], Vec<Vec<ProofSibling>>) {
         assert!(!witness_pks.is_empty(), "committee must be non-empty");
@@ -2403,7 +2581,7 @@ mod tests {
         // Rebuild the tree level by level, recording each node's level-mate
         // for proof construction. A level with an odd count duplicates the
         // last node (standard pad-to-power-of-2 trick). Proofs follow the
-        // same rule when consumed by `verify_inclusion_proof`.
+        // same rule when consumed by `verify_committee_inclusion_proof`.
         let n = leaves.len();
         let mut proofs: Vec<Vec<ProofSibling>> = vec![Vec::new(); n];
         let mut level: Vec<[u8; 32]> = leaves.clone();
@@ -2467,14 +2645,14 @@ mod tests {
     #[test]
     fn test_committee_proof_builds_and_verifies() {
         // Build a committee of 3 witnesses; verify each membership proof
-        // round-trips through verify_inclusion_proof.
+        // round-trips through verify_committee_inclusion_proof.
         let ws: Vec<Identity> = (0..3).map(|_| make_witness()).collect();
         let pks: Vec<Vec<u8>> = ws.iter().map(|w| w.public_key.clone()).collect();
         let (root, proofs) = build_committee(&pks);
 
         for (i, pk) in pks.iter().enumerate() {
             let leaf = committee_leaf_hash(pk);
-            assert!(verify_inclusion_proof(&leaf, &proofs[i], &root),
+            assert!(verify_committee_inclusion_proof(&leaf, &proofs[i], &root),
                 "committee proof for witness {i} must verify");
         }
     }
@@ -2913,7 +3091,7 @@ mod tests {
             let proof = proofs_by_pk.get(pk).expect("every committee pk has a proof");
             let leaf = committee_leaf_hash(pk);
             assert!(
-                verify_inclusion_proof(&leaf, proof, &root),
+                verify_committee_inclusion_proof(&leaf, proof, &root),
                 "membership proof must verify for committee member"
             );
         }

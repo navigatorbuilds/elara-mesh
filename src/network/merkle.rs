@@ -264,13 +264,25 @@ pub fn generate_cross_zone_proof(
         None => return Ok(None), // Record not in this zone's tree
     };
 
-    // Find the latest epoch seal for target zone to get the merkle root
-    // Scan recent epoch seals from RocksDB
-    let seal_info = find_latest_seal_for_zone(rocks, target_zone)?;
-    let (seal_record_id, seal_merkle_root, target_epoch) = match seal_info {
+    // Find the latest epoch seal for target zone to get the ZONE-TREE (F3)
+    // checkpoint root. RES-1 fix (MERKLE-FOLD-TAG-BRIEF-V2 2026-08-22): this
+    // used to stamp F1's per-epoch batch root (`parsed.merkle_root`) while
+    // the proof above is generated against the live F3 SparseMerkleTree —
+    // two independently-computed values that never coincide, making
+    // `root_matches_seal` effectively always-false. The seal's
+    // `epoch_sparse_merkle_root` checkpoint is the value this proof can
+    // honestly be compared against. Seals without the checkpoint (legacy)
+    // can't anchor an F3 proof — return None rather than a never-matching
+    // comparison.
+    let seal_info = match find_latest_seal_for_zone(rocks, target_zone)? {
         Some(info) => info,
         None => return Ok(None), // No seal found for this zone
     };
+    let seal_merkle_root = match seal_info.f3_sparse_root {
+        Some(r) => r,
+        None => return Ok(None), // Legacy seal: no F3 checkpoint to anchor against
+    };
+    let (seal_record_id, target_epoch) = (seal_info.record_id, seal_info.epoch_number);
 
     Ok(Some(CrossZoneProof {
         record_id: record_id.to_string(),
@@ -284,15 +296,30 @@ pub fn generate_cross_zone_proof(
     }))
 }
 
-/// Find the latest epoch seal for a zone. Returns (seal_record_id, merkle_root, epoch_number).
+/// Latest-seal lookup result for [`find_latest_seal_for_zone`].
+///
+/// RES-1 (MERKLE-FOLD-TAG-BRIEF-V2 2026-08-22): the F3 zone-tree checkpoint
+/// is surfaced by NAME so no caller can mistake it for the seal's F1
+/// per-epoch batch root — the field confusion that made the explorer's
+/// `root_matches_seal` effectively always-false. The F1 root is deliberately
+/// NOT carried: neither caller consumes it from this helper.
+pub(crate) struct LatestSealInfo {
+    pub record_id: String,
+    /// F3 zone-record-tree checkpoint (`epoch_sparse_merkle_root`);
+    /// None on legacy seals that never wrote the key.
+    pub f3_sparse_root: Option<[u8; 32]>,
+    pub epoch_number: u64,
+}
+
+/// Find the latest epoch seal for a zone.
 ///
 /// Exposed `pub(crate)` so Gap 4 orchestration (building a `ZoneSnapshot`
 /// for a transition seal's parent) can reuse the same bounded-scan path
-/// as cross-zone proof construction.
+/// as cross-zone proof construction (it consumes only the record id).
 pub(crate) fn find_latest_seal_for_zone(
     rocks: &StorageEngine,
     zone: &ZoneId,
-) -> Result<Option<(String, [u8; 32], u64)>> {
+) -> Result<Option<LatestSealInfo>> {
     use crate::network::epoch::{EPOCH_OP_KEY, extract_epoch_seal};
 
     // Use timestamp index to scan recent records efficiently (newest first)
@@ -304,7 +331,7 @@ pub(crate) fn find_latest_seal_for_zone(
         - 7.0 * 86400.0;
     let recent_ids = rocks.recent_record_ids(since, 2000)?;
 
-    let mut best: Option<(String, [u8; 32], u64)> = None;
+    let mut best: Option<LatestSealInfo> = None;
 
     for rid in recent_ids {
         let rec = match rocks.get_record(&rid)? {
@@ -320,9 +347,13 @@ pub(crate) fn find_latest_seal_for_zone(
         if let Ok(Some(parsed)) = extract_epoch_seal(&rec) {
             if &parsed.zone == zone {
                 let is_newer = best.as_ref()
-                    .is_none_or(|(_, _, epoch)| parsed.epoch_number > *epoch);
+                    .is_none_or(|b| parsed.epoch_number > b.epoch_number);
                 if is_newer {
-                    best = Some((rid, parsed.merkle_root, parsed.epoch_number));
+                    best = Some(LatestSealInfo {
+                        record_id: rid,
+                        f3_sparse_root: parsed.sparse_merkle_root,
+                        epoch_number: parsed.epoch_number,
+                    });
                 }
             }
         }

@@ -55,6 +55,7 @@ fn main() {
         end: 0.0,
         account_smt_root: Some(account_smt_root),
         seal_record_hash: None,
+        seal_wire_version: 0, // 0 = pre-fold-tag-era payload; real headers carry the seal's wire version
     };
 
     // ── Light client ─────────────────────────────────────────────────────────

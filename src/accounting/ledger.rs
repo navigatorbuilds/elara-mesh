@@ -6197,6 +6197,8 @@ mod tests {
             account_smt_root: None,
             drand_pulse: None,
             xzone_dest_finality_committees: None,
+            wire_version: crate::wire::WIRE_VERSION,
+            sparse_merkle_root: None,
         };
         let proofed = attach_xzone_proofs_from_seal(&mut ledger, &seal);
         assert_eq!(proofed, 1, "exactly one pending lock must have proof attached");
@@ -6333,6 +6335,8 @@ mod tests {
             account_smt_root: None,
             drand_pulse: None,
             xzone_dest_finality_committees: None,
+            wire_version: crate::wire::WIRE_VERSION,
+            sparse_merkle_root: None,
         };
         assert_eq!(attach_xzone_proofs_from_seal(&mut ledger, &seal), 1);
 
@@ -6461,6 +6465,8 @@ mod tests {
             account_smt_root: None,
             drand_pulse: None,
             xzone_dest_finality_committees: None,
+            wire_version: crate::wire::WIRE_VERSION,
+            sparse_merkle_root: None,
         };
         let proofed = attach_xzone_proofs_from_seal(&mut ledger, &seal);
         assert_eq!(proofed, 1);
@@ -6605,6 +6611,8 @@ mod tests {
             account_smt_root: None,
             drand_pulse: None,
             xzone_dest_finality_committees: None,
+            wire_version: crate::wire::WIRE_VERSION,
+            sparse_merkle_root: None,
         };
         attach_xzone_proofs_from_seal(&mut ledger, &seal);
         ledger

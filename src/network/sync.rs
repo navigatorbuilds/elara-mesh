@@ -61,6 +61,16 @@ pub struct MerkleProof {
     pub siblings: Vec<MerkleProofNode>,
     /// The root this proof verifies against.
     pub root: [u8; 32],
+    /// Fold recipe this proof was generated under (Merkle fold-tag Phase 3,
+    /// client-visible BEFORE the flip): 1 = v1 bare fold, 2 = v2 tagged
+    /// fold, 0 = proof came from a pre-Phase-3 emitter (serde default —
+    /// treat as "unknown, pre-fold-tag era", equivalent to v1 until the
+    /// fence says otherwise). Informational at Phase 3: no verifier reads
+    /// it — v7 dispatch keys on the SEAL'S wire version, and the verify
+    /// fns stay shape-based; this field exists so consumers learn it
+    /// EXISTS before it ever says 2.
+    #[serde(default)]
+    pub fold_version: u16,
 }
 
 /// A sibling node in a Merkle proof path.
@@ -123,7 +133,7 @@ impl MerkleTree {
             pos = next_pos;
         }
 
-        Some(MerkleProof { leaf: *leaf, siblings, root })
+        Some(MerkleProof { leaf: *leaf, siblings, root, fold_version: 1 })
     }
 
     /// Verify a Merkle inclusion proof against a known root.
@@ -143,6 +153,142 @@ impl MerkleTree {
         }
 
         current == proof.root
+    }
+
+    // ─── v2 tagged folds — Phase 2 REFERENCE IMPLEMENTATIONS ───────────────
+    // Merkle fold-tag Phase 2 (MERKLE-FOLD-TAG-BRIEF-V2-2026-08-22): the v7
+    // interior-tagged folds, shipped AHEAD of the flip so the KAT vectors
+    // freeze first (vectors were computed independently in Python BEFORE
+    // these functions were written — the tests pin these fns to those
+    // values, never the reverse). ZERO live callers until the Phase 4 flip
+    // wires per-seal dispatch on `wire_version >= 7`; nothing below is
+    // reachable from any consensus, wire, or route path today.
+    //
+    // Recipe (panel R4/R5, super-seal tag settled by the 2026-08-22 lighter
+    // panel): interior combine = SHA3-256(TAG ‖ left ‖ right); leaves stay
+    // RAW (already domain-bound via record signable_bytes); odd elements
+    // stay PROMOTED unchanged — promotion is not a combine, so no tag is
+    // applied at a promotion. Consequence: a single-leaf tree still has
+    // root == leaf (no interior node exists — the legitimate single-record-
+    // epoch shape), while every n≥2 root lives in the tagged-hash domain
+    // and can never equal a raw leaf. Tags are per-tree distinct and fixed
+    // per function — the public surface deliberately has NO recipe
+    // parameter, so recipe choice can never vary per call site or per
+    // level (the Phase 2 hygiene rule).
+
+    /// Interior-node tag for the v2 ZONE-SEAL record tree (F1).
+    pub const SEAL_FOLD_V2_NODE_TAG: &'static [u8] = b"ELARA_SEAL_MERKLE_NODE_V1";
+    /// Interior-node tag for the v2 SUPER-SEAL tree (distinct per-tree tag;
+    /// its leaves are `sha3(seal_record_hash)`, not raw record hashes).
+    pub const SUPER_SEAL_FOLD_V2_NODE_TAG: &'static [u8] = b"ELARA_SUPER_SEAL_MERKLE_NODE_V1";
+
+    /// SHA3-256(tag ‖ left ‖ right) — the one v2 interior combine.
+    fn combine_tagged(tag: &[u8], left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
+        let mut buf = Vec::with_capacity(tag.len() + 64);
+        buf.extend_from_slice(tag);
+        buf.extend_from_slice(left);
+        buf.extend_from_slice(right);
+        sha3_256(&buf)
+    }
+
+    /// v2 root engine: identical layer walk to [`MerkleTree::root`] (promote
+    /// odd unchanged) with the tagged combine. Private — callers go through
+    /// the per-tree typed fns below.
+    fn root_tagged(tag: &[u8], hashes: &[[u8; 32]]) -> [u8; 32] {
+        if hashes.is_empty() {
+            return [0u8; 32];
+        }
+        if hashes.len() == 1 {
+            return hashes[0];
+        }
+        let mut layer: Vec<[u8; 32]> = hashes.to_vec();
+        while layer.len() > 1 {
+            let mut next = Vec::with_capacity(layer.len().div_ceil(2));
+            for pair in layer.chunks(2) {
+                if pair.len() == 2 {
+                    next.push(Self::combine_tagged(tag, &pair[0], &pair[1]));
+                } else {
+                    next.push(pair[0]); // odd: promote unchanged, no tag
+                }
+            }
+            layer = next;
+        }
+        layer[0]
+    }
+
+    /// v2 proof engine — same sibling emission as [`MerkleTree::proof`]
+    /// (promoted nodes emit NO sibling), interiors tagged.
+    fn proof_tagged(tag: &[u8], hashes: &[[u8; 32]], leaf: &[u8; 32]) -> Option<MerkleProof> {
+        if hashes.is_empty() {
+            return None;
+        }
+        let idx = hashes.iter().position(|h| h == leaf)?;
+        let root = Self::root_tagged(tag, hashes);
+
+        let mut siblings = Vec::new();
+        let mut layer: Vec<[u8; 32]> = hashes.to_vec();
+        let mut pos = idx;
+        while layer.len() > 1 {
+            let mut next_layer = Vec::with_capacity(layer.len().div_ceil(2));
+            let next_pos = pos / 2;
+            for pair in layer.chunks(2) {
+                if pair.len() == 2 {
+                    next_layer.push(Self::combine_tagged(tag, &pair[0], &pair[1]));
+                } else {
+                    next_layer.push(pair[0]);
+                }
+            }
+            if pos % 2 == 0 {
+                if pos + 1 < layer.len() {
+                    siblings.push(MerkleProofNode { hash: layer[pos + 1], is_right: true });
+                }
+            } else {
+                siblings.push(MerkleProofNode { hash: layer[pos - 1], is_right: false });
+            }
+            layer = next_layer;
+            pos = next_pos;
+        }
+        Some(MerkleProof { leaf: *leaf, siblings, root, fold_version: 2 })
+    }
+
+    /// v2 verify engine — tagged walk against `proof.root`.
+    fn verify_proof_tagged(tag: &[u8], proof: &MerkleProof) -> bool {
+        let mut current = proof.leaf;
+        for node in &proof.siblings {
+            current = if node.is_right {
+                Self::combine_tagged(tag, &current, &node.hash)
+            } else {
+                Self::combine_tagged(tag, &node.hash, &current)
+            };
+        }
+        current == proof.root
+    }
+
+    /// v2 ZONE-SEAL tree root (F1, `ELARA_SEAL_MERKLE_NODE_V1` interior).
+    /// No live caller until the v7 flip.
+    pub fn root_v2_seal(hashes: &[[u8; 32]]) -> [u8; 32] {
+        Self::root_tagged(Self::SEAL_FOLD_V2_NODE_TAG, hashes)
+    }
+
+    /// v2 SUPER-SEAL tree root (`ELARA_SUPER_SEAL_MERKLE_NODE_V1` interior).
+    /// Root-only — super-seal coverage verification compares roots
+    /// (`verify_super_seal_coverage`), it never walks inclusion proofs, so
+    /// no proof pair is defined for this tree. No live caller until v7.
+    pub fn root_v2_super_seal(hashes: &[[u8; 32]]) -> [u8; 32] {
+        Self::root_tagged(Self::SUPER_SEAL_FOLD_V2_NODE_TAG, hashes)
+    }
+
+    /// v2 ZONE-SEAL inclusion proof. No live caller until the v7 flip.
+    pub fn proof_v2_seal(hashes: &[[u8; 32]], leaf: &[u8; 32]) -> Option<MerkleProof> {
+        Self::proof_tagged(Self::SEAL_FOLD_V2_NODE_TAG, hashes, leaf)
+    }
+
+    /// v2 ZONE-SEAL inclusion verify. Retains the empty-proof tautology
+    /// (leaf == root, zero fold iterations — the legitimate single-record-
+    /// epoch shape; see the M1 pin in `accounting::cross_zone`). No live
+    /// caller until the v7 flip.
+    pub fn verify_proof_v2_seal(proof: &MerkleProof) -> bool {
+        Self::verify_proof_tagged(Self::SEAL_FOLD_V2_NODE_TAG, proof)
     }
 }
 
@@ -4346,5 +4492,248 @@ mod tests {
         let bytes_header_only_result = BloomFilter::from_bytes(&header_only);
         assert!(bytes_header_only_result.is_err(),
             "header-only must error when body is required");
+    }
+
+    // ─── F1 seal-fold v1 KATs + P-D proof-pair pinning ─────────────────────
+    // Merkle fold-tag groundwork (MERKLE-PANEL-VERDICT-2026-08-22, GO items
+    // 2-3): freeze the v1 (untagged, odd-element-PROMOTED) fold bytes BEFORE
+    // any tag work touches this file. F1 is the fold SIGNED into every epoch
+    // seal (`epoch.rs` `MerkleTree::root(&hashes)`) and super-seal — ~89k
+    // records already committed to these exact bytes; these vectors must pass
+    // FOREVER (append-never-replace: v7 tagged vectors will land alongside,
+    // never instead). Expected values computed independently (Python
+    // hashlib.sha3_256, FIPS 202) — not by running this code against itself.
+
+    /// Hex-decode helper for the KAT constants.
+    fn kat32(hex_str: &str) -> [u8; 32] {
+        let v = hex::decode(hex_str).unwrap();
+        let mut a = [0u8; 32];
+        a.copy_from_slice(&v);
+        a
+    }
+
+    /// F1 v1 KAT: multi-leaf roots over pre-sorted constant leaves, including
+    /// both odd-count shapes (3 and 5 leaves — the PROMOTED rule at one and
+    /// two levels). A fold that duplicates-last instead of promoting (the F2
+    /// committee rule), tags interior nodes, or re-sorts diverges on ≥3.
+    #[test]
+    fn f1_seal_fold_v1_kat_roots_frozen() {
+        let l: Vec<[u8; 32]> =
+            [0x11u8, 0x22, 0x33, 0x44, 0x55].iter().map(|&b| [b; 32]).collect();
+
+        // Single leaf: root IS the leaf, unhashed (the M1 root==leaf shape).
+        assert_eq!(MerkleTree::root(&l[..1]), l[0]);
+        // Empty input: defined sentinel, all-zero.
+        assert_eq!(MerkleTree::root(&[]), [0u8; 32]);
+
+        assert_eq!(
+            MerkleTree::root(&l[..2]),
+            kat32("127eebf5734e0a01b9b7d16b2b122bd36f617a1aae4accf9bc251e0a8903645e"),
+            "2-leaf v1 root moved — the frozen seal fold has been altered"
+        );
+        assert_eq!(
+            MerkleTree::root(&l[..3]),
+            kat32("0f82311f18f2e63a2de99844dcd603e88df111cdd6394b10bb721399629e8257"),
+            "3-leaf (odd, PROMOTED) v1 root moved"
+        );
+        assert_eq!(
+            MerkleTree::root(&l[..4]),
+            kat32("92c9ade62a627be338484550a68cffd59c9941d42749cb09300ecfd7c6cbd57e"),
+            "4-leaf v1 root moved"
+        );
+        assert_eq!(
+            MerkleTree::root(&l[..5]),
+            kat32("f4230d2b92ba8c42c4d787969d0d7f082a6443724dca686ff9426eee4895e621"),
+            "5-leaf (odd at two levels) v1 root moved"
+        );
+    }
+
+    /// P-D: pin the seal-tree PROOF pair (`MerkleTree::proof` /
+    /// `verify_proof`) — the fold pair the 2026-08-19 brief's inventory
+    /// missed. Two load-bearing v1 shapes:
+    /// 1. A PROMOTED element's proof SKIPS levels (emits NO sibling where it
+    ///    was promoted) — proof length is NOT tree depth. Normalizing the odd
+    ///    rule would change proof WIRE SHAPES, a second semantic change the
+    ///    panel ruled out of the flag day (R5).
+    /// 2. Single-leaf epochs produce root == leaf with an EMPTY sibling list
+    ///    — the legitimate twin of the M1 tautology (see the cross_zone
+    ///    `p_d_seal_fold_empty_proof_tautology_is_the_live_m1_shape` pin).
+    #[test]
+    fn p_d_seal_proof_pair_promoted_element_skips_levels() {
+        let l: Vec<[u8; 32]> =
+            [0x11u8, 0x22, 0x33, 0x44, 0x55].iter().map(|&b| [b; 32]).collect();
+
+        // Promoted element (idx 4 of 5): promoted unchanged through levels 0
+        // and 1, paired only at level 2 — exactly ONE sibling, and that
+        // sibling is the 4-leaf subtree root (== the 4-leaf KAT above).
+        let p4 = MerkleTree::proof(&l, &l[4]).expect("leaf 4 present");
+        assert_eq!(p4.siblings.len(), 1, "promoted-element proof must skip 2 levels");
+        assert!(!p4.siblings[0].is_right, "the lone sibling sits LEFT of the promoted node");
+        assert_eq!(
+            p4.siblings[0].hash,
+            kat32("92c9ade62a627be338484550a68cffd59c9941d42749cb09300ecfd7c6cbd57e"),
+        );
+        assert!(MerkleTree::verify_proof(&p4));
+
+        // Non-promoted element (idx 0 of 5): full 3-sibling path, all right.
+        let p0 = MerkleTree::proof(&l, &l[0]).expect("leaf 0 present");
+        assert_eq!(p0.fold_version, 1, "v1 builder must stamp fold_version 1 (Phase 3)");
+        assert_eq!(p0.siblings.len(), 3);
+        assert!(p0.siblings.iter().all(|s| s.is_right));
+        assert_eq!(p0.siblings[0].hash, l[1]);
+        assert_eq!(
+            p0.siblings[1].hash,
+            kat32("ae75f84cf35d9168cf43665240cc528d67b90245b19e9c284ca63111629d13b5"),
+        );
+        assert_eq!(p0.siblings[2].hash, l[4]);
+        assert!(MerkleTree::verify_proof(&p0));
+
+        // Tamper: flipping one sibling bit must fail the fold.
+        let mut bad = p0.clone();
+        bad.siblings[1].hash[0] ^= 1;
+        assert!(!MerkleTree::verify_proof(&bad));
+
+        // Single-leaf: empty sibling list, root == leaf, verifies trivially.
+        let single = MerkleTree::proof(&l[..1], &l[0]).expect("sole leaf present");
+        assert!(single.siblings.is_empty());
+        assert_eq!(single.root, l[0]);
+        assert!(MerkleTree::verify_proof(&single));
+    }
+
+    // ─── Phase 2: v2 tagged-fold KATs + boundary MUST-REJECT/ACCEPT family ──
+    // Expected values computed independently (Python hashlib SHA3-256)
+    // BEFORE the v2 reference fns existed — these tests pin the fns to the
+    // vectors, never the reverse. Same constant leaves as the v1 KATs so
+    // v1/v2 divergence is directly visible.
+
+    fn kat_leaves() -> Vec<[u8; 32]> {
+        [0x11u8, 0x22, 0x33, 0x44, 0x55].iter().map(|&b| [b; 32]).collect()
+    }
+
+    /// F1 seal-tree v2 KATs: tagged roots for n=1..5, plus the two domain
+    /// separations the tag exists to create (v2 ≠ v1 for every n≥2; a v2
+    /// multi-node root can never equal a raw leaf).
+    #[test]
+    fn f1_seal_fold_v2_kat_roots_frozen() {
+        let l = kat_leaves();
+
+        // n=1: no interior node exists — root IS the leaf, tag never applies.
+        assert_eq!(MerkleTree::root_v2_seal(&l[..1]), l[0]);
+        assert_eq!(MerkleTree::root_v2_seal(&[]), [0u8; 32]);
+
+        let expect = [
+            (2, "278bca3b395f69f41ae9e7c1c6d9ea86a54bd5be71c5b356517c3d11a48f6319"),
+            (3, "2940dd645a6b5829158cea12e8ddb667dd955b9911b6ae9a351a8779f610472f"),
+            (4, "d45fd38b027264b0e9364d83aea539086de2a6d833b3d4cfd663c3528a634f25"),
+            (5, "efaa484ad65ee2dde26ed56d2e495c8d8c4e5e691a3990ea98fbb1655747ad4f"),
+        ];
+        for (n, hex_root) in expect {
+            let v2 = MerkleTree::root_v2_seal(&l[..n]);
+            assert_eq!(v2, kat32(hex_root), "{n}-leaf v2 seal root moved");
+            // The whole point of the tag, pinned:
+            assert_ne!(v2, MerkleTree::root(&l[..n]), "{n}-leaf: v2 must differ from v1");
+            assert!(l.iter().all(|leaf| &v2 != leaf), "{n}-leaf: v2 root collided with a raw leaf");
+        }
+    }
+
+    /// Super-seal v2 KATs: distinct per-tree tag — same leaves must yield
+    /// different roots than the seal tree for every n≥2.
+    #[test]
+    fn super_seal_fold_v2_kat_roots_frozen() {
+        let l = kat_leaves();
+        assert_eq!(MerkleTree::root_v2_super_seal(&l[..1]), l[0]);
+        let expect = [
+            (2, "4eb0b23081dfc90f3a1d7f0ef0f8c336727a4e980b10904c7a69f9a2703795ea"),
+            (3, "162e07b8b8bb5785802a5eb3b55d93fd0cbeddef221ebec3c89e309dc28a43dd"),
+            (5, "f41e9907c7263ed4962cd66d46485adb2aeefb85f1b50eb641de47b2977a58fe"),
+        ];
+        for (n, hex_root) in expect {
+            let sup = MerkleTree::root_v2_super_seal(&l[..n]);
+            assert_eq!(sup, kat32(hex_root), "{n}-leaf v2 super-seal root moved");
+            assert_ne!(
+                sup,
+                MerkleTree::root_v2_seal(&l[..n]),
+                "{n}-leaf: per-tree tags must separate the two v2 trees"
+            );
+        }
+    }
+
+    /// v2 seal proof pair: round-trip, KAT-pinned interior sibling, and the
+    /// promoted-element level-skip carried over from v1 (promotion emits no
+    /// sibling and applies no tag).
+    #[test]
+    fn p2_seal_proof_pair_v2_round_trip_and_promoted_skip() {
+        let l = kat_leaves();
+
+        // idx 0 of 5: full path — l1 (raw), h23_v2 (tagged interior, KAT), l4 (raw).
+        let p0 = MerkleTree::proof_v2_seal(&l, &l[0]).expect("leaf 0 present");
+        assert_eq!(p0.fold_version, 2, "v2 builder must stamp fold_version 2 (Phase 3)");
+        assert_eq!(p0.siblings.len(), 3);
+        assert_eq!(p0.siblings[0].hash, l[1]);
+        assert_eq!(
+            p0.siblings[1].hash,
+            kat32("06024457c633c3a95e0335558f4a260f41ae85dfdf202dfb05d5f3320d72dc27"),
+            "tagged interior sibling h23_v2 moved"
+        );
+        assert_eq!(p0.siblings[2].hash, l[4]);
+        assert!(MerkleTree::verify_proof_v2_seal(&p0));
+
+        // idx 4 of 5 (promoted twice): exactly ONE sibling — the tagged
+        // 4-leaf subtree root (== the 4-leaf v2 KAT), sitting left.
+        let p4 = MerkleTree::proof_v2_seal(&l, &l[4]).expect("leaf 4 present");
+        assert_eq!(p4.siblings.len(), 1, "promoted-element proof must skip 2 levels in v2 too");
+        assert!(!p4.siblings[0].is_right);
+        assert_eq!(
+            p4.siblings[0].hash,
+            kat32("d45fd38b027264b0e9364d83aea539086de2a6d833b3d4cfd663c3528a634f25"),
+        );
+        assert!(MerkleTree::verify_proof_v2_seal(&p4));
+
+        // Tamper on the tagged interior fails.
+        let mut bad = p0.clone();
+        bad.siblings[1].hash[0] ^= 1;
+        assert!(!MerkleTree::verify_proof_v2_seal(&bad));
+    }
+
+    /// Phase 2 boundary family (brief §Phase 2, cases 1-5): the cross-version
+    /// MUST-REJECTs both directions, the empty-proof boundary twins, and the
+    /// per-level tag pins. Case 6 (no per-level recipe parameter) is
+    /// enforced structurally — the public v2 surface takes no tag argument.
+    #[test]
+    fn p2_boundary_family_v1_v2_must_reject_accept() {
+        let l = kat_leaves();
+        let v1_root5 = MerkleTree::root(&l);
+        let v2_root5 = MerkleTree::root_v2_seal(&l);
+
+        // Case 1 — v1 proof vs v2 root: REJECT under BOTH verifiers.
+        let p0_v1 = MerkleTree::proof(&l, &l[0]).unwrap();
+        let cross1 = MerkleProof { leaf: l[0], siblings: p0_v1.siblings.clone(), root: v2_root5, fold_version: 0 };
+        assert!(!MerkleTree::verify_proof(&cross1), "v1 walk over v1 sibs reaches v1 root ≠ v2 root");
+        assert!(!MerkleTree::verify_proof_v2_seal(&cross1), "v2 walk over v1 sibs diverges at the interior");
+
+        // Case 2 — v2 proof vs v1 root: REJECT under BOTH verifiers.
+        let p0_v2 = MerkleTree::proof_v2_seal(&l, &l[0]).unwrap();
+        let cross2 = MerkleProof { leaf: l[0], siblings: p0_v2.siblings.clone(), root: v1_root5, fold_version: 0 };
+        assert!(!MerkleTree::verify_proof(&cross2));
+        assert!(!MerkleTree::verify_proof_v2_seal(&cross2));
+
+        // Case 3 — empty proof vs MULTI-NODE v2 root: a real leaf with no
+        // path proves nothing (leaf ≠ tagged root, structurally).
+        let empty_multi = MerkleProof { leaf: l[0], siblings: vec![], root: v2_root5, fold_version: 0 };
+        assert!(!MerkleTree::verify_proof_v2_seal(&empty_multi));
+
+        // Case 4 — empty proof vs SINGLE-LEAF v2 root: MUST ACCEPT (the
+        // boundary twin; single-record epochs stay legitimate forever).
+        let empty_single = MerkleProof { leaf: l[0], siblings: vec![], root: l[0], fold_version: 0 };
+        assert!(MerkleTree::verify_proof_v2_seal(&empty_single));
+
+        // Case 5 — per-level tag pins: folds that tag only ONE of the two
+        // combine levels of the 4-leaf tree must not reach the v2 root
+        // (guards partial-tagging implementations). Independent Python KATs.
+        let v2_root4 = MerkleTree::root_v2_seal(&l[..4]);
+        let top_only = kat32("40da94b9d1ffa5dc776353224f8ee4ee1f46cb52a0d6f9034994610d10ae2d63");
+        let bottom_only = kat32("23a4a32a67b782f062c771a77418a70a57d1ff9ac8067f136e2a67b8dab25a6c");
+        assert_ne!(v2_root4, top_only, "tag applied only at the top level must not match");
+        assert_ne!(v2_root4, bottom_only, "tag applied only at the bottom level must not match");
     }
 }
