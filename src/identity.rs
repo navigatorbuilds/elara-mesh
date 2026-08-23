@@ -468,7 +468,7 @@ impl Identity {
 
     /// Sign a record in light mode: Dilithium3 only, stripping SPHINCS+ data.
     /// Produces a valid Profile B record regardless of this identity's profile.
-    /// Wire size: ~5KB instead of ~41KB. Use for non-critical records on
+    /// Wire size: ~5.6KB instead of ~41KB (7.4x). Use for non-critical records on
     /// resource-constrained nodes.
     pub fn sign_record_light(&self, record: &mut crate::record::ValidationRecord) -> Result<()> {
         let signable = record.signable_bytes();

@@ -12,8 +12,8 @@ and post-revocation provable*.
 
 Prerequisites: a running Elara node + an issued mandate — see
 [`docs/QUICKSTART-ISSUER.md`](../../docs/QUICKSTART-ISSUER.md) — and `elara-mcp` +
-`elara-cli` built (`cargo build --release -p elara-mcp --features node`, or grab the
-crates from crates.io).
+`elara-cli` built from this repo (`cargo build --release -p elara-mcp --features node`;
+neither is published on crates.io).
 
 Add one plugin instance to your dsh `cordis.yml`:
 

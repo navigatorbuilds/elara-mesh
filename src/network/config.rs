@@ -598,7 +598,10 @@ pub struct NodeConfig {
 
     /// Light mode: create Profile B records even with a Profile A identity.
     /// Strips SPHINCS+ public key and signature from outgoing records, reducing
-    /// wire size from ~41KB to ~5KB (8x reduction). The identity still holds
+    /// wire size from ~41KB to ~5.6KB (7.4x — measured 41,323 → 5,611 B;
+    /// the old "8x" here was arithmetically unreachable, ML-DSA pair floor
+    /// alone caps it at 7.85x — caught by the 2026-08-23 pqws-paper
+    /// final-verify). The identity still holds
     /// SPHINCS+ keys for verifying incoming Profile A records.
     /// Default: false. Enable on resource-constrained nodes.
     #[serde(default)]
