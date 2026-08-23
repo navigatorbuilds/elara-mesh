@@ -500,6 +500,7 @@ pub fn validate_op(
             // bad-proof records before sealing them into a record is the
             // whole point of validate.
             if let Err(e) = crate::accounting::cross_zone::verify_abort_quorum(
+                pending.source_seal_wire_version,
                 transfer_id,
                 &pending.dest_zone,
                 pending.source_seal_epoch,

@@ -1576,6 +1576,7 @@ async fn handle_snapshot_full(state: &Arc<NodeState>) -> Result<Vec<u8>> {
             mandates: state_inner.rocks.collect_mandates(),
             revocations: state_inner.rocks.collect_revocations(),
             emergency: state_inner.emergency_snapshot_carry(),
+            fold_sunset_entries: { use crate::network::RwLockRecover; state_inner.fold_sunset.read_recover().entries().cloned().collect() },
         })
     })
     .await
@@ -2199,7 +2200,9 @@ async fn handle_submit_finality_witness(
     let seal_zone = match state.rocks.get_record(&envelope.seal_id) {
         Ok(Some(seal_rec)) => {
             match crate::network::epoch::extract_epoch_seal(&seal_rec) {
-                Ok(Some(seal)) if seal.epoch_number == envelope.seal_epoch => seal.zone,
+                Ok(Some(seal)) if seal.epoch_number == envelope.seal_epoch => {
+                    (seal.zone, seal.wire_version)
+                }
                 _ => {
                     state.finality_witness_rejected_total.fetch_add(1, Relaxed);
                     return to_body(
@@ -2215,12 +2218,17 @@ async fn handle_submit_finality_witness(
         }
     };
 
+    let (seal_zone, seal_wire_version) = seal_zone;
     let (pks, canonical_hash, canonical_size) =
         crate::network::zone_committee::finality_committee_pks(
             state,
             seal_zone.path(),
             envelope.seal_epoch,
             crate::network::zone_committee::DEFAULT_COMMITTEE_SIZE,
+            // Admission keys on the LOCAL seal's own version (panel 2a):
+            // post-flip nodes must keep accepting witnesses for pre-flip
+            // seals — the seal, not the binary, owns the recipe.
+            seal_wire_version,
         )
         .await;
 
@@ -2311,11 +2319,17 @@ async fn handle_submit_xzone_abort_witness(
         .cross_zone
         .pending
         .get(&envelope.transfer_id)
-        .and_then(|t| t.dest_finality_committee);
-    match anchor {
-        Some((canon_hash, canon_size))
+        .and_then(|t| {
+            t.dest_finality_committee
+                .map(|(h, s)| (h, s, t.source_seal_wire_version))
+        });
+    let seal_wire_version = match anchor {
+        Some((canon_hash, canon_size, wv))
             if envelope.committee_hash == canon_hash
-                && envelope.committee_size == canon_size => {}
+                && envelope.committee_size == canon_size =>
+        {
+            wv
+        }
         _ => {
             state
                 .xzone_abort_witness_committee_mismatch_total
@@ -2326,7 +2340,7 @@ async fn handle_submit_xzone_abort_witness(
                 "transfer_id": envelope.transfer_id
             }));
         }
-    }
+    };
 
     // SECURITY (memory-DoS gate, twin of handle_submit_finality_witness's
     // membership check): the snapshot matches the seal-frozen anchor, but
@@ -2344,6 +2358,7 @@ async fn handle_submit_xzone_abort_witness(
     // real members — the membership test bounds memory AND avoids starvation.
     let leaf = crate::accounting::cross_zone::committee_leaf_hash(&envelope.witness.witness_pk);
     if !crate::accounting::cross_zone::verify_committee_inclusion_proof(
+        seal_wire_version,
         &leaf,
         &envelope.witness.committee_proof,
         &envelope.committee_hash,
@@ -4620,6 +4635,7 @@ mod tests {
                 zone.path(),
                 parsed.epoch_number,
                 crate::network::zone_committee::DEFAULT_COMMITTEE_SIZE,
+                6,
             )
             .await;
 
@@ -4705,6 +4721,7 @@ mod tests {
                     source_committee_size: 0,
                     dest_finality_committee: Some((canon_hash, canon_size)),
                     claim_record_id: None,
+                    source_seal_wire_version: 0,
                 },
             );
         }

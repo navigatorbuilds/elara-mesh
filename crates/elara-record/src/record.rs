@@ -1071,10 +1071,16 @@ mod tests {
             Classification::Public,
             None,
         );
-        assert_eq!(rec.version, 6, "flag day: fresh records emit v6");
+        // CONSCIOUS EDIT 2026-08-23 (v7 flag day): fresh records emit the
+        // CURRENT emission version; the binding behavior under test is
+        // version-agnostic from v6 on (v7 changed no preimage bytes).
+        assert_eq!(
+            rec.version, CURRENT_SIGNING_VERSION,
+            "fresh records emit the current signing version"
+        );
         assert_eq!(
             rec.network_id, "kat-test-net",
-            "v6 emission stamps the boot-armed binding into the signed preimage"
+            "v6+ emission stamps the boot-armed binding into the signed preimage"
         );
         assert!(
             rec.signable_bytes().starts_with(DOMAIN_TAG_RECORD_V1),
@@ -2374,13 +2380,18 @@ mod tests {
             "got: {err}"
         );
 
-        // Header ceiling: v6 accepted, v7 rejected — the decode-capability line.
+        // Header ceiling: v7 accepted, v8 rejected — the decode-capability
+        // line (CONSCIOUS EDIT 2026-08-23: ceiling 6→7, Merkle fold-tag flag
+        // day, MERKLE-FOLD-TAG-BRIEF-V2; v6 stays decodable forever).
         let mut buf = Vec::new();
         crate::wire::encode_header(&mut buf, 6);
         assert!(crate::wire::WireReader::new(&buf).read_header().is_ok(), "v6 must decode");
         let mut buf7 = Vec::new();
         crate::wire::encode_header(&mut buf7, 7);
-        assert!(crate::wire::WireReader::new(&buf7).read_header().is_err(), "v7 must be rejected");
+        assert!(crate::wire::WireReader::new(&buf7).read_header().is_ok(), "v7 must decode");
+        let mut buf8 = Vec::new();
+        crate::wire::encode_header(&mut buf8, 8);
+        assert!(crate::wire::WireReader::new(&buf8).read_header().is_err(), "v8 must be rejected");
     }
 
     #[test]

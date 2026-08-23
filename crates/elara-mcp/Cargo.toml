@@ -27,4 +27,4 @@ schemars = "1.0"
 sha3 = "0.10"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
 elara-record = { path = "../elara-record", version = "0.2.0" }
-elara-verify = { path = "../elara-verify", version = "0.2.0" }
+elara-verify = { path = "../elara-verify", version = "0.3.0" }

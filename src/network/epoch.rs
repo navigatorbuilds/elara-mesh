@@ -2202,7 +2202,7 @@ pub fn extract_epoch_seal(record: &ValidationRecord) -> Result<Option<ParsedEpoc
     // Cost: one Merkle recompute over ≤MAX_METADATA_ENTRIES=256 leaves
     // (decode cap), only when the inline key is present.
     let record_hashes = if !record_hashes.is_empty()
-        && MerkleTree::root(&record_hashes) != merkle_root
+        && MerkleTree::seal_root_for(record.version, &record_hashes) != merkle_root
     {
         SEAL_ENUM_ROOT_MISMATCH_TOTAL.fetch_add(1, Ordering::Relaxed);
         tracing::warn!(
@@ -2954,7 +2954,10 @@ pub fn create_epoch_seal_with_balance(
 
     hashes.sort();
     let record_count = hashes.len() as u64;
-    let merkle_root = MerkleTree::root(&hashes);
+    // Fold recipe rides the version this seal record will be STAMPED with —
+    // the named-day emission flip (CURRENT_SIGNING_VERSION 6→7) switches the
+    // fold to tagged v2 here with zero further edits (brief V2 R2).
+    let merkle_root = MerkleTree::seal_root_for(crate::wire::CURRENT_SIGNING_VERSION, &hashes);
 
     // Compute VRF over epoch parameters.
     //
@@ -3174,7 +3177,7 @@ pub fn derive_seal_enumeration(
             return Some(DeriveOutcome::Incomplete { local_window_count: 0 });
         }
     };
-    if !hashes.is_empty() && MerkleTree::root(&hashes) == seal.merkle_root {
+    if !hashes.is_empty() && MerkleTree::seal_root_for(seal.wire_version, &hashes) == seal.merkle_root {
         SEAL_ENUM_DERIVED_TOTAL.fetch_add(1, Ordering::Relaxed);
         Some(DeriveOutcome::Derived(hashes))
     } else {
@@ -3527,7 +3530,7 @@ fn verify_epoch_seal_inner(
         // scan_window_record_hashes for the CF_RECORD_BY_ZONE +
         // defence-in-depth re-check + memory-floor rationale.
         let hashes = scan_window_record_hashes(storage, &seal, "verify_epoch_seal")?;
-        let computed_root = MerkleTree::root(&hashes);
+        let computed_root = MerkleTree::seal_root_for(seal.wire_version, &hashes);
 
         if computed_root != seal.merkle_root {
             // If our record count differs from the seal's, we're missing records
@@ -3737,7 +3740,7 @@ pub fn witness_verify_seal(
         }
 
         // 3. Recompute Merkle root and compare (scan helper returns sorted)
-        let local_root = MerkleTree::root(&local_hashes);
+        let local_root = MerkleTree::seal_root_for(seal.wire_version, &local_hashes);
         if local_root != seal.merkle_root {
             return WitnessVerification::MerkleRootMismatch {
                 local: local_root,
@@ -3763,7 +3766,7 @@ pub fn witness_verify_seal(
         }
 
         if !local_hashes.is_empty() {
-            let local_root = MerkleTree::root(&local_hashes);
+            let local_root = MerkleTree::seal_root_for(seal.wire_version, &local_hashes);
             if local_root != seal.merkle_root {
                 return WitnessVerification::MerkleRootMismatch {
                     local: local_root,
@@ -3881,7 +3884,12 @@ pub fn attach_xzone_proofs_from_seal_with_finality(
 
     for (tid, lock_hash, dest_zone) in needs_proof {
         if sealed_hashes.contains(&lock_hash) {
-            if let Some(proof) = MerkleTree::proof(sealed_hashes, &lock_hash) {
+            // Proof recipe rides the seal's own wire version (v7+ = tagged);
+            // the version is stamped onto the transfer in set_proof so every
+            // later verify site dispatches identically.
+            if let Some(proof) =
+                MerkleTree::seal_proof_for(parsed.wire_version, sealed_hashes, &lock_hash)
+            {
                 let siblings: Vec<crate::accounting::cross_zone::ProofSibling> = proof
                     .siblings
                     .iter()
@@ -3890,7 +3898,9 @@ pub fn attach_xzone_proofs_from_seal_with_finality(
                         is_right: n.is_right,
                     })
                     .collect();
-                let _ = ledger.cross_zone.set_proof(&tid, siblings, root);
+                let _ = ledger
+                    .cross_zone
+                    .set_proof(&tid, siblings, root, parsed.wire_version);
                 if let Some(coll) = finality.as_ref() {
                     let _ = ledger.cross_zone.set_finality_witnesses(
                         &tid,
@@ -4125,7 +4135,10 @@ pub fn create_super_seal(
     // build their Merkle root over record_hashes.
     let mut sorted: Vec<[u8; 32]> = seal_hashes.to_vec();
     sorted.sort();
-    let merkle_root = MerkleTree::root(&sorted);
+    // Super-seal fold rides the stamped version too (distinct v2 tag —
+    // ELARA_SUPER_SEAL_MERKLE_NODE_V1; settled 2026-08-22).
+    let merkle_root =
+        MerkleTree::super_seal_root_for(crate::wire::CURRENT_SIGNING_VERSION, &sorted);
     let seal_count = seal_hashes.len() as u64;
 
     let meta = super_seal_metadata(
@@ -4180,7 +4193,7 @@ pub fn verify_super_seal_coverage(
     }
     let mut sorted: Vec<[u8; 32]> = seal_hashes.to_vec();
     sorted.sort();
-    MerkleTree::root(&sorted) == super_seal.merkle_root
+    MerkleTree::super_seal_root_for(super_seal.wire_version, &sorted) == super_seal.merkle_root
 }
 
 // ─── Rebuild epoch state from storage ──────────────────────────────────────
@@ -6068,6 +6081,8 @@ pub async fn epoch_seal_loop(
                                         dz.path(),
                                         seal_epoch,
                                         crate::network::zone_committee::DEFAULT_COMMITTEE_SIZE,
+                                        // Producer class: anchor for OUR next seal.
+                                        crate::wire::CURRENT_SIGNING_VERSION,
                                     )
                                     .await;
                                 // size==0 → no committee resolvable for this dest
@@ -6448,8 +6463,9 @@ pub async fn epoch_seal_loop(
                         };
 
                         // (transfer_id, dest_zone, source_seal_epoch,
-                        // dest_finality_committee = Option<(committee_hash, size)>)
-                        type AbortCandidate = (String, ZoneId, u64, Option<([u8; 32], u32)>);
+                        // dest_finality_committee = Option<(committee_hash, size)>,
+                        // source_seal_wire_version — fold-recipe signal, panel C1)
+                        type AbortCandidate = (String, ZoneId, u64, Option<([u8; 32], u32)>, u16);
                         let candidates: Vec<AbortCandidate> =
                             if let Ok(ledger) = state.ledger.try_read() {
                                 ledger
@@ -6467,6 +6483,7 @@ pub async fn epoch_seal_loop(
                                             t.dest_zone.clone(),
                                             t.source_seal_epoch,
                                             t.dest_finality_committee,
+                                            t.source_seal_wire_version,
                                         )
                                     })
                                     .collect()
@@ -6474,7 +6491,7 @@ pub async fn epoch_seal_loop(
                                 Vec::new()
                             };
 
-                        for (transfer_id, dest_zone, source_seal_epoch, anchor) in candidates {
+                        for (transfer_id, dest_zone, source_seal_epoch, anchor, seal_wv) in candidates {
                             // B2 fix: sign the abort against the CANONICAL committee
                             // anchor frozen from the source seal — not a live
                             // recompute. Unanchored (legacy/pre-fix) locks are
@@ -6493,6 +6510,7 @@ pub async fn epoch_seal_loop(
                                     dest_zone.path(),
                                     source_seal_epoch,
                                     DEFAULT_COMMITTEE_SIZE,
+                                    seal_wv,
                                 )
                                 .await;
                             if let Some((witness, computed_hash, computed_size)) =
@@ -6501,6 +6519,7 @@ pub async fn epoch_seal_loop(
                                     &transfer_id,
                                     &dest_zone,
                                     source_seal_epoch,
+                                    seal_wv,
                                     &pks,
                                     &anchor_hash,
                                 )
@@ -6578,17 +6597,17 @@ pub async fn epoch_seal_loop(
                             // collection's snapshot, skip — we're racing
                             // a refund that already landed or a committee
                             // rotation; the next tick re-evaluates.
-                            let (agg_dest_zone, transfer_locked, transfer_seal_epoch_match) =
+                            let (agg_dest_zone, transfer_locked, transfer_seal_epoch_match, seal_wv) =
                                 if let Ok(ledger) = state.ledger.try_read() {
                                     if let Some(t) = ledger.cross_zone.pending.get(&agg_transfer_id) {
                                         let locked = t.status == crate::accounting::cross_zone::TransferStatus::Locked;
                                         let epoch_match = t.source_seal_epoch == coll.source_seal_epoch;
-                                        (Some(t.dest_zone.clone()), locked, epoch_match)
+                                        (Some(t.dest_zone.clone()), locked, epoch_match, t.source_seal_wire_version)
                                     } else {
-                                        (None, false, false)
+                                        (None, false, false, 0)
                                     }
                                 } else {
-                                    (None, false, false)
+                                    (None, false, false, 0)
                                 };
                             let agg_dest_zone = match agg_dest_zone {
                                 Some(z) => z,
@@ -6604,6 +6623,7 @@ pub async fn epoch_seal_loop(
                                 dest_committee_hash: coll.dest_committee_hash,
                                 dest_committee_size: coll.dest_committee_size,
                                 signers: coll.signers.clone(),
+                                source_seal_wire_version: seal_wv,
                             };
                             if let Err(e) = bundle.verify() {
                                 warn!(
@@ -8341,7 +8361,7 @@ mod tests {
     fn seal_enum_root_gate_drops_mismatched_inline_array_to_empty() {
         let identity = test_identity();
         let hashes: Vec<[u8; 32]> = (0..5u8).map(|i| sha3_256(&[i])).collect();
-        let matching_root = MerkleTree::root(&hashes);
+        let matching_root = MerkleTree::seal_root_for(crate::wire::CURRENT_SIGNING_VERSION, &hashes);
         let wrong_root = sha3_256(b"not-the-root-of-those-hashes");
         let prev = sha3_256(b"gate-prev");
 
@@ -8417,7 +8437,7 @@ mod tests {
         let prev = sha3_256(b"cap-prev");
 
         let build_meta = |slice: &[[u8; 32]]| {
-            let root = MerkleTree::root(slice);
+            let root = MerkleTree::seal_root_for(crate::wire::CURRENT_SIGNING_VERSION, slice);
             seal_metadata(SealMetadataParams {
                 zone: ZoneId::from_legacy(0),
                 epoch_number: 9,
@@ -8826,7 +8846,7 @@ mod tests {
             account_smt_root: None,
             drand_pulse: None,
             xzone_dest_finality_committees: None,
-            wire_version: crate::wire::WIRE_VERSION,
+            wire_version: crate::wire::CURRENT_SIGNING_VERSION,
             sparse_merkle_root: None,
         }
     }
@@ -8931,7 +8951,7 @@ mod tests {
             account_smt_root: None,
             drand_pulse: None,
             xzone_dest_finality_committees: None,
-            wire_version: crate::wire::WIRE_VERSION,
+            wire_version: crate::wire::CURRENT_SIGNING_VERSION,
             sparse_merkle_root: None,
         };
         let hash = sha3_256(b"seal0");
@@ -8970,7 +8990,7 @@ mod tests {
             account_smt_root: None,
             drand_pulse: None,
             xzone_dest_finality_committees: None,
-                wire_version: crate::wire::WIRE_VERSION,
+                wire_version: crate::wire::CURRENT_SIGNING_VERSION,
                 sparse_merkle_root: None,
             };
             let hash = sha3_256(format!("seal{i}").as_bytes());
@@ -9006,7 +9026,7 @@ mod tests {
             account_smt_root: None,
             drand_pulse: None,
             xzone_dest_finality_committees: None,
-                wire_version: crate::wire::WIRE_VERSION,
+                wire_version: crate::wire::CURRENT_SIGNING_VERSION,
                 sparse_merkle_root: None,
             };
             let hash = sha3_256(format!("z{zone_n}seal").as_bytes());
@@ -9393,7 +9413,7 @@ mod tests {
             account_smt_root: None,
             drand_pulse: None,
             xzone_dest_finality_committees: None,
-            wire_version: crate::wire::WIRE_VERSION,
+            wire_version: crate::wire::CURRENT_SIGNING_VERSION,
             sparse_merkle_root: None,
         };
         epoch_state.register_seal(&seal0, "seal-0", sha3_256(b"seal0hash"));
@@ -10625,7 +10645,7 @@ mod tests {
             account_smt_root: None,
             drand_pulse: None,
             xzone_dest_finality_committees: None,
-            wire_version: crate::wire::WIRE_VERSION,
+            wire_version: crate::wire::CURRENT_SIGNING_VERSION,
             sparse_merkle_root: None,
         };
         state.register_seal(&seal, "s0", sha3_256(b"h"));
@@ -10665,7 +10685,7 @@ mod tests {
             account_smt_root: None,
             drand_pulse: None,
             xzone_dest_finality_committees: None,
-            wire_version: crate::wire::WIRE_VERSION,
+            wire_version: crate::wire::CURRENT_SIGNING_VERSION,
             sparse_merkle_root: None,
         };
         let mut hash_high = [0u8; 32];
@@ -10720,7 +10740,7 @@ mod tests {
             account_smt_root: None,
             drand_pulse: None,
             xzone_dest_finality_committees: None,
-            wire_version: crate::wire::WIRE_VERSION,
+            wire_version: crate::wire::CURRENT_SIGNING_VERSION,
             sparse_merkle_root: None,
         }
     }
@@ -11200,7 +11220,7 @@ mod tests {
             account_smt_root: None,
             drand_pulse: None,
             xzone_dest_finality_committees: None,
-            wire_version: crate::wire::WIRE_VERSION,
+            wire_version: crate::wire::CURRENT_SIGNING_VERSION,
             sparse_merkle_root: None,
         };
         state.register_seal(&seal, "seal-0", sha3_256(b"hash"));
@@ -11307,7 +11327,7 @@ mod tests {
             account_smt_root: None,
             drand_pulse: None,
             xzone_dest_finality_committees: None,
-            wire_version: crate::wire::WIRE_VERSION,
+            wire_version: crate::wire::CURRENT_SIGNING_VERSION,
             sparse_merkle_root: None,
         };
         // Should not panic — falls back to global
@@ -11556,7 +11576,7 @@ mod tests {
             account_smt_root: None,
             drand_pulse: None,
             xzone_dest_finality_committees: None,
-            wire_version: crate::wire::WIRE_VERSION,
+            wire_version: crate::wire::CURRENT_SIGNING_VERSION,
             sparse_merkle_root: None,
         }
     }
@@ -12081,7 +12101,7 @@ mod tests {
             account_smt_root: None,
             drand_pulse: None,
             xzone_dest_finality_committees: None,
-            wire_version: crate::wire::WIRE_VERSION,
+            wire_version: crate::wire::CURRENT_SIGNING_VERSION,
             sparse_merkle_root: None,
         }
     }
@@ -12669,7 +12689,7 @@ mod tests {
         let other_hash = sha3_256(b"other-record");
         let mut all_hashes = vec![lock_hash, other_hash];
         all_hashes.sort();
-        let merkle_root = MerkleTree::root(&all_hashes);
+        let merkle_root = MerkleTree::seal_root_for(crate::wire::CURRENT_SIGNING_VERSION, &all_hashes);
 
         let seal = ParsedEpochSeal {
             zone: ZoneId::from_legacy(0),
@@ -12690,7 +12710,7 @@ mod tests {
             account_smt_root: None,
             drand_pulse: None,
             xzone_dest_finality_committees: None,
-            wire_version: crate::wire::WIRE_VERSION,
+            wire_version: crate::wire::CURRENT_SIGNING_VERSION,
             sparse_merkle_root: None,
         };
 
@@ -12748,7 +12768,7 @@ mod tests {
             aggregator_rank: 0, account_smt_root: None,
             drand_pulse: None,
             xzone_dest_finality_committees: None,
-            wire_version: crate::wire::WIRE_VERSION,
+            wire_version: crate::wire::CURRENT_SIGNING_VERSION,
             sparse_merkle_root: None,
         };
 
@@ -12782,7 +12802,7 @@ mod tests {
         let other_hash = sha3_256(b"sib-2b");
         let mut all_hashes = vec![lock_hash, other_hash];
         all_hashes.sort();
-        let merkle_root = MerkleTree::root(&all_hashes);
+        let merkle_root = MerkleTree::seal_root_for(crate::wire::CURRENT_SIGNING_VERSION, &all_hashes);
 
         let seal = ParsedEpochSeal {
             zone: ZoneId::from_legacy(0),
@@ -12796,7 +12816,7 @@ mod tests {
             aggregator_rank: 0, account_smt_root: None,
             drand_pulse: None,
             xzone_dest_finality_committees: None,
-            wire_version: crate::wire::WIRE_VERSION,
+            wire_version: crate::wire::CURRENT_SIGNING_VERSION,
             sparse_merkle_root: None,
         };
 
@@ -12857,7 +12877,7 @@ mod tests {
         let seal = ParsedEpochSeal {
             zone: ZoneId::from_legacy(0),
             epoch_number: 1, start: 0.0, end: 1.0, record_count: 2,
-            merkle_root: MerkleTree::root(&all_hashes),
+            merkle_root: MerkleTree::seal_root_for(crate::wire::CURRENT_SIGNING_VERSION, &all_hashes),
             previous_seal_hash: [0u8; 32],
             vrf_output: None, vrf_proof: None,
             record_hashes: all_hashes,
@@ -12866,7 +12886,7 @@ mod tests {
             aggregator_rank: 0, account_smt_root: None,
             drand_pulse: None,
             xzone_dest_finality_committees: None,
-            wire_version: crate::wire::WIRE_VERSION,
+            wire_version: crate::wire::CURRENT_SIGNING_VERSION,
             sparse_merkle_root: None,
         };
 
@@ -12901,41 +12921,17 @@ mod tests {
     fn cascade_build_committee(
         witness_pks: &[Vec<u8>],
     ) -> ([u8; 32], Vec<Vec<crate::accounting::cross_zone::ProofSibling>>) {
-        use crate::accounting::cross_zone::{committee_leaf_hash, ProofSibling};
-        let n = witness_pks.len();
-        assert!(n > 0);
-        let leaves: Vec<[u8; 32]> = witness_pks.iter().map(|pk| committee_leaf_hash(pk)).collect();
-        let mut proofs: Vec<Vec<ProofSibling>> = vec![Vec::new(); n];
-        let mut level: Vec<[u8; 32]> = leaves.clone();
-        let mut indices: Vec<usize> = (0..n).collect();
-
-        while level.len() > 1 {
-            let padded = if level.len() % 2 == 1 {
-                let mut p = level.clone();
-                p.push(*level.last().unwrap());
-                p
-            } else {
-                level.clone()
-            };
-            for (leaf_idx, cur_pos) in indices.iter().enumerate() {
-                let pair_pos = if cur_pos % 2 == 0 { cur_pos + 1 } else { cur_pos - 1 };
-                let sibling = padded[pair_pos.min(padded.len() - 1)];
-                proofs[leaf_idx].push(ProofSibling {
-                    hash: sibling,
-                    is_right: cur_pos % 2 == 0,
-                });
-            }
-            let mut next = Vec::with_capacity(padded.len() / 2);
-            for chunk in padded.chunks(2) {
-                let mut buf = [0u8; 64];
-                buf[..32].copy_from_slice(&chunk[0]);
-                buf[32..].copy_from_slice(&chunk[1]);
-                next.push(sha3_256(&buf));
-            }
-            level = next;
-            indices = indices.iter().map(|i| i / 2).collect();
-        }
-        (level[0], proofs)
+        // Dispatch-aware (v7 flag day): rides the emission version like the
+        // real witness path; the old hand-rolled bare fold broke on flip.
+        let (root, by_pk) = crate::accounting::cross_zone::build_committee_proofs_for(
+            crate::wire::CURRENT_SIGNING_VERSION,
+            witness_pks,
+        );
+        let proofs = witness_pks
+            .iter()
+            .map(|pk| by_pk.get(pk).cloned().unwrap_or_default())
+            .collect();
+        (root, proofs)
     }
 
     #[test]
@@ -12972,7 +12968,7 @@ mod tests {
         let other_hash = sha3_256(b"cascade-sib-rec");
         let mut all_hashes = vec![lock_hash, other_hash];
         all_hashes.sort();
-        let merkle_root = MerkleTree::root(&all_hashes);
+        let merkle_root = MerkleTree::seal_root_for(crate::wire::CURRENT_SIGNING_VERSION, &all_hashes);
 
         let witnesses: Vec<Identity> = (0..3)
             .map(|_| Identity::generate(EntityType::Device, CryptoProfile::ProfileB).unwrap())
@@ -13001,7 +12997,7 @@ mod tests {
             aggregator_rank: 0, account_smt_root: None,
             drand_pulse: None,
             xzone_dest_finality_committees: None,
-            wire_version: crate::wire::WIRE_VERSION,
+            wire_version: crate::wire::CURRENT_SIGNING_VERSION,
             sparse_merkle_root: None,
         };
 
@@ -13052,7 +13048,7 @@ mod tests {
         ).unwrap();
         let mut all_hashes = vec![lock_hash, sha3_256(b"under-sib")];
         all_hashes.sort();
-        let merkle_root = MerkleTree::root(&all_hashes);
+        let merkle_root = MerkleTree::seal_root_for(crate::wire::CURRENT_SIGNING_VERSION, &all_hashes);
 
         let witnesses: Vec<Identity> = (0..3)
             .map(|_| Identity::generate(EntityType::Device, CryptoProfile::ProfileB).unwrap())
@@ -13078,7 +13074,7 @@ mod tests {
             aggregator_rank: 0, account_smt_root: None,
             drand_pulse: None,
             xzone_dest_finality_committees: None,
-            wire_version: crate::wire::WIRE_VERSION,
+            wire_version: crate::wire::CURRENT_SIGNING_VERSION,
             sparse_merkle_root: None,
         };
         let mut awc = AWCConsensus::new();
@@ -13131,7 +13127,7 @@ mod tests {
         ).unwrap();
         let mut all_hashes = vec![lock_hash, sha3_256(b"replay-sib")];
         all_hashes.sort();
-        let merkle_root = MerkleTree::root(&all_hashes);
+        let merkle_root = MerkleTree::seal_root_for(crate::wire::CURRENT_SIGNING_VERSION, &all_hashes);
 
         let witnesses: Vec<Identity> = (0..3)
             .map(|_| Identity::generate(EntityType::Device, CryptoProfile::ProfileB).unwrap())
@@ -13161,7 +13157,7 @@ mod tests {
             aggregator_rank: 0, account_smt_root: None,
             drand_pulse: None,
             xzone_dest_finality_committees: None,
-            wire_version: crate::wire::WIRE_VERSION,
+            wire_version: crate::wire::CURRENT_SIGNING_VERSION,
             sparse_merkle_root: None,
         };
         let mut awc = AWCConsensus::new();
@@ -13413,7 +13409,7 @@ mod tests {
                 aggregator_rank: 0, account_smt_root: None,
                 drand_pulse: None,
                 xzone_dest_finality_committees: None,
-                wire_version: crate::wire::WIRE_VERSION,
+                wire_version: crate::wire::CURRENT_SIGNING_VERSION,
                 sparse_merkle_root: None,
             };
             state.register_seal(&seal, &format!("epoch:0:{i}"), h);
@@ -13535,7 +13531,7 @@ mod tests {
                     account_smt_root: None,
                     drand_pulse: None,
                     xzone_dest_finality_committees: None,
-                    wire_version: crate::wire::WIRE_VERSION,
+                    wire_version: crate::wire::CURRENT_SIGNING_VERSION,
                     sparse_merkle_root: None,
                 };
                 epoch.register_seal(&seal, &format!("epoch:forced-fill:{i}"), h);
@@ -13746,7 +13742,7 @@ mod tests {
                 aggregator_rank: 0, account_smt_root: None,
                 drand_pulse: None,
                 xzone_dest_finality_committees: None,
-                wire_version: crate::wire::WIRE_VERSION,
+                wire_version: crate::wire::CURRENT_SIGNING_VERSION,
                 sparse_merkle_root: None,
             };
             state.register_seal(&seal, &format!("epoch:0:{i}"), h);
@@ -13803,7 +13799,7 @@ mod tests {
             aggregator_rank: 0, account_smt_root: None,
             drand_pulse: None,
             xzone_dest_finality_committees: None,
-            wire_version: crate::wire::WIRE_VERSION,
+            wire_version: crate::wire::CURRENT_SIGNING_VERSION,
             sparse_merkle_root: None,
         };
         state.register_seal(&seal, "epoch:0:1", h);
@@ -13953,7 +13949,7 @@ mod tests {
             account_smt_root: None,
             drand_pulse: None,
             xzone_dest_finality_committees: None,
-            wire_version: crate::wire::WIRE_VERSION,
+            wire_version: crate::wire::CURRENT_SIGNING_VERSION,
             sparse_merkle_root: None,
         }
     }

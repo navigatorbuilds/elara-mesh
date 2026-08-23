@@ -450,6 +450,11 @@ pub struct MandateDetail {
     /// are recorded but NOT enforced in v0.
     #[serde(default)]
     pub scope_enforced_v0: bool,
+    /// Complement of `scope_enforced_v0` under the unified vocabulary every
+    /// other surface uses (`/mandate/status`, acts, the offline verdict).
+    /// `None` when talking to a node that predates the dual-key response.
+    #[serde(default)]
+    pub scope_deferred: Option<bool>,
     #[serde(default)]
     pub revoked: bool,
     /// Wall-clock ms of the principal-authorized revocation, if revoked.
@@ -989,6 +994,21 @@ mod tests {
         assert_eq!(d.network_id, "elara-mainnet");
         assert_eq!(d.scope.allowed_ops, vec!["agent_audit".to_string()]);
         assert!(!d.scope_enforced_v0);
+        // Legacy node (no scope_deferred key) → None, never a fabricated value.
+        assert_eq!(d.scope_deferred, None);
+
+        // Dual-key node: both spellings present and complementary.
+        let d2: MandateDetail = serde_json::from_str(
+            r#"{"mandate_id":"m","found":true,"network_id":"elara-mainnet",
+                "principal_identity_hash":"p","agent_identity_hash":"a",
+                "scope":{"allowed_ops":["agent_audit"],"allowed_zones":[],"max_amount":null},
+                "not_before_ms":1,"not_after_ms":2,"parent_mandate_id":null,
+                "sub_delegation_max_depth":0,"scope_enforced_v0":false,
+                "scope_deferred":true,"revoked":false,"revoked_at_ms":null}"#,
+        )
+        .expect("valid dual-key detail");
+        assert_eq!(d2.scope_deferred, Some(true));
+        assert_eq!(d2.scope_deferred, Some(!d2.scope_enforced_v0));
     }
 
     #[test]
@@ -1000,9 +1020,16 @@ mod tests {
         let via_core = evaluate_mandate_bundle(garbage);
         assert_eq!(via_sdk.flag, via_core.flag);
         assert!(!via_sdk.authorized);
+        // R4 semantics (2026-08-23): input-error FAILED verdicts DROP
+        // scope_note/soundness_caveats — nothing judged, nothing claimed.
+        // This passthrough twin was missed by R4's own test update (its
+        // build was deferred on a busy box and the lib leg never ran);
+        // caught by the v7 flip gate. The passthrough contract is equality
+        // with core, judged-path caveats stay pinned in the core's tests.
+        assert_eq!(via_sdk.soundness_caveats, via_core.soundness_caveats);
         assert!(
-            !via_sdk.soundness_caveats.is_empty(),
-            "soundness caveats must always be present"
+            via_sdk.soundness_caveats.is_empty(),
+            "garbage input: nothing judged, nothing claimed (R4)"
         );
     }
 }

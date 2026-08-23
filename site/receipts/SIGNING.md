@@ -75,11 +75,22 @@ A CONSISTENT verdict on a mandate bundle proves the chain of authority and its
 validity at the act's signed time. It does **not** check the act against the
 scope string the principal wrote; that field ships marked `scope_deferred`, and
 no released verifier enforces it. Do not represent scope as enforced policy.
+As of elara-verify 0.3.0 the offline bundle verdict says this itself, per
+bundle: a `scope_deferred` field (`true` = a recorded restriction v0 did not
+check, `false` = wildcard — nothing to enforce, which is NOT evidence of a
+check, `null` = no mandate resolved) plus a "scope" row in `checks[]`, pinned
+by the committed vector pair `mandate-bundle-scope-deferred.json` (positive)
+and `mandate-bundle-valid.json` (negative).
 
 ---
 
 Verify offline: `cargo install elara-verify`, then
-`elara-verify --receipt <record_id>.receipt.json` against any bundle in this
-directory. The in-browser verifier at
-<https://navigatorbuilds.github.io/elara-mesh/verify/> runs the same crate
-compiled to WASM.
+`elara-verify --receipt <record_id>.receipt.json` against any **receipt
+envelope** in this directory (that path checks the record + seal legs; its
+verdict vocabulary is VERIFIED / PARTIAL / FAILED). The CONSISTENT verdict
+discussed above comes from the mandate-**bundle** verifier, which has no CLI
+mode: run it in your browser at
+<https://navigatorbuilds.github.io/elara-mesh/verify/> (the same crate
+compiled to WASM — "Scoped mandate" sample included), or feed the committed
+bundle vectors (`examples/verify/mandate-bundle-*.json`) to
+`elara_verify::mandate_bundle::evaluate_mandate_bundle` from Rust.

@@ -769,6 +769,7 @@ pub async fn serve_snapshot(
             mandates: state.rocks.collect_mandates(),
             revocations: state.rocks.collect_revocations(),
             emergency: state.emergency_snapshot_carry(),
+            fold_sunset_entries: { use crate::network::RwLockRecover; state.fold_sunset.read_recover().entries().cloned().collect() },
         })
     })
     .await

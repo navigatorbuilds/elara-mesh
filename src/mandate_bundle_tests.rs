@@ -306,6 +306,10 @@ mod tests {
         let v = evaluate_mandate_bundle(&bundle_json(&act, &[], &[]));
         assert_eq!(v.verdict, "NOT AUTHORIZED");
         assert_eq!(v.flag, "no_chain");
+        // No leaf resolved → scope_deferred must be None (never a silent
+        // false), and no "scope" check row may exist.
+        assert_eq!(v.scope_deferred, None);
+        assert!(v.checks.iter().all(|c| c.name != "scope"));
     }
 
     #[test]
@@ -314,7 +318,67 @@ mod tests {
             let v = evaluate_mandate_bundle(s);
             assert_eq!(v.verdict, "FAILED", "input {s:?} must fail closed");
             assert!(!v.authorized);
+            assert_eq!(v.scope_deferred, None, "input {s:?}: no leaf → None");
+            // R4: input errors judge nothing — no scope prose, no caveats
+            // about what a CONSISTENT verdict proves.
+            assert!(v.scope_note.is_empty(), "input {s:?}: scope_note empty");
+            assert!(v.soundness_caveats.is_empty(), "input {s:?}: caveats empty");
         }
+    }
+
+    /// scope_deferred is a PER-BUNDLE fact off the resolved leaf: Some(true)
+    /// for a materially restricted scope v0 recorded but did not check,
+    /// Some(false) for wildcard (nothing to enforce — NOT evidence of a
+    /// check), and the paired "scope" info row carries the matching wording
+    /// on both branches so `false` can never read as "checked".
+    #[test]
+    fn scope_deferred_field_and_row_track_the_leaf_scope() {
+        let (principal, agent, _) = cast();
+
+        // Wildcard leaf → Some(false) + the nothing-to-enforce wording.
+        let m = root_mandate(&principal, &agent);
+        let id = m.mandate_id();
+        let act = act_record(&agent, &id, T_ACT);
+        let v = evaluate_mandate_bundle(&bundle_json(
+            &act,
+            &[mandate_carrier(&principal, &m, T_ACT - 1.0)],
+            &[],
+        ));
+        assert_eq!(v.verdict, "CONSISTENT");
+        assert_eq!(v.scope_deferred, Some(false));
+        let row = v.checks.iter().find(|c| c.name == "scope").expect("scope row");
+        assert_eq!(row.status, "info");
+        assert!(row.detail.contains("NOT evidence that scope was checked"));
+
+        // Non-wildcard leaf → Some(true) + the deferred wording, still
+        // CONSISTENT (v0 records scope, never checks it — the exact
+        // non-obvious state the field exists to make legible).
+        let narrow = MandateRecord::new_root(
+            NETWORK,
+            &principal.identity_hash,
+            &agent.identity_hash,
+            MandateScope {
+                allowed_ops: vec!["commit".to_string()],
+                allowed_zones: vec!["*".to_string()],
+                max_amount: None,
+            },
+            WINDOW_OPEN_MS,
+            WINDOW_CLOSE_MS,
+            0,
+            "bundle-test-scoped-0001",
+        );
+        let nid = narrow.mandate_id();
+        let act2 = act_record(&agent, &nid, T_ACT);
+        let v2 = evaluate_mandate_bundle(&bundle_json(
+            &act2,
+            &[mandate_carrier(&principal, &narrow, T_ACT - 1.0)],
+            &[],
+        ));
+        assert_eq!(v2.verdict, "CONSISTENT", "reason: {}", v2.reason);
+        assert_eq!(v2.scope_deferred, Some(true));
+        let row2 = v2.checks.iter().find(|c| c.name == "scope").expect("scope row");
+        assert!(row2.detail.contains("scope_deferred"));
+        assert!(row2.detail.contains("does NOT enforce"));
     }
 
     /// T-vaara pre-work — one-shot generator for the PUBLIC mandate-bundle
@@ -374,15 +438,62 @@ mod tests {
     }
 
 
+    /// One-shot freeze generator for the scope_deferred POSITIVE vector
+    /// (`examples/verify/mandate-bundle-scope-deferred.json`): a real-chain
+    /// harvested bundle whose leaf mandate carries a NON-wildcard scope
+    /// (`allowed_ops:["commit"]`) and whose act is CONSISTENT/valid anyway —
+    /// proving a green verdict does NOT mean the act was within scope
+    /// (v0 records scope, never checks it). Same freeze rule + harvest flow
+    /// as `mandate_bundle_vector_generator` (issuer-quickstart world; set
+    /// ELARA_BUNDLE_WORLD=<dir with {mandate,act1}.wire>).
+    ///   cargo test --lib mandate_bundle_scope_deferred_vector_generator -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn mandate_bundle_scope_deferred_vector_generator() {
+        use crate::record::ValidationRecord;
+        use std::path::Path;
+        let world_env = std::env::var("ELARA_BUNDLE_WORLD")
+            .expect("set ELARA_BUNDLE_WORLD=<harvest dir with {mandate,act1}.wire>");
+        let world = Path::new(&world_env);
+        let out_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/verify");
+        let load = |n: &str| -> serde_json::Value {
+            let wire = std::fs::read(world.join(format!("{n}.wire"))).expect("wire");
+            let rec = ValidationRecord::from_bytes(&wire).expect("decode");
+            serde_json::to_value(&rec).expect("serde")
+        };
+        let bundle = serde_json::json!({
+            "bundle_version": 1,
+            "act": load("act1"),
+            "mandates": [load("mandate")],
+            "revocations": [],
+        });
+        let out = out_dir.join("mandate-bundle-scope-deferred.json");
+        assert!(!out.exists(), "frozen vector exists — never regenerate");
+        let js = serde_json::to_string_pretty(&bundle).unwrap();
+        let v = elara_verify::mandate_bundle::evaluate_mandate_bundle(&js);
+        assert!(v.authorized, "authorized");
+        assert_eq!(v.flag, "valid", "flag");
+        assert_eq!(v.scope_deferred, Some(true), "scope_deferred must be true");
+        std::fs::write(&out, format!("{js}\n")).unwrap();
+        println!("froze scope-deferred: CONSISTENT + scope_deferred=Some(true) -> {}", out.display());
+    }
+
     /// The committed public mandate-bundle vectors verdict-pin (KAT-style:
     /// a mismatch is an ALARM, never a regenerate). Guards the offline
-    /// bundle judge against drift on all three canonical outcomes.
+    /// bundle judge against drift on every committed outcome, including the
+    /// scope_deferred pair: the wildcard `valid` vector is the NEGATIVE
+    /// (Some(false) — a real computation, not a constant) and
+    /// `scope-deferred` is the POSITIVE (Some(true) on a CONSISTENT verdict).
+    /// `act-tampered` (previously pinned by nothing) fails closed at the act
+    /// signature gate → input_error, no leaf → scope_deferred None.
     #[test]
     fn committed_mandate_bundle_vectors_pin_their_verdicts() {
-        for (name, want_auth, want_flag) in [
-            ("valid", true, "valid"),
-            ("post-revocation", false, "post_revocation"),
-            ("agent-mismatch", false, "agent_mismatch"),
+        for (name, want_auth, want_flag, want_scope) in [
+            ("valid", true, "valid", Some(false)),
+            ("post-revocation", false, "post_revocation", Some(false)),
+            ("agent-mismatch", false, "agent_mismatch", Some(false)),
+            ("act-tampered", false, "input_error", None),
+            ("scope-deferred", true, "valid", Some(true)),
         ] {
             let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join(format!("examples/verify/mandate-bundle-{name}.json"));
@@ -391,6 +502,7 @@ mod tests {
             let v = elara_verify::mandate_bundle::evaluate_mandate_bundle(&js);
             assert_eq!(v.authorized, want_auth, "{name}: authorized drifted");
             assert_eq!(v.flag, want_flag, "{name}: flag drifted");
+            assert_eq!(v.scope_deferred, want_scope, "{name}: scope_deferred drifted");
         }
     }
 

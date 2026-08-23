@@ -616,7 +616,13 @@ pub async fn mandate_detail(
                 "sub_delegation_max_depth": m.sub_delegation_max_depth,
                 // v0 enforces scope only for wildcard mandates; a non-wildcard
                 // scope is RECORDED but not yet enforced (honest labeling).
+                // Both spellings ship during the vocabulary unification:
+                // `scope_deferred` (the name every other surface uses — status,
+                // acts, SDK, offline verdict) is the complement of the legacy
+                // `scope_enforced_v0`; dropping the old key is a separate,
+                // breaking-change decision.
                 "scope_enforced_v0": m.scope.is_wildcard(),
+                "scope_deferred": !m.scope.is_wildcard(),
                 "revoked": revoked_at.is_some(),
                 "revoked_at_ms": revoked_at,
             }))

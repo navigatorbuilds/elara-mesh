@@ -2434,7 +2434,24 @@ async fn insert_record_inner(state: &Arc<NodeState>, mut record: ValidationRecor
         }; // epoch_state lock dropped here
 
         match seal_verify_result {
-            Ok(_) => {}
+            Ok(ref parsed_seal) => {
+                // fold_sunset fence (v7 §Fence, HOLE-2 admission gate):
+                // fail-closed BEFORE acceptance, same severity as a signature
+                // failure. Inert while no fence record is registered.
+                {
+                    use crate::network::RwLockRecover;
+                    let reg = state.fold_sunset.read_recover();
+                    if let Err(v) = reg.check_seal(
+                        super::fold_sunset::FenceTree::Seal,
+                        parsed_seal.epoch_number,
+                        parsed_seal.wire_version,
+                    ) {
+                        reg.verify_reject_total
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        return Err(ElaraError::Ledger(v.to_string()));
+                    }
+                }
+            }
             Err(ref e) if e.to_string().contains("VRF") => {
                 // VRF verification failed — accept the seal if creator is self
                 // (we just signed it) or VRF key not yet fully available.
@@ -2463,6 +2480,33 @@ async fn insert_record_inner(state: &Arc<NodeState>, mut record: ValidationRecor
                 // cannot wedge the tip; the fast-forward class is intercepted above.
                 let has_full_pk = vrf_pk.as_ref().is_some_and(|pk| !pk.full_pk().is_empty());
                 if is_self || vrf_pk.is_none() || !has_full_pk {
+                    // fold_sunset fence on the VRF-lenient accept arm too
+                    // (panel H4): leniency about VRF must not become leniency
+                    // about the fold recipe — same fail-closed gate as the
+                    // Ok arm, keyed on the seal's own signed fields.
+                    match epoch::extract_epoch_seal(&rec) {
+                        Ok(Some(ps)) => {
+                            use crate::network::RwLockRecover;
+                            let reg = state.fold_sunset.read_recover();
+                            if let Err(v) = reg.check_seal(
+                                super::fold_sunset::FenceTree::Seal,
+                                ps.epoch_number,
+                                ps.wire_version,
+                            ) {
+                                reg.verify_reject_total
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                return Err(ElaraError::Ledger(v.to_string()));
+                            }
+                        }
+                        // Fail-closed like the Ok arm (final verifier N7): an
+                        // ACCEPT arm must not admit what it cannot fence-judge.
+                        _ => {
+                            return Err(ElaraError::Ledger(
+                                "seal unparseable at fold_sunset fence gate (VRF-lenient arm)"
+                                    .into(),
+                            ));
+                        }
+                    }
                     debug!(
                         "epoch seal from {} accepted without VRF verification (self={}, vrf_pk={}, full_pk={})",
                         &seal_creator[..seal_creator.len().min(16)],
@@ -3496,18 +3540,24 @@ async fn insert_record_inner(state: &Arc<NodeState>, mut record: ValidationRecor
                     finality_committee_pks, DEFAULT_COMMITTEE_SIZE,
                 };
                 use crate::accounting::cross_zone::{
-                    build_committee_proofs, sign_finality_witness,
+                    build_committee_proofs_for, sign_finality_witness,
                 };
                 let (pks, committee_hash, committee_size) = finality_committee_pks(
                     state,
                     seal.zone.path(),
                     seal.epoch_number,
                     DEFAULT_COMMITTEE_SIZE,
+                    // The OBSERVED seal's own recipe (panel 2a).
+                    seal.wire_version,
                 )
                 .await;
                 let am_member = pks.iter().any(|pk| pk == &state.identity.public_key);
                 if am_member && committee_size > 0 {
-                    let (proof_root, proofs_by_pk) = build_committee_proofs(&pks);
+                    // Fold to match the OBSERVED seal's recipe (v7 groundwork):
+                    // across the flip boundary a mismatch means proof_root !=
+                    // committee_hash below — we abstain, never mis-sign.
+                    let (proof_root, proofs_by_pk) =
+                        build_committee_proofs_for(seal.wire_version, &pks);
                     if proof_root == committee_hash {
                         if let Some(witness) = sign_finality_witness(
                             &state.identity,
@@ -3632,6 +3682,22 @@ async fn insert_record_inner(state: &Arc<NodeState>, mut record: ValidationRecor
     // creator and propagate via gossip like any record.
     if record.metadata.contains_key(EPOCH_OP_KEY) {
         if let Ok(Some(ss)) = epoch::extract_super_seal(&record) {
+            // fold_sunset fence, super-seal tree (v7 §Fence): fenced on the
+            // COVERING END epoch — a super-seal aggregating any epoch past
+            // the boundary must itself fold v2. Inert without a fence.
+            {
+                use crate::network::RwLockRecover;
+                let reg = state.fold_sunset.read_recover();
+                if let Err(v) = reg.check_seal(
+                    super::fold_sunset::FenceTree::SuperSeal,
+                    ss.end_epoch,
+                    ss.wire_version,
+                ) {
+                    reg.verify_reject_total
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    return Err(ElaraError::Ledger(v.to_string()));
+                }
+            }
             let mut minted = false;
             if let Ok(mut epoch_state) = state.epoch.write() {
                 minted = epoch_state.register_super_seal(
@@ -4078,6 +4144,47 @@ async fn insert_record_inner(state: &Arc<NodeState>, mut record: ValidationRecor
             if let Ok(mut sunset_state) = state.sunset.write() {
                 sunset_state.register(entry);
             }
+        }
+    }
+
+    // Register fold_sunset fence if this record carries one (v7 §Fence).
+    // Genesis-authority-signed ONLY today (per-op-class threshold once
+    // staked anchors > 1 — the named emission gate lives producer-side; this
+    // is the consumer). On a genuine advance, run the HOLE-2/3
+    // reconciliation sweep so seals accepted BEFORE the fence arrived are
+    // re-judged — arrival order must not change what a node trusts.
+    if let Some(entry) = super::fold_sunset::extract_fold_sunset(&record) {
+        if crate::accounting::types::creator_identity_hash(&record)
+            == state.config.genesis_authority
+        {
+            let advanced = {
+                use crate::network::RwLockRecover;
+                matches!(
+                    state.fold_sunset.write_recover().register(entry.clone()),
+                    super::fold_sunset::FenceRegistration::Advanced
+                )
+            };
+            if advanced {
+                // synced fsync write off the async path (final verifier N6)
+                {
+                    let st = state.clone();
+                    tokio::task::spawn_blocking(move || {
+                        super::fold_sunset::persist_registry(&st);
+                    });
+                }
+                // spawn_blocking (panel M2): the sweep is sync RocksDB I/O —
+                // never stall a tokio worker inline on the ingest path.
+                let st = state.clone();
+                let en = entry.clone();
+                tokio::task::spawn_blocking(move || {
+                    super::fold_sunset::reconcile_after_fence(&st, &en);
+                });
+            }
+        } else {
+            warn!(
+                record = %record.id,
+                "fold_sunset record from non-genesis creator IGNORED (emitter-auth gate)"
+            );
         }
     }
 
@@ -5414,7 +5521,7 @@ mod tests {
             account_smt_root: root,
             drand_pulse: None,
             xzone_dest_finality_committees: None,
-            wire_version: crate::wire::WIRE_VERSION,
+            wire_version: crate::wire::CURRENT_SIGNING_VERSION,
             sparse_merkle_root: None,
         }
     }
@@ -7008,7 +7115,7 @@ mod tests {
             account_smt_root: None,
             drand_pulse: None,
             xzone_dest_finality_committees: None,
-            wire_version: crate::wire::WIRE_VERSION,
+            wire_version: crate::wire::CURRENT_SIGNING_VERSION,
             sparse_merkle_root: None,
         }
     }
@@ -7040,7 +7147,7 @@ mod tests {
             hashes.push(rh);
         }
         hashes.sort();
-        let root = crate::network::sync::MerkleTree::root(&hashes);
+        let root = crate::network::sync::MerkleTree::seal_root_for(crate::wire::CURRENT_SIGNING_VERSION, &hashes);
 
         let mut seal = fake_seal_full(zone.clone(), 0.5, 4.5, vec![]);
         seal.record_count = 3;
@@ -7064,7 +7171,7 @@ mod tests {
         sealed.sort();
         let mut incomplete = fake_seal_full(zone.clone(), 0.5, 1.5, vec![]);
         incomplete.record_count = 2;
-        incomplete.merkle_root = crate::network::sync::MerkleTree::root(&sealed);
+        incomplete.merkle_root = crate::network::sync::MerkleTree::seal_root_for(crate::wire::CURRENT_SIGNING_VERSION, &sealed);
         incomplete.seal_zone_count = Some(1);
         assert_eq!(
             super::super::epoch::derive_seal_enumeration(&*state.rocks, &incomplete),
@@ -7485,7 +7592,12 @@ mod tests {
         // merkle_root must recompute from record_hashes: the R3-8 slice-2
         // parse-time root gate drops mismatched inline arrays to empty,
         // which would silently defeat every deficit assertion downstream.
-        let merkle_root = crate::network::sync::MerkleTree::root(record_hashes);
+        // Dispatch-aware (v7 groundwork): rides CURRENT_SIGNING_VERSION like
+        // the real producer so the emission flip cannot desync this helper.
+        let merkle_root = crate::network::sync::MerkleTree::seal_root_for(
+            crate::wire::CURRENT_SIGNING_VERSION,
+            record_hashes,
+        );
         let metadata = crate::network::epoch::seal_metadata(
             crate::network::epoch::SealMetadataParams {
                 zone: zone.clone(),
@@ -7804,7 +7916,7 @@ mod tests {
         // record id to legacy zone 0 regardless of the process-global count.
         let mut sealed = vec![rh_a, rh_b, rh_c];
         sealed.sort();
-        let root = crate::network::sync::MerkleTree::root(&sealed);
+        let root = crate::network::sync::MerkleTree::seal_root_for(crate::wire::CURRENT_SIGNING_VERSION, &sealed);
         let mut meta = std::collections::BTreeMap::new();
         meta.insert("epoch_op".to_string(), serde_json::json!("seal"));
         meta.insert("epoch_zone".to_string(), serde_json::json!(0));
@@ -7897,7 +8009,7 @@ mod tests {
             hashes.push(rh);
         }
         hashes.sort();
-        let root = crate::network::sync::MerkleTree::root(&hashes);
+        let root = crate::network::sync::MerkleTree::seal_root_for(crate::wire::CURRENT_SIGNING_VERSION, &hashes);
         let prev = [0u8; 32];
 
         // REAL emission path: 97 hashes → key omitted by bounded emission.

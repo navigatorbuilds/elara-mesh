@@ -165,14 +165,19 @@ pub fn verify_receipt_offline(receipt_json: &str, pins_json: &str) -> JsValue {
 ///
 /// Returns a JS object (see `BundleVerdict`): `{verdict, glyph, flag,
 /// authorized, attributes_to_principal, network, signer, principal,
-/// act_timestamp_ms, explanation, lineage[], scope_note, soundness_caveats[],
-/// checks[], reason}`. Never throws — malformed input is `verdict: "FAILED"`.
+/// act_timestamp_ms, explanation, lineage[], scope_note, scope_deferred,
+/// soundness_caveats[], checks[], reason}`. `scope_deferred` is `true`/`false`
+/// once a leaf mandate resolved (non-wildcard vs wildcard scope — neither
+/// means scope was CHECKED; v0 defers enforcement), `null` when none was.
+/// Never throws — malformed input is `verdict: "FAILED"`.
 ///
 /// HONEST SCOPE: a `✓ CONSISTENT` verdict proves signatures + that authority
 /// held at the act's signed time GIVEN THE RECORDS IN THIS BUNDLE. It does NOT
 /// prove the records are on-chain / sealed / time-anchored, and cannot detect a
 /// revocation the bundle author withheld — hence the verdict is `CONSISTENT`,
-/// never the node-only `AUTHORIZED`, and `soundness_caveats` always ship.
+/// never the node-only `AUTHORIZED`, and `soundness_caveats` ship on every
+/// judged verdict (empty only on input-error `FAILED`, where nothing was
+/// verified).
 #[wasm_bindgen]
 pub fn evaluate_mandate_bundle(bundle_json: &str) -> JsValue {
     to_js(&crate::mandate_bundle::evaluate_mandate_bundle(bundle_json))

@@ -2170,7 +2170,7 @@ pub fn apply_op(
             // dest-committee anchor frozen from the source seal — all from the
             // local pending entry, never the wire record. verify_abort_quorum
             // gates the wire committee against this anchor (fail-closed if None).
-            let (dest_zone, source_seal_epoch, anchored_committee) = {
+            let (dest_zone, source_seal_epoch, anchored_committee, seal_wire_version) = {
                 let pending = state
                     .cross_zone
                     .pending
@@ -2185,10 +2185,12 @@ pub fn apply_op(
                     pending.dest_zone.clone(),
                     pending.source_seal_epoch,
                     pending.dest_finality_committee,
+                    pending.source_seal_wire_version,
                 )
             };
 
             crate::accounting::cross_zone::verify_abort_quorum(
+                seal_wire_version,
                 transfer_id,
                 &dest_zone,
                 source_seal_epoch,
@@ -5625,7 +5627,7 @@ mod tests {
             combined[32..].copy_from_slice(&sibling);
             let root = sha3_256(&combined);
             let proof = vec![ProofSibling { hash: sibling, is_right: true }];
-            ledger.cross_zone.set_proof("lock-1", proof, root).unwrap();
+            ledger.cross_zone.set_proof("lock-1", proof, root, 6).unwrap();
             root
         };
         {
@@ -5707,7 +5709,7 @@ mod tests {
             combined[32..].copy_from_slice(&sibling);
             let root = sha3_256(&combined);
             let proof = vec![ProofSibling { hash: sibling, is_right: true }];
-            pre.cross_zone.set_proof("lock-1", proof, root).unwrap();
+            pre.cross_zone.set_proof("lock-1", proof, root, 6).unwrap();
             root
         };
         {
@@ -5926,6 +5928,7 @@ mod tests {
             "t-sealed",
             vec![ProofSibling { hash: sha3_256(b"s"), is_right: true }],
             sha3_256(b"root"),
+            6,
         )
         .unwrap();
         assert!(
@@ -6004,6 +6007,7 @@ mod tests {
                 "lock-1",
                 vec![ProofSibling { hash: sha3_256(b"s"), is_right: true }],
                 sha3_256(b"root"),
+                6,
             )
             .unwrap();
         assert_eq!(pre.pending_xzone_locked, 100 * BASE_UNITS_PER_BEAT);
@@ -6176,7 +6180,7 @@ mod tests {
         let other_hash = sha3_256(b"unrelated-record");
         let mut hashes = vec![lock_hash, other_hash];
         hashes.sort();
-        let merkle_root = MerkleTree::root(&hashes);
+        let merkle_root = MerkleTree::seal_root_for(crate::wire::CURRENT_SIGNING_VERSION, &hashes);
 
         let seal = ParsedEpochSeal {
             zone: ZoneId::from_legacy(0),
@@ -6197,7 +6201,7 @@ mod tests {
             account_smt_root: None,
             drand_pulse: None,
             xzone_dest_finality_committees: None,
-            wire_version: crate::wire::WIRE_VERSION,
+            wire_version: crate::wire::CURRENT_SIGNING_VERSION,
             sparse_merkle_root: None,
         };
         let proofed = attach_xzone_proofs_from_seal(&mut ledger, &seal);
@@ -6315,7 +6319,7 @@ mod tests {
         let lock_hash = lock_rec.record_hash();
         let mut hashes = vec![lock_hash, sha3_256(b"filler")];
         hashes.sort();
-        let merkle_root = MerkleTree::root(&hashes);
+        let merkle_root = MerkleTree::seal_root_for(crate::wire::CURRENT_SIGNING_VERSION, &hashes);
         let seal = ParsedEpochSeal {
             zone: ZoneId::from_legacy(0),
             epoch_number: 1,
@@ -6335,7 +6339,7 @@ mod tests {
             account_smt_root: None,
             drand_pulse: None,
             xzone_dest_finality_committees: None,
-            wire_version: crate::wire::WIRE_VERSION,
+            wire_version: crate::wire::CURRENT_SIGNING_VERSION,
             sparse_merkle_root: None,
         };
         assert_eq!(attach_xzone_proofs_from_seal(&mut ledger, &seal), 1);
@@ -6410,7 +6414,7 @@ mod tests {
         use crate::network::epoch::{attach_xzone_proofs_from_seal, ParsedEpochSeal};
         use crate::network::sync::MerkleTree;
         use crate::accounting::cross_zone::{
-            build_committee_proofs, xzone_abort_signable_bytes, SealFinalityWitness,
+            build_committee_proofs_for, xzone_abort_signable_bytes, SealFinalityWitness,
             TransferStatus,
         };
         use crate::ZoneId;
@@ -6445,7 +6449,7 @@ mod tests {
         let lock_hash = lock_rec.record_hash();
         let mut hashes = vec![lock_hash, crate::crypto::hash::sha3_256(b"unrelated")];
         hashes.sort();
-        let merkle_root = MerkleTree::root(&hashes);
+        let merkle_root = MerkleTree::seal_root_for(crate::wire::CURRENT_SIGNING_VERSION, &hashes);
         let seal = ParsedEpochSeal {
             zone: ZoneId::from_legacy(0),
             epoch_number: 4,
@@ -6465,7 +6469,7 @@ mod tests {
             account_smt_root: None,
             drand_pulse: None,
             xzone_dest_finality_committees: None,
-            wire_version: crate::wire::WIRE_VERSION,
+            wire_version: crate::wire::CURRENT_SIGNING_VERSION,
             sparse_merkle_root: None,
         };
         let proofed = attach_xzone_proofs_from_seal(&mut ledger, &seal);
@@ -6503,7 +6507,8 @@ mod tests {
             w2.public_key.clone(),
             w3.public_key.clone(),
         ];
-        let (committee_hash, proofs) = build_committee_proofs(&pks);
+        let (committee_hash, proofs) =
+            build_committee_proofs_for(crate::wire::CURRENT_SIGNING_VERSION, &pks);
         let dest_zone = ZoneId::from_legacy(1);
         let source_seal_epoch = 4u64;
         let msg = xzone_abort_signable_bytes(
@@ -6567,7 +6572,7 @@ mod tests {
         use crate::network::epoch::{attach_xzone_proofs_from_seal, ParsedEpochSeal};
         use crate::network::sync::MerkleTree;
         use crate::accounting::cross_zone::{
-            build_committee_proofs, xzone_abort_signable_bytes, SealFinalityWitness,
+            build_committee_proofs_for, xzone_abort_signable_bytes, SealFinalityWitness,
             TransferStatus,
         };
         use crate::ZoneId;
@@ -6591,7 +6596,7 @@ mod tests {
         let lock_hash = lock_rec.record_hash();
         let mut hashes = vec![lock_hash, crate::crypto::hash::sha3_256(b"x")];
         hashes.sort();
-        let merkle_root = MerkleTree::root(&hashes);
+        let merkle_root = MerkleTree::seal_root_for(crate::wire::CURRENT_SIGNING_VERSION, &hashes);
         let seal = ParsedEpochSeal {
             zone: ZoneId::from_legacy(0),
             epoch_number: 9,
@@ -6611,7 +6616,7 @@ mod tests {
             account_smt_root: None,
             drand_pulse: None,
             xzone_dest_finality_committees: None,
-            wire_version: crate::wire::WIRE_VERSION,
+            wire_version: crate::wire::CURRENT_SIGNING_VERSION,
             sparse_merkle_root: None,
         };
         attach_xzone_proofs_from_seal(&mut ledger, &seal);
@@ -6641,7 +6646,8 @@ mod tests {
             w2.public_key.clone(),
             w3.public_key.clone(),
         ];
-        let (committee_hash, proofs) = build_committee_proofs(&pks);
+        let (committee_hash, proofs) =
+            build_committee_proofs_for(crate::wire::CURRENT_SIGNING_VERSION, &pks);
         let dest_zone = ZoneId::from_legacy(1);
         let msg = xzone_abort_signable_bytes("lock-q", &dest_zone, 9, &committee_hash);
         let signers = vec![SealFinalityWitness {

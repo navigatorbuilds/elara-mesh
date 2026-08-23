@@ -10852,7 +10852,7 @@ mod tests {
                 w,
                 transfer_id,
                 &dest_zone,
-                source_seal_epoch,
+                source_seal_epoch, 6,
                 &pks,
                 &committee_hash,
             )
@@ -10879,6 +10879,7 @@ mod tests {
             dest_committee_hash: snap.dest_committee_hash,
             dest_committee_size: snap.dest_committee_size,
             signers: snap.signers.clone(),
+            source_seal_wire_version: 0,
         };
         bundle
             .verify()

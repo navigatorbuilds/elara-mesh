@@ -116,9 +116,13 @@ impl DailyBudget {
 /// read, so a hostile emitter can validly sign adversarially-worded metadata.
 /// Everything under these keys is wrapped as `{"ledger_text": …}` so the
 /// calling model receives it explicitly labeled as data, not instructions.
+/// `scope_note` is deliberately NOT listed: its only producer is the offline
+/// verifier's own hardcoded constant (no node route emits it), so wrapping it
+/// labeled our own honest-scope disclosure as untrusted third-party text to
+/// exactly the consumer meant to act on it.
 pub const LEDGER_TEXT_KEYS: &[&str] = &[
     "tool", "action", "agent_id", "session_id", "explanation", "reason",
-    "scope_note", "ops", "note",
+    "ops", "note",
 ];
 
 /// Recursively wrap string values under [`LEDGER_TEXT_KEYS`] anywhere in a

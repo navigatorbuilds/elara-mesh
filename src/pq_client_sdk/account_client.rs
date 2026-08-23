@@ -260,6 +260,7 @@ mod tests {
                         source_committee_hash: [0u8; 32],
                         source_committee_size: 5,
                         source_seal_signers: Vec::new(),
+                        source_seal_wire_version: 0,
                     };
                     PqResponse::ok(serde_json::to_vec(&bundle).unwrap())
                 }
@@ -512,6 +513,7 @@ mod tests {
                             source_committee_hash: [0u8; 32],
                             source_committee_size: 1,
                             source_seal_signers: Vec::new(),
+                            source_seal_wire_version: 0,
                         };
                         let resp = PqResponse::ok(serde_json::to_vec(&bundle).unwrap());
                         if stream.send_response(&resp).await.is_err() {

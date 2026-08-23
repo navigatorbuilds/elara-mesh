@@ -427,6 +427,9 @@ pub struct NodeState {
     pub light_state: std::sync::RwLock<super::light::LightState>,
     /// Algorithm sunset state (Protocol v0.6.1 Section 11.29).
     pub sunset: std::sync::RwLock<SunsetState>,
+    /// fold_sunset fence registry (v7 Merkle fold-tag §Fence; ships INERT —
+    /// empty until a signed fold_sunset record arrives on-chain).
+    pub fold_sunset: std::sync::RwLock<super::fold_sunset::FoldSunsetRegistry>,
     /// Unix timestamp when the node started.
     pub start_time: f64,
     /// Gossip metrics: total originator pushes.
@@ -3855,6 +3858,7 @@ impl NodeState {
             epoch: std::sync::RwLock::new(EpochState::new()),
             light_state: std::sync::RwLock::new(super::light::LightState::new()),
             sunset: std::sync::RwLock::new(SunsetState::new()),
+            fold_sunset: std::sync::RwLock::new(super::fold_sunset::FoldSunsetRegistry::new()),
             start_time,
             gossip_push_total: AtomicU64::new(0),
             gossip_relay_total: AtomicU64::new(0),

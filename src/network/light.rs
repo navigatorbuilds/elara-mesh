@@ -274,7 +274,11 @@ impl LightState {
                 if proof.root != h.merkle_root {
                     return false;
                 }
-                MerkleTree::verify_proof(proof)
+                // L1 (public /proofs consumers) moves WITH F1 dispatch: the
+                // header's seal_wire_version (serde-default 0 = legacy = v1
+                // fold) picks the recipe; a proof whose own fold_version
+                // disagrees is rejected before the walk (brief V2 R2/L1).
+                MerkleTree::verify_seal_proof_for(h.seal_wire_version, proof)
             }
             None => false,
         }

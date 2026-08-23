@@ -135,7 +135,7 @@ impl ElaraMandateServer {
     }
 
     #[tool(
-        description = "Look up this server's own configured agent mandate: scope, validity window, and whether it is currently live or revoked. Read-only; one HTTP GET to the configured node. Holds no key material and takes no arguments — it always reports on the one mandate this server is configured with, never on an identity chosen by the caller. Note: mandate scope strings are recorded and signed but scope enforcement is deferred in v0 (scope_deferred) — do not treat scope as enforced policy."
+        description = "Look up this server's own configured agent mandate: scope, validity window, and whether it is currently live or revoked. Read-only; one HTTP GET to the configured node. Holds no key material and takes no arguments — it always reports on the one mandate this server is configured with, never on an identity chosen by the caller. Note: mandate scope strings are recorded and signed but scope enforcement is deferred in v0 — the response's scope_enforced_v0 field is false for every mandate today; do not treat scope as enforced policy."
     )]
     async fn mandate_my_mandate(&self) -> String {
         match self.node_get(&format!("/mandate/{}", self.cfg.mandate_id)).await {

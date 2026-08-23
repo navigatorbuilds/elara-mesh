@@ -83,6 +83,7 @@ pub mod server;
 pub mod slashing;
 pub mod state;
 pub mod state_core;
+pub mod fold_sunset;
 pub mod sunset;
 pub mod supervision;
 pub mod system_load;

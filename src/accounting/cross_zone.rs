@@ -150,6 +150,13 @@ pub struct PendingTransfer {
     /// Empty until the lock record is committed to an epoch seal.
     /// Claims are rejected while this is empty (M7 fix).
     pub merkle_proof: Vec<ProofSibling>,
+    /// Wire version of the source-zone seal record that committed the lock —
+    /// the fold-recipe signal for `merkle_proof` AND the committee proofs
+    /// (v7+ = tagged v2 fold; 0/absent = legacy v1). Set by `set_proof()`
+    /// from the parsed seal; serde-defaulted so persisted pre-v7 transfers
+    /// read as legacy (brief V2 R2/S3-F4).
+    #[serde(default)]
+    pub source_seal_wire_version: u16,
     /// SHA3-256 hash of the lock record (leaf in the Merkle tree).
     #[serde(default)]
     pub lock_record_hash: [u8; 32],
@@ -441,6 +448,8 @@ impl CrossZoneState {
             // the lock is proofed into a source-zone seal carrying the map.
             dest_finality_committee: None,
             claim_record_id: None,
+            // Unset until set_proof() stamps the sealing record's version.
+            source_seal_wire_version: 0,
         };
 
         // Saturating to match the saturating_sub decrements below — `total_locked`
@@ -499,8 +508,10 @@ impl CrossZoneState {
         }
 
         // Verify the merkle proof: walk from leaf (lock_record_hash) up the
-        // sibling path, confirm we arrive at source_merkle_root.
+        // sibling path, confirm we arrive at source_merkle_root. Fold recipe
+        // rides the source seal's own wire version (v7+ = tagged v2).
         if !verify_seal_inclusion_proof(
+            transfer.source_seal_wire_version,
             &transfer.lock_record_hash,
             &transfer.merkle_proof,
             &transfer.source_merkle_root,
@@ -517,6 +528,7 @@ impl CrossZoneState {
         // 24h Phase 5a soak (2026-04-27 → 2026-04-28) showed `legacy_total` flat
         // at 0 fleet-wide — no legitimate path relied on the bypass.
         verify_finality_quorum(
+            transfer.source_seal_wire_version,
             &transfer.source_zone,
             transfer.source_seal_epoch,
             &transfer.source_merkle_root,
@@ -553,6 +565,7 @@ impl CrossZoneState {
         transfer_id: &str,
         proof: Vec<ProofSibling>,
         merkle_root: [u8; 32],
+        seal_wire_version: u16,
     ) -> Result<()> {
         let transfer = self.pending.get_mut(transfer_id)
             .ok_or_else(|| ElaraError::Ledger(format!(
@@ -567,6 +580,7 @@ impl CrossZoneState {
 
         transfer.merkle_proof = proof;
         transfer.source_merkle_root = merkle_root;
+        transfer.source_seal_wire_version = seal_wire_version;
         let lock_hash = transfer.lock_record_hash;
         self.unindex_needs_proof(&lock_hash, transfer_id);
         Ok(())
@@ -1235,11 +1249,50 @@ fn inclusion_fold_v1(
 /// [`XZoneTransferBundle::verify`] run `verify_finality_quorum` on the same
 /// root).
 pub fn verify_seal_inclusion_proof(
+    seal_wire_version: u16,
     leaf: &[u8; 32],
     proof: &[ProofSibling],
     expected_root: &[u8; 32],
 ) -> bool {
-    inclusion_fold_v1(leaf, proof, expected_root)
+    if seal_wire_version >= crate::wire::FOLD_V2_MIN_WIRE_VERSION {
+        inclusion_fold_v2(
+            crate::wire::SEAL_FOLD_V2_NODE_TAG,
+            leaf,
+            proof,
+            expected_root,
+        )
+    } else {
+        inclusion_fold_v1(leaf, proof, expected_root)
+    }
+}
+
+/// Tagged v2 twin of [`inclusion_fold_v1`]: identical walk, interior nodes
+/// fold as `SHA3(tag ‖ left ‖ right)`. PRIVATE for the same H1 reason — every
+/// caller routes through a typed, version-dispatched wrapper. The empty-proof
+/// tautology (leaf == root, zero iterations) is retained: it is the
+/// legitimate single-record-epoch shape under BOTH recipes (a single-leaf
+/// tree has no interior node to tag); the M1 closure is that a tagged
+/// MULTI-node root can never equal any raw leaf.
+fn inclusion_fold_v2(
+    tag: &[u8],
+    leaf: &[u8; 32],
+    proof: &[ProofSibling],
+    expected_root: &[u8; 32],
+) -> bool {
+    let mut current = *leaf;
+    for sibling in proof {
+        let mut combined = Vec::with_capacity(tag.len() + 64);
+        combined.extend_from_slice(tag);
+        if sibling.is_right {
+            combined.extend_from_slice(&current);
+            combined.extend_from_slice(&sibling.hash);
+        } else {
+            combined.extend_from_slice(&sibling.hash);
+            combined.extend_from_slice(&current);
+        }
+        current = sha3_256(&combined);
+    }
+    current == *expected_root
 }
 
 /// Verify a committee-membership proof against a committee root (F2 — the
@@ -1251,11 +1304,16 @@ pub fn verify_seal_inclusion_proof(
 /// the duplicate-last padding safe (CVE-2012-2459 shape; pinned by
 /// `committee_dedup_is_load_bearing_against_duplicate_leaf_ambiguity`).
 pub fn verify_committee_inclusion_proof(
+    seal_wire_version: u16,
     leaf: &[u8; 32],
     proof: &[ProofSibling],
     expected_root: &[u8; 32],
 ) -> bool {
-    inclusion_fold_v1(leaf, proof, expected_root)
+    if seal_wire_version >= crate::wire::FOLD_V2_MIN_WIRE_VERSION {
+        inclusion_fold_v2(COMMITTEE_FOLD_V2_NODE_TAG, leaf, proof, expected_root)
+    } else {
+        inclusion_fold_v1(leaf, proof, expected_root)
+    }
 }
 
 // ─── Gap 2.1: seal-finality proof verification ──────────────────────────────
@@ -1317,7 +1375,34 @@ pub fn xzone_finality_signable_bytes(
 pub fn build_committee_proofs(
     pks: &[Vec<u8>],
 ) -> ([u8; 32], std::collections::HashMap<Vec<u8>, Vec<ProofSibling>>) {
-    assert!(!pks.is_empty(), "committee must be non-empty");
+    build_committee_proofs_tagged(None, pks)
+}
+
+/// Version-dispatched committee proofs builder (F2, v7 flag day). The signal
+/// is the wire version of the seal whose `committee_hash` these proofs must
+/// match — the witness path passes the OBSERVED seal's own version, so a
+/// recipe mismatch across the flip boundary degrades to "member does not
+/// sign" (root comparison fails), never to a forged quorum.
+pub fn build_committee_proofs_for(
+    seal_wire_version: u16,
+    pks: &[Vec<u8>],
+) -> ([u8; 32], std::collections::HashMap<Vec<u8>, Vec<ProofSibling>>) {
+    if seal_wire_version >= crate::wire::FOLD_V2_MIN_WIRE_VERSION {
+        build_committee_proofs_tagged(Some(COMMITTEE_FOLD_V2_NODE_TAG), pks)
+    } else {
+        build_committee_proofs_tagged(None, pks)
+    }
+}
+
+fn build_committee_proofs_tagged(
+    tag: Option<&[u8]>,
+    pks: &[Vec<u8>],
+) -> ([u8; 32], std::collections::HashMap<Vec<u8>, Vec<ProofSibling>>) {
+    // Same panic class as C2 (final verifier N5): empty committee is a live
+    // condition — sentinel, never assert.
+    if pks.is_empty() {
+        return ([0u8; 32], std::collections::HashMap::new());
+    }
 
     // Sort + dedupe by leaf hash so the tree shape matches
     // committee_hash_from_pks. Track each unique PK alongside its
@@ -1361,10 +1446,21 @@ pub fn build_committee_proofs(
 
         let mut next = Vec::with_capacity(padded.len() / 2);
         for chunk in padded.chunks(2) {
-            let mut buf = [0u8; 64];
-            buf[..32].copy_from_slice(&chunk[0]);
-            buf[32..].copy_from_slice(&chunk[1]);
-            next.push(sha3_256(&buf));
+            next.push(match tag {
+                Some(t) => {
+                    let mut buf = Vec::with_capacity(t.len() + 64);
+                    buf.extend_from_slice(t);
+                    buf.extend_from_slice(&chunk[0]);
+                    buf.extend_from_slice(&chunk[1]);
+                    sha3_256(&buf)
+                }
+                None => {
+                    let mut buf = [0u8; 64];
+                    buf[..32].copy_from_slice(&chunk[0]);
+                    buf[32..].copy_from_slice(&chunk[1]);
+                    sha3_256(&buf)
+                }
+            });
         }
         level = next;
         indices = indices.iter().map(|i| i / 2).collect();
@@ -1398,7 +1494,13 @@ pub const COMMITTEE_FOLD_V2_NODE_TAG: &[u8] = b"ELARA/COMMITTEE_NODE/v1";
 /// backstop). KAT-pinned by `f2_committee_fold_v2_interior_kat` against
 /// independently-computed Python values.
 pub fn committee_root_v2_interior(pks: &[Vec<u8>]) -> [u8; 32] {
-    assert!(!pks.is_empty(), "committee must be non-empty");
+    // Empty-committee guard mirrors the v1 twin (zone_committee.rs) — an
+    // expected live condition ("no committee resolvable for this dest
+    // zone/epoch"), remotely reachable via handle_submit_finality_witness.
+    // Was an assert! — a flag-day-armed panic (Phase-4 panel C2).
+    if pks.is_empty() {
+        return [0u8; 32];
+    }
     let mut leaves: Vec<[u8; 32]> = pks.iter().map(|pk| committee_leaf_hash(pk)).collect();
     leaves.sort();
     leaves.dedup();
@@ -1515,7 +1617,8 @@ pub fn sign_abort_witness(
 ///     than threading a precomputed map through.
 ///   * `expected_committee_hash`: the dest-zone committee Merkle root
 ///     the caller pinned at observation time. Sanity-checked here:
-///     if `build_committee_proofs(committee_pks)` does not produce this
+///     if `build_committee_proofs_for(seal_wire_version, committee_pks)`
+///     does not produce this
 ///     root, the committee data is internally inconsistent and we
 ///     refuse to sign (otherwise the resulting signature would never
 ///     `verify_abort_quorum` against any other signer's view).
@@ -1531,6 +1634,7 @@ pub fn try_sign_xzone_abort(
     transfer_id: &str,
     dest_zone: &ZoneId,
     source_seal_epoch: u64,
+    seal_wire_version: u16,
     committee_pks: &[Vec<u8>],
     expected_committee_hash: &[u8; 32],
 ) -> Option<(SealFinalityWitness, [u8; 32], u32)> {
@@ -1541,7 +1645,11 @@ pub fn try_sign_xzone_abort(
     if !am_member {
         return None;
     }
-    let (computed_hash, proofs_by_pk) = build_committee_proofs(committee_pks);
+    // Dispatch on the source seal's own version (Phase-4 panel C1: the
+    // un-dispatched v1 builder here made post-flip abort signing dead —
+    // computed_hash could never match a v2-frozen anchor).
+    let (computed_hash, proofs_by_pk) =
+        build_committee_proofs_for(seal_wire_version, committee_pks);
     if &computed_hash != expected_committee_hash {
         // Internally-inconsistent committee data: caller pinned a hash
         // that doesn't match the PK list. Refuse to sign — a sig over
@@ -1588,6 +1696,7 @@ pub fn committee_leaf_hash(witness_pk: &[u8]) -> [u8; 32] {
 /// don't contribute), to keep the quorum check forgiving when callers
 /// over-include witnesses.
 pub fn verify_finality_quorum(
+    seal_wire_version: u16,
     zone: &ZoneId,
     seal_epoch: u64,
     merkle_root: &[u8; 32],
@@ -1610,7 +1719,12 @@ pub fn verify_finality_quorum(
         }
         // (1) Committee membership
         let leaf = committee_leaf_hash(&w.witness_pk);
-        if !verify_committee_inclusion_proof(&leaf, &w.committee_proof, committee_hash) {
+        if !verify_committee_inclusion_proof(
+            seal_wire_version,
+            &leaf,
+            &w.committee_proof,
+            committee_hash,
+        ) {
             continue;
         }
         // (2) Signature
@@ -1682,7 +1796,11 @@ pub fn xzone_abort_signable_bytes(
 /// `dest_committee_size == 0` is rejected — abort proof must be enforceable;
 /// no "legacy back-compat" path for this signature, since we are creating
 /// the type from scratch in Slice 1.
+// 8th arg is the v7 fold-dispatch signal; a params-struct refactor is queued
+// for the Phase-4 panel window, not bundled into the dispatch commit.
+#[allow(clippy::too_many_arguments)]
 pub fn verify_abort_quorum(
+    seal_wire_version: u16,
     transfer_id: &str,
     dest_zone: &ZoneId,
     source_seal_epoch: u64,
@@ -1730,7 +1848,12 @@ pub fn verify_abort_quorum(
             continue;
         }
         let leaf = committee_leaf_hash(&w.witness_pk);
-        if !verify_committee_inclusion_proof(&leaf, &w.committee_proof, &canon_hash) {
+        if !verify_committee_inclusion_proof(
+            seal_wire_version,
+            &leaf,
+            &w.committee_proof,
+            &canon_hash,
+        ) {
             continue;
         }
         let ok = crate::identity::Identity::verify(&msg, &w.signature, &w.witness_pk)
@@ -1803,6 +1926,10 @@ pub struct XZoneTransferBundle {
     pub source_committee_size: u32,
     /// Witness signatures attesting `source_merkle_root` reached finality.
     pub source_seal_signers: Vec<SealFinalityWitness>,
+    /// Wire version of the source-zone seal — fold-recipe signal for both
+    /// `merkle_proof` and the witnesses' committee proofs (0/absent = v1).
+    #[serde(default)]
+    pub source_seal_wire_version: u16,
 }
 
 impl XZoneTransferBundle {
@@ -1830,6 +1957,7 @@ impl XZoneTransferBundle {
             source_committee_hash: pt.source_committee_hash,
             source_committee_size: pt.source_committee_size,
             source_seal_signers: pt.source_seal_signers.clone(),
+            source_seal_wire_version: pt.source_seal_wire_version,
         })
     }
 
@@ -1844,8 +1972,16 @@ impl XZoneTransferBundle {
     /// Does NOT verify the destination-side claim record — that's the caller's
     /// concern (e.g., account checks the claim has been observed in zone B's
     /// DAG and signed by the recipient).
+    ///
+    /// STRUCTURAL self-consistency check, NOT a canonical-anchor security
+    /// gate (panel item c): `sender`/`recipient`/`amount`/`transfer_id` are
+    /// UNCOMMITTED display metadata riding beside the proof — nothing binds
+    /// them to `lock_record_hash`'s preimage here. The fund-moving path
+    /// (`claim_transfer`) never consumes this bundle; external verifiers
+    /// must treat those fields as claims, not proven facts.
     pub fn verify(&self) -> Result<()> {
         if !verify_seal_inclusion_proof(
+            self.source_seal_wire_version,
             &self.lock_record_hash,
             &self.merkle_proof,
             &self.source_merkle_root,
@@ -1856,6 +1992,7 @@ impl XZoneTransferBundle {
             )));
         }
         verify_finality_quorum(
+            self.source_seal_wire_version,
             &self.source_zone,
             self.source_seal_epoch,
             &self.source_merkle_root,
@@ -1917,6 +2054,11 @@ pub struct XZoneAbortBundle {
     pub dest_committee_size: u32,
     /// Witness signatures attesting non-inclusion.
     pub signers: Vec<SealFinalityWitness>,
+    /// Wire version of the source-zone seal that froze the dest-committee
+    /// anchor — fold-recipe signal for the witnesses' committee proofs
+    /// (0/absent = legacy v1 fold).
+    #[serde(default)]
+    pub source_seal_wire_version: u16,
 }
 
 impl XZoneAbortBundle {
@@ -1936,6 +2078,7 @@ impl XZoneAbortBundle {
     /// pre-flight is still rejected there.
     pub fn verify(&self) -> Result<()> {
         verify_abort_quorum(
+            self.source_seal_wire_version,
             &self.transfer_id,
             &self.dest_zone,
             self.source_seal_epoch,
@@ -2023,12 +2166,12 @@ mod tests {
         );
         // Membership proof for the duplicated member verifies under both.
         let leaf_c = committee_leaf_hash(&c);
-        assert!(verify_committee_inclusion_proof(&leaf_c, &proofs_odd[&c], &root_odd));
-        assert!(verify_committee_inclusion_proof(&leaf_c, &proofs_dup[&c], &root_dup));
+        assert!(verify_committee_inclusion_proof(6, &leaf_c, &proofs_odd[&c], &root_odd));
+        assert!(verify_committee_inclusion_proof(6, &leaf_c, &proofs_dup[&c], &root_dup));
         // And a NON-member does not gain membership from the shape games.
         let d = vec![0xD4u8; 1952];
         let leaf_d = committee_leaf_hash(&d);
-        assert!(!verify_committee_inclusion_proof(&leaf_d, &proofs_odd[&c], &root_odd));
+        assert!(!verify_committee_inclusion_proof(6, &leaf_d, &proofs_odd[&c], &root_odd));
     }
 
     /// P-C: the codebase carries TWO odd-element disciplines — the seal fold
@@ -2109,7 +2252,7 @@ mod tests {
             id.into(), sender.into(), recipient.into(),
             amount, ZoneId::new("a"), ZoneId::new("b"), 0.0, leaf,
         ).unwrap();
-        state.set_proof(id, proof, root).unwrap();
+        state.set_proof(id, proof, root, 6).unwrap();
         attach_test_finality(state, id, &root);
     }
 
@@ -2165,7 +2308,7 @@ mod tests {
         ).unwrap();
         let locked_bare = s.state_digest();
 
-        s.set_proof("t-digest", proof, root).unwrap();
+        s.set_proof("t-digest", proof, root, 6).unwrap();
         let with_proof = s.state_digest();
         assert_ne!(locked_bare, with_proof, "proof_present must be tracked");
 
@@ -2205,7 +2348,7 @@ mod tests {
         assert_eq!(state.total_locked, 1_000_000);
 
         // Must set proof before claiming (M7)
-        state.set_proof("tx-1", proof, root).unwrap();
+        state.set_proof("tx-1", proof, root, 6).unwrap();
 
         // Phase 5: attach a 1-of-1 finality witness so claim_transfer accepts.
         let w = make_witness();
@@ -2249,7 +2392,7 @@ mod tests {
         // Set a bogus proof that doesn't match the root
         let bogus_proof = vec![ProofSibling { hash: [99u8; 32], is_right: true }];
         let bogus_root = [0u8; 32]; // wrong root
-        state.set_proof("tx-1", bogus_proof, bogus_root).unwrap();
+        state.set_proof("tx-1", bogus_proof, bogus_root, 6).unwrap();
 
         let result = state.claim_transfer("tx-1", "bob", "claim-1", 100.0);
         assert!(result.is_err());
@@ -2418,7 +2561,7 @@ mod tests {
         combined[32..].copy_from_slice(&sibling);
         let root = sha3_256(&combined);
         state.pending.get_mut("tx-0").unwrap().lock_record_hash = leaf;
-        state.set_proof("tx-0", vec![ProofSibling { hash: sibling, is_right: true }], root).unwrap();
+        state.set_proof("tx-0", vec![ProofSibling { hash: sibling, is_right: true }], root, 6).unwrap();
 
         // Phase 5: attach finality witness so the claim path accepts.
         attach_test_finality(&mut state, "tx-0", &root);
@@ -2434,19 +2577,19 @@ mod tests {
     #[test]
     fn typed_inclusion_wrappers_share_one_v1_fold() {
         let (leaf, proof, root) = make_test_proof(b"test-leaf");
-        assert!(verify_seal_inclusion_proof(&leaf, &proof, &root));
+        assert!(verify_seal_inclusion_proof(6, &leaf, &proof, &root));
         // H1 groundwork: both typed wrappers delegate to ONE v1 fold today —
         // pinned here so the v7 flag day's divergence is a deliberate diff.
-        assert!(verify_committee_inclusion_proof(&leaf, &proof, &root));
+        assert!(verify_committee_inclusion_proof(6, &leaf, &proof, &root));
 
         // Wrong leaf fails
         let wrong = sha3_256(b"wrong");
-        assert!(!verify_seal_inclusion_proof(&wrong, &proof, &root));
+        assert!(!verify_seal_inclusion_proof(6, &wrong, &proof, &root));
 
         // Tampered proof fails
         let mut bad_proof = proof.clone();
         bad_proof[0].hash = [0u8; 32];
-        assert!(!verify_seal_inclusion_proof(&leaf, &bad_proof, &root));
+        assert!(!verify_seal_inclusion_proof(6, &leaf, &bad_proof, &root));
     }
 
     /// P-D / M1 pin (MERKLE-PANEL-VERDICT-2026-08-22 R7): an EMPTY proof
@@ -2471,11 +2614,11 @@ mod tests {
     fn p_d_seal_fold_empty_proof_tautology_is_the_live_m1_shape() {
         let x = sha3_256(b"any-32-bytes-at-all");
         assert!(
-            verify_seal_inclusion_proof(&x, &[], &x),
+            verify_seal_inclusion_proof(6, &x, &[], &x),
             "v1 empty-proof tautology vanished — if the fold changed, this MUST be a flag-day diff"
         );
         let y = sha3_256(b"some-other-root");
-        assert!(!verify_seal_inclusion_proof(&x, &[], &y));
+        assert!(!verify_seal_inclusion_proof(6, &x, &[], &y));
 
         // The M7 divergence: claim_transfer refuses empty proofs at the
         // TRANSFER layer (`merkle_proof.is_empty()` gate) and
@@ -2483,7 +2626,7 @@ mod tests {
         // `XZoneTransferBundle::verify` itself carries no emptiness guard —
         // the fold above is its exact inclusion leg. Pinned so the guard
         // asymmetry stays a known, deliberate state until v7.
-        let bundle_leg_accepts_empty = verify_seal_inclusion_proof(&x, &[], &x);
+        let bundle_leg_accepts_empty = verify_seal_inclusion_proof(6, &x, &[], &x);
         assert!(bundle_leg_accepts_empty);
     }
 
@@ -2539,7 +2682,7 @@ mod tests {
         assert!(state.get("tx-1").unwrap().merkle_proof.is_empty());
 
         // Set proof
-        state.set_proof("tx-1", proof, root).unwrap();
+        state.set_proof("tx-1", proof, root, 6).unwrap();
         assert!(!state.get("tx-1").unwrap().merkle_proof.is_empty());
 
         // Phase 5: claim now requires finality too — attach 1-of-1.
@@ -2652,7 +2795,7 @@ mod tests {
 
         for (i, pk) in pks.iter().enumerate() {
             let leaf = committee_leaf_hash(pk);
-            assert!(verify_committee_inclusion_proof(&leaf, &proofs[i], &root),
+            assert!(verify_committee_inclusion_proof(6, &leaf, &proofs[i], &root),
                 "committee proof for witness {i} must verify");
         }
     }
@@ -2663,7 +2806,7 @@ mod tests {
             id.into(), sender.into(), recipient.into(),
             amount, ZoneId::new("a"), ZoneId::new("b"), 0.0, leaf,
         ).unwrap();
-        state.set_proof(id, proof, root).unwrap();
+        state.set_proof(id, proof, root, 6).unwrap();
     }
 
     #[test]
@@ -3091,7 +3234,7 @@ mod tests {
             let proof = proofs_by_pk.get(pk).expect("every committee pk has a proof");
             let leaf = committee_leaf_hash(pk);
             assert!(
-                verify_committee_inclusion_proof(&leaf, proof, &root),
+                verify_committee_inclusion_proof(6, &leaf, proof, &root),
                 "membership proof must verify for committee member"
             );
         }
@@ -3125,6 +3268,7 @@ mod tests {
             .collect();
 
         verify_finality_quorum(
+            6,
             &zone,
             seal_epoch,
             &merkle_root,
@@ -3184,6 +3328,7 @@ mod tests {
             .collect();
 
         verify_abort_quorum(
+            6,
             transfer_id,
             &dest_zone,
             source_seal_epoch,
@@ -3255,6 +3400,7 @@ mod tests {
             .collect();
 
         let err = verify_finality_quorum(
+            6,
             &dest_zone,
             epoch,
             &merkle_root,
@@ -3290,7 +3436,7 @@ mod tests {
                     w,
                     transfer_id,
                     &dest_zone,
-                    epoch,
+                    epoch, 6,
                     &pks,
                     &committee_hash,
                 )
@@ -3302,6 +3448,7 @@ mod tests {
             .collect();
 
         verify_abort_quorum(
+            6,
             transfer_id,
             &dest_zone,
             epoch,
@@ -3327,7 +3474,7 @@ mod tests {
             &outsider,
             "tx-outsider",
             &ZoneId::new("a"),
-            1,
+            1, 6,
             &pks,
             &committee_hash,
         );
@@ -3347,7 +3494,7 @@ mod tests {
             &ws[0],
             "tx-mismatch",
             &ZoneId::new("a"),
-            1,
+            1, 6,
             &pks,
             &bogus_hash,
         );
@@ -3366,7 +3513,7 @@ mod tests {
             &signer,
             "tx-empty",
             &ZoneId::new("a"),
-            1,
+            1, 6,
             &[],
             &[0u8; 32],
         );
@@ -3395,7 +3542,7 @@ mod tests {
                     w,
                     transfer_id,
                     &dest_zone,
-                    epoch,
+                    epoch, 6,
                     &pks,
                     &committee_hash,
                 )
@@ -3408,6 +3555,7 @@ mod tests {
         // domain prefix differs so the sigs must NOT verify against the
         // finality canonical message.
         let err = verify_finality_quorum(
+            6,
             &dest_zone,
             epoch,
             &merkle_root,
@@ -3715,7 +3863,7 @@ mod tests {
             id.into(), sender.into(), recipient.into(),
             amount, ZoneId::new("a"), ZoneId::new("b"), 0.0, leaf,
         ).unwrap();
-        state.set_proof(id, proof, root).unwrap();
+        state.set_proof(id, proof, root, 6).unwrap();
 
         let w = make_witness();
         let zone = ZoneId::new("a");
@@ -3816,7 +3964,7 @@ mod tests {
     fn verify_abort_quorum_rejects_zero_committee() {
         let zone = ZoneId::new("b");
         let cthash = [0u8; 32];
-        let err = verify_abort_quorum("tx-z", &zone, 1, &cthash, 0, &[], Some((cthash, 0))).unwrap_err();
+        let err = verify_abort_quorum(6, "tx-z", &zone, 1, &cthash, 0, &[], Some((cthash, 0))).unwrap_err();
         assert!(err.to_string().contains("dest_committee_size must be > 0"), "got: {err}");
     }
 
@@ -3842,7 +3990,7 @@ mod tests {
             signature: sig,
             committee_proof: proof,
         }];
-        let err = verify_abort_quorum("tx-q", &zone, epoch, &root, 3, &signers, Some((root, 3))).unwrap_err();
+        let err = verify_abort_quorum(6, "tx-q", &zone, epoch, &root, 3, &signers, Some((root, 3))).unwrap_err();
         assert!(err.to_string().contains("verified signers"), "got: {err}");
     }
 
@@ -3863,7 +4011,7 @@ mod tests {
             committee_proof: proofs.get(&s.public_key).cloned().unwrap(),
         };
         let signers = vec![mk(&s1), mk(&s2)];
-        verify_abort_quorum("tx-ok", &zone, epoch, &root, 3, &signers, Some((root, 3))).unwrap();
+        verify_abort_quorum(6, "tx-ok", &zone, epoch, &root, 3, &signers, Some((root, 3))).unwrap();
     }
 
     #[test]
@@ -3894,7 +4042,7 @@ mod tests {
         ];
         // Quorum size = 2, two signers — would pass on count, but sigs are
         // over the wrong domain so each Identity::verify returns false → 0 verified.
-        let err = verify_abort_quorum("tx-replay", &zone, epoch, &root, 2, &bad_signers, Some((root, 2))).unwrap_err();
+        let err = verify_abort_quorum(6, "tx-replay", &zone, epoch, &root, 2, &bad_signers, Some((root, 2))).unwrap_err();
         assert!(err.to_string().contains("verified signers"), "got: {err}");
     }
 
@@ -3931,6 +4079,7 @@ mod tests {
         };
         // anchor = REAL committee (root, size 3); wire = forged (root, size 1).
         let err = verify_abort_quorum(
+            6,
             "tx-forge", &zone, epoch, &forged_root, 1, &[forged_witness],
             Some((real_root, 3)),
         )
@@ -3960,7 +4109,7 @@ mod tests {
             committee_proof: proofs.get(&s.public_key).cloned().unwrap(),
         };
         let signers = vec![mk(&s1), mk(&s2)];
-        let err = verify_abort_quorum("tx-none", &zone, epoch, &root, 3, &signers, None).unwrap_err();
+        let err = verify_abort_quorum(6, "tx-none", &zone, epoch, &root, 3, &signers, None).unwrap_err();
         assert!(err.to_string().contains("no sealed dest-committee anchor"), "got: {err}");
     }
 
@@ -3982,7 +4131,7 @@ mod tests {
             signature: s1.sign(&msg).unwrap(),
             committee_proof: proofs.get(&s1.public_key).cloned().unwrap(),
         };
-        let err = verify_abort_quorum("tx-dg", &zone, epoch, &root, 1, &[one], Some((root, 3))).unwrap_err();
+        let err = verify_abort_quorum(6, "tx-dg", &zone, epoch, &root, 1, &[one], Some((root, 3))).unwrap_err();
         assert!(
             err.to_string().contains("dest_committee_size does not match"),
             "got: {err}"
@@ -4312,6 +4461,7 @@ mod tests {
             dest_committee_hash: root,
             dest_committee_size: n_signers as u32,
             signers,
+            source_seal_wire_version: 0,
         }
     }
 
@@ -4769,6 +4919,7 @@ mod tests {
                 source_committee_hash: [0u8; 32], source_seal_epoch: 0,
                 source_committee_size: 0, dest_finality_committee: None,
                 claim_record_id: None,
+                source_seal_wire_version: 0,
             },
         );
         state.pending.insert(
@@ -4840,7 +4991,7 @@ mod tests {
 
         // set_proof drains tx-a (proof attached; claim later is index-inert).
         let (leaf_a, proof_a, root_a) = make_test_proof(b"tx-a");
-        state.set_proof("tx-a", proof_a, root_a).unwrap();
+        state.set_proof("tx-a", proof_a, root_a, 6).unwrap();
         assert!(state.needs_proof_ids(&leaf_a).is_empty(), "set_proof must unindex");
 
         // Sender cancel drains tx-b; recipient reject drains tx-c.
@@ -4885,7 +5036,7 @@ mod tests {
             "tx-proofed".into(), "alice".into(), "bob".into(),
             100, ZoneId::new("za"), ZoneId::new("zb"), 0.0, leaf_p,
         ).unwrap();
-        state.set_proof("tx-proofed", proof, root).unwrap();
+        state.set_proof("tx-proofed", proof, root, 6).unwrap();
         let leaf_u = sha3_256(b"tx-unproofed");
         state.lock_transfer(
             "tx-unproofed".into(), "alice".into(), "bob".into(),

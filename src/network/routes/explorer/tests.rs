@@ -3416,6 +3416,7 @@ fn stub_pending_transfer(
         source_committee_size: 0,
         dest_finality_committee: None,
         claim_record_id: None,
+        source_seal_wire_version: 0,
     }
 }
 
@@ -13421,6 +13422,7 @@ async fn batch_ooo_compute_xzone_stats_pending_total_reflects_hashmap_len_and_cu
                     source_committee_size: 0,
                     dest_finality_committee: None,
                     claim_record_id: None,
+                    source_seal_wire_version: 0,
                 },
             );
         }
@@ -13573,6 +13575,7 @@ fn ppp_stub_pending_transfer(
         source_committee_size: 0,
         dest_finality_committee: None,
         claim_record_id: None,
+        source_seal_wire_version: 0,
     }
 }
 
@@ -15000,6 +15003,7 @@ fn sss_seeded_pending_transfer(transfer_id: &str) -> crate::accounting::cross_zo
         source_committee_size: 5,
         dest_finality_committee: None,
         claim_record_id: None,
+        source_seal_wire_version: 0,
     }
 }
 
@@ -15162,7 +15166,7 @@ async fn batch_sss_compute_xzone_bundle_zero_committee_size_returns_wire_error_e
 }
 
 #[tokio::test]
-async fn batch_sss_compute_xzone_bundle_happy_path_serializes_all_thirteen_bundle_fields() {
+async fn batch_sss_compute_xzone_bundle_happy_path_serializes_all_fourteen_bundle_fields() {
     // Fully Phase-2c-populated PendingTransfer (merkle_proof non-empty
     // AND source_committee_size > 0) → XZoneTransferBundle::from_pending
     // returns Some → the wire JSON MUST carry all 13 fields with the
@@ -15201,18 +15205,21 @@ async fn batch_sss_compute_xzone_bundle_happy_path_serializes_all_thirteen_bundl
         "source_committee_hash",
         "source_committee_size",
         "source_seal_signers",
+        "source_seal_wire_version",
     ] {
         assert!(
             obj.contains_key(key),
             "bundle MUST contain key '{key}' — a deserializer on the \
-                 destination side rejects bundles missing any of the 13 \
-                 finality-proof fields"
+                 destination side rejects bundles missing any of the 14 \
+                 finality-proof fields (source_seal_wire_version is \
+                 serde-defaulted, so PRE-v7 receivers tolerate absence; \
+                 emitters must still ship it)"
         );
     }
     assert_eq!(
         obj.len(),
-        13,
-        "bundle MUST be EXACTLY 13 keys (no leak of stub fields like \
+        14,
+        "bundle MUST be EXACTLY 14 keys (no leak of stub fields like \
              locked_at/expires_at/status/claim_record_id — those live on \
              PendingTransfer, NOT the wire bundle); got {} keys: {:?}",
         obj.len(),

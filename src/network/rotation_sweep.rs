@@ -473,7 +473,14 @@ mod tests {
         m.insert(
             "epoch_merkle_root".into(),
             serde_json::json!(hex::encode(
-                crate::network::sync::MerkleTree::root(member_hashes)
+                // Dispatch-aware like the real producer: this helper's seals
+                // are stamped CURRENT_SIGNING_VERSION by create(), so the fold
+                // must ride the same constant or the parse-time root gate
+                // drops the enumeration the moment the emission version flips.
+                crate::network::sync::MerkleTree::seal_root_for(
+                    crate::wire::CURRENT_SIGNING_VERSION,
+                    member_hashes,
+                )
             )),
         );
         m.insert(

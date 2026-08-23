@@ -7937,6 +7937,35 @@ pub(crate) async fn metrics_body_tiered(
     let super_seal_creation_failures = state.super_seal_creation_failures_total.load(std::sync::atomic::Ordering::Relaxed);
     let super_seal_sign_failures = state.super_seal_creation_sign_failures_total.load(std::sync::atomic::Ordering::Relaxed);
     let super_seal_insert_failures = state.super_seal_creation_insert_failures_total.load(std::sync::atomic::Ordering::Relaxed);
+    // fold_sunset fence observability (v7 §Fence, panel M4): gauge per tree
+    // (1 = armed) + the three counters — the fence's first real fire, and
+    // any replay against it, must be visible off-machine, not log-only.
+    let (fence_seal_active, fence_super_active, fence_refused, fence_quarantined, fence_rejects) = {
+        use crate::network::RwLockRecover;
+        let reg = state.fold_sunset.read_recover();
+        (
+            u8::from(reg.active(crate::network::fold_sunset::FenceTree::Seal).is_some()),
+            u8::from(reg.active(crate::network::fold_sunset::FenceTree::SuperSeal).is_some()),
+            reg.refused_total.load(std::sync::atomic::Ordering::Relaxed),
+            reg.reconciliation_quarantined_total.load(std::sync::atomic::Ordering::Relaxed),
+            reg.verify_reject_total.load(std::sync::atomic::Ordering::Relaxed),
+        )
+    };
+    let body = format!("{body}\
+         # HELP elara_fold_sunset_active fold_sunset fence armed per tree (1 = a signed fence record governs this tree; 0 = inert). Ships 0 until the first genesis-authority fence record ever lands.\n\
+         # TYPE elara_fold_sunset_active gauge\n\
+         elara_fold_sunset_active{{tree=\"seal\"}} {fence_seal_active}\n\
+         elara_fold_sunset_active{{tree=\"super_seal\"}} {fence_super_active}\n\
+         # HELP elara_fold_sunset_refused_total Fence registrations refused by the monotonic rule (a replayed/weaker fence record — visible, never silent).\n\
+         # TYPE elara_fold_sunset_refused_total counter\n\
+         elara_fold_sunset_refused_total {fence_refused}\n\
+         # HELP elara_fold_sunset_reconciliation_quarantined_total Previously-accepted seals flagged by the post-fence reconciliation sweep. Healthy = 0; any growth pages the operator (violating seals are named in the log).\n\
+         # TYPE elara_fold_sunset_reconciliation_quarantined_total counter\n\
+         elara_fold_sunset_reconciliation_quarantined_total {fence_quarantined}\n\
+         # HELP elara_fold_sunset_verify_reject_total Seals rejected at admission by the fence (fold version below the fenced minimum past the boundary). Healthy = 0 while the fleet is upgraded.\n\
+         # TYPE elara_fold_sunset_verify_reject_total counter\n\
+         elara_fold_sunset_verify_reject_total {fence_rejects}\n\
+    ");
     let body = format!("{body}\
          # HELP elara_super_seals_minted_total Cumulative super-seals minted by this node. Bumped from `ingest::process_super_seal` only when `register_super_seal` returns true (end_epoch advances the per-zone latest, not a duplicate replay). Compare its rate against `elara_super_seal_max_end_epoch` advance to detect a stalled producer pipeline.\n\
          # TYPE elara_super_seals_minted_total counter\n\

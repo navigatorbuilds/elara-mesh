@@ -106,7 +106,7 @@ fn build_state(n: usize, sealed_frac: f64, expired_frac: f64) -> CrossZoneState 
             // proof + missing sigs) but abort_transfer / gauges accept it.
             let root = sha3_256(b"bench-root");
             let proof = vec![ProofSibling { hash: [0u8; 32], is_right: true }];
-            state.set_proof(&id, proof, root).unwrap();
+            state.set_proof(&id, proof, root, 6).unwrap();
             state.set_finality_witnesses(&id, vec![], [0u8; 32], 1, 1).unwrap();
         }
     }
@@ -225,7 +225,7 @@ fn bench_xzone_per_op(c: &mut Criterion) {
                         let root = sha3_256(b"bench-root");
                         let proof =
                             vec![ProofSibling { hash: [0u8; 32], is_right: true }];
-                        state.set_proof(&target_id, proof, root).unwrap();
+                        state.set_proof(&target_id, proof, root, 6).unwrap();
                         std::hint::black_box(state);
                     },
                     BatchSize::SmallInput,

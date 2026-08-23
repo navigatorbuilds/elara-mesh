@@ -176,11 +176,14 @@ impl MerkleTree {
     // parameter, so recipe choice can never vary per call site or per
     // level (the Phase 2 hygiene rule).
 
-    /// Interior-node tag for the v2 ZONE-SEAL record tree (F1).
-    pub const SEAL_FOLD_V2_NODE_TAG: &'static [u8] = b"ELARA_SEAL_MERKLE_NODE_V1";
+    /// Interior-node tag for the v2 ZONE-SEAL record tree (F1). Derived from
+    /// the single ungated source in `elara-record::wire` (v7 default-features
+    /// fix: accounting verify paths need these without the node feature).
+    pub const SEAL_FOLD_V2_NODE_TAG: &'static [u8] = crate::wire::SEAL_FOLD_V2_NODE_TAG;
     /// Interior-node tag for the v2 SUPER-SEAL tree (distinct per-tree tag;
     /// its leaves are `sha3(seal_record_hash)`, not raw record hashes).
-    pub const SUPER_SEAL_FOLD_V2_NODE_TAG: &'static [u8] = b"ELARA_SUPER_SEAL_MERKLE_NODE_V1";
+    pub const SUPER_SEAL_FOLD_V2_NODE_TAG: &'static [u8] =
+        crate::wire::SUPER_SEAL_FOLD_V2_NODE_TAG;
 
     /// SHA3-256(tag ‖ left ‖ right) — the one v2 interior combine.
     fn combine_tagged(tag: &[u8], left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
@@ -289,6 +292,71 @@ impl MerkleTree {
     /// caller until the v7 flip.
     pub fn verify_proof_v2_seal(proof: &MerkleProof) -> bool {
         Self::verify_proof_tagged(Self::SEAL_FOLD_V2_NODE_TAG, proof)
+    }
+}
+
+// ─── Per-seal fold dispatch (v7 flag day; MERKLE-FOLD-TAG-BRIEF-V2 R2) ──────
+
+/// First wire version whose seals fold with the tagged v2 recipe. The recipe
+/// is read off each seal's OWN signed `wire_version` — never
+/// `CURRENT_SIGNING_VERSION`, never an epoch table (R2: old binaries must see
+/// tagged seals as cleanly undecodable at the v7 ceiling, and a replayer must
+/// recover the recipe from the seal bytes alone on every boot-recovery pass).
+/// Re-derived from the ungated single source in `elara-record::wire`.
+pub const FOLD_V2_MIN_WIRE_VERSION: u16 = crate::wire::FOLD_V2_MIN_WIRE_VERSION;
+
+impl MerkleTree {
+    /// Zone-seal tree root under the fold recipe of `seal_wire_version`.
+    /// Producers pass the version they stamp (`CURRENT_SIGNING_VERSION`, so
+    /// the named-day emission flip changes the fold with zero further edits);
+    /// verifiers pass the seal's own parsed `wire_version`.
+    #[inline]
+    pub fn seal_root_for(seal_wire_version: u16, hashes: &[[u8; 32]]) -> [u8; 32] {
+        if seal_wire_version >= FOLD_V2_MIN_WIRE_VERSION {
+            Self::root_v2_seal(hashes)
+        } else {
+            Self::root(hashes)
+        }
+    }
+
+    /// Super-seal tree root under the fold recipe of `seal_wire_version`.
+    #[inline]
+    pub fn super_seal_root_for(seal_wire_version: u16, hashes: &[[u8; 32]]) -> [u8; 32] {
+        if seal_wire_version >= FOLD_V2_MIN_WIRE_VERSION {
+            Self::root_v2_super_seal(hashes)
+        } else {
+            Self::root(hashes)
+        }
+    }
+
+    /// Zone-seal inclusion proof under the fold recipe of `seal_wire_version`.
+    #[inline]
+    pub fn seal_proof_for(
+        seal_wire_version: u16,
+        hashes: &[[u8; 32]],
+        leaf: &[u8; 32],
+    ) -> Option<MerkleProof> {
+        if seal_wire_version >= FOLD_V2_MIN_WIRE_VERSION {
+            Self::proof_v2_seal(hashes, leaf)
+        } else {
+            Self::proof(hashes, leaf)
+        }
+    }
+
+    /// Zone-seal inclusion verify under the fold recipe of `seal_wire_version`.
+    /// The proof's own `fold_version` must agree with the seal-derived recipe:
+    /// a v1-built proof (`fold_version` 0/absent or 1) against a v7+ seal — or
+    /// a v2 proof against a pre-v7 seal — is rejected before any walk (the
+    /// MUST-REJECT pairs of the Phase-2 vector family; the walk itself would
+    /// also fail on the recipe mismatch, but rejecting on the declared version
+    /// keeps the failure legible and version-driven, not hash-driven).
+    #[inline]
+    pub fn verify_seal_proof_for(seal_wire_version: u16, proof: &MerkleProof) -> bool {
+        if seal_wire_version >= FOLD_V2_MIN_WIRE_VERSION {
+            proof.fold_version == 2 && Self::verify_proof_v2_seal(proof)
+        } else {
+            proof.fold_version <= 1 && Self::verify_proof(proof)
+        }
     }
 }
 
@@ -1838,6 +1906,49 @@ async fn apply_bootstrap_snapshot_full(
     if let Some(ref gs) = snapshot.genesis_state {
         let mut genesis = state.genesis_state.write_recover();
         *genesis = gs.clone();
+    }
+    // fold_sunset fence (v7 §Fence HOLE-4): a fresh join starts FENCED. The
+    // entries are integrity-bound in the snapshot's signed checksum (verified
+    // above); the monotonic register absorbs stale/duplicate carries, and the
+    // on-chain fold_sunset record re-registers at replay/gossip regardless —
+    // the snapshot only closes the pre-replay fail-open window.
+    if !snapshot.fold_sunset_entries.is_empty() {
+        // Trust symmetry (final verifier N2): ingest registers fences only
+        // from the genesis authority — the snapshot carry must not widen
+        // that to every trusted snapshot signer, or a compromised signer
+        // bricks a joiner durably (monotone + persist compound it).
+        let genesis_signed = snapshot
+            .signer_identity
+            .as_deref()
+            .is_some_and(|s| s == state.config.genesis_authority);
+        if !genesis_signed {
+            tracing::warn!(
+                signer = snapshot.signer_identity.as_deref().unwrap_or("<none>"),
+                entries = snapshot.fold_sunset_entries.len(),
+                "snapshot fold_sunset carry IGNORED — fence carry requires a                  genesis-authority-signed snapshot (emitter-auth symmetry)"
+            );
+            return Ok(());
+        }
+        use crate::network::RwLockRecover;
+        let mut reg = state.fold_sunset.write_recover();
+        for e in &snapshot.fold_sunset_entries {
+            // Bounds sanity (panel H2): refuse structurally-absurd carries
+            // even from a checksum-valid snapshot — known fold versions only.
+            if e.min_fold_version <= 2 {
+                reg.register(e.clone());
+            } else {
+                tracing::warn!(
+                    tree = e.tree.as_str(),
+                    min_fold_version = e.min_fold_version,
+                    "snapshot fold_sunset entry with unknown fold version IGNORED"
+                );
+            }
+        }
+        drop(reg);
+        let st = state.clone();
+        tokio::task::spawn_blocking(move || {
+            super::fold_sunset::persist_registry(&st);
+        });
     }
     if let Some(ref bs) = snapshot.bootstrap_state {
         let mut bootstrap = state.bootstrap_state.write_recover();
@@ -4654,6 +4765,137 @@ mod tests {
                 sup,
                 MerkleTree::root_v2_seal(&l[..n]),
                 "{n}-leaf: per-tree tags must separate the two v2 trees"
+            );
+        }
+    }
+
+    /// M1 closure (Phase 4, corrected per the adversarial seat): a tagged
+    /// MULTI-node root can never equal any of its own raw leaves, so the
+    /// empty-proof tautology (leaf==root) stops being forgeable for every
+    /// multi-record epoch. The single-leaf/empty-proof accept stays
+    /// legitimate forever — pinned by
+    /// `p_d_seal_fold_empty_proof_tautology_is_the_live_m1_shape`.
+    #[test]
+    fn m1_closure_v2_multi_node_root_differs_from_every_leaf() {
+        let l = kat_leaves();
+        for n in 2..=5 {
+            let root = MerkleTree::root_v2_seal(&l[..n]);
+            let sup = MerkleTree::root_v2_super_seal(&l[..n]);
+            for (i, leaf) in l[..n].iter().enumerate() {
+                assert_ne!(&root, leaf, "{n}-leaf v2 seal root == leaf {i} — M1 reopened");
+                assert_ne!(&sup, leaf, "{n}-leaf v2 super root == leaf {i} — M1 reopened");
+            }
+        }
+    }
+
+    /// R2-c rollback-floor tripwire: a WIRE_VERSION_MIN raise past the fold
+    /// flip makes every historical v1-fold seal undecodable, including at
+    /// boot-recovery scans. Fails the build until such a raise is paired
+    /// with an explicit archival/re-verification decision
+    /// (internal design notes).
+    #[test]
+    fn r2c_fold_floor_tripwire_wire_version_min_below_fold_v2() {
+        #[allow(clippy::assertions_on_constants)]
+        {
+            assert!(
+                crate::wire::WIRE_VERSION_MIN < FOLD_V2_MIN_WIRE_VERSION,
+                "WIRE_VERSION_MIN >= FOLD_V2_MIN_WIRE_VERSION: historical v1-fold \
+                 seals become undecodable — pair the raise with an archival decision"
+            );
+        }
+    }
+
+    /// R2-a arch tripwire: the emission constant is read ONLY at the two
+    /// producer fold sites (zone-seal + super-seal create). Verify/replay
+    /// paths dispatch on each seal's OWN wire_version; a new qualified use in
+    /// these files is a dispatch site keyed on the compiled constant, which
+    /// forks replayers from producers (the R2 rationale).
+    #[test]
+    fn r2a_current_signing_version_unread_on_verify_paths() {
+        // Count PRODUCTION code only: everything before the file's test
+        // module. Test fixtures legitimately stamp records with the emission
+        // constant (that is what real producers stamp); the invariant guards
+        // verify/replay PATHS, not fixtures.
+        let count = |s: &str| {
+            s.split("mod tests {")
+                .next()
+                .unwrap_or(s)
+                .matches("wire::CURRENT_SIGNING_VERSION")
+                .count()
+        };
+        assert_eq!(
+            count(include_str!("epoch.rs")),
+            3,
+            "epoch.rs: only the three producer sites (zone-seal fold, super-seal \
+             fold, own-seal dest-committee anchor) may read the emission constant"
+        );
+        assert_eq!(
+            count(include_str!("../accounting/cross_zone.rs")),
+            0,
+            "cross_zone.rs verify paths must not read the emission constant"
+        );
+        assert_eq!(
+            count(include_str!("light.rs")),
+            0,
+            "light.rs must not read the emission constant"
+        );
+        // Panel M5 widening: the files the first version never scanned — a
+        // dispatch site keyed on the compiled constant in ANY of these forks
+        // replayers from producers.
+        assert_eq!(
+            count(include_str!("zone_committee.rs")),
+            0,
+            "zone_committee.rs: committee hashes dispatch on the SEAL's version \
+             (finality_committee_pks parameter), never the compiled constant"
+        );
+        assert_eq!(
+            count(include_str!("ingest.rs")),
+            0,
+            "ingest.rs verify/admission paths must not read the emission constant"
+        );
+        assert_eq!(
+            count(include_str!("pq_transport/router.rs")),
+            0,
+            "router.rs admission paths must not read the emission constant"
+        );
+    }
+
+    /// Panel C1 companion tripwire: the un-dispatched v1 committee builder
+    /// must have ZERO production callers — every live site goes through
+    /// `build_committee_proofs_for(seal_wire_version, ..)`. The bare name
+    /// survives only as the v1 wrapper definition + test fixtures.
+    #[test]
+    fn c1_no_undispatched_committee_builder_in_production() {
+        let prod = include_str!("../accounting/cross_zone.rs")
+            .split("mod tests {")
+            .next()
+            .unwrap()
+            .to_string();
+        // Call-shaped occurrences: exclude the definition line and the _for/
+        // _tagged names (substring-guard via distinct patterns).
+        let calls = prod
+            .matches("build_committee_proofs(")
+            .count()
+            .saturating_sub(prod.matches("pub fn build_committee_proofs(").count());
+        assert_eq!(
+            calls, 0,
+            "un-dispatched build_committee_proofs() called from production \
+             cross_zone.rs — post-flip this fold can never match a v2 anchor \
+             (the C1 abort-witness death class)"
+        );
+        // External callers import it qualified — scan the other production
+        // slices for the qualified form too (final verifier N8).
+        for (name, src) in [
+            ("epoch.rs", include_str!("epoch.rs")),
+            ("ingest.rs", include_str!("ingest.rs")),
+            ("zone_committee.rs", include_str!("zone_committee.rs")),
+            ("router.rs", include_str!("pq_transport/router.rs")),
+        ] {
+            let prod = src.split("mod tests {").next().unwrap_or(src);
+            assert_eq!(
+                prod.matches("::build_committee_proofs(").count(),
+                0,
+                "{name}: qualified un-dispatched build_committee_proofs() in production"
             );
         }
     }

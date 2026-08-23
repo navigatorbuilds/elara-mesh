@@ -193,7 +193,11 @@
     <strong>given the records in this bundle</strong>. It is deliberately
     <strong>not</strong> labelled "authorized": offline it cannot prove the
     records are on-chain or that a revocation wasn't withheld — that is the live
-    node's answer. The named principal is shown
+    node's answer. It also does <strong>not</strong> check the mandate's
+    op/zone/amount <strong>scope</strong> — v0 records scope but defers
+    enforcement, and the verdict says so per-bundle via
+    <code>scope_deferred</code> (try the "Scoped mandate" sample). The named
+    principal is shown
     <strong>only when the verdict attributes to them</strong> (an impostor's act
     exonerates them).
   </p>
@@ -204,6 +208,7 @@
     <button id="m-valid" class="ghost" type="button">Authorized agent</button>
     <button id="m-impostor" class="ghost" type="button">Impostor</button>
     <button id="m-revoked" class="ghost" type="button">After revocation</button>
+    <button id="m-scoped" class="ghost" type="button">Scoped mandate</button>
     <button id="m-tamper" class="ghost" type="button">Tamper the act</button>
     <button id="mclear" class="ghost" type="button">Clear</button>
   </div>
@@ -460,6 +465,11 @@
     if (res.principal) addFact("principal", short(res.principal));
     if (res.act_timestamp_ms) addFact("act signed at", new Date(res.act_timestamp_ms).toISOString() + "  (self-asserted; not anchored offline)");
     if (res.scope_note) addFact("v0 scope", res.scope_note);
+    // Per-bundle fact (matches the node's /mandate/status field): true = this
+    // mandate's recorded scope was NOT checked; false = wildcard, nothing to
+    // enforce (NOT evidence of a check); absent/null = no mandate resolved.
+    if (res.scope_deferred === true)  addFact("scope_deferred", "true — this mandate carries op/zone/amount scope, but v0 did NOT enforce it (who / when / revocation only)");
+    if (res.scope_deferred === false) addFact("scope_deferred", "false — the mandate's scope is wildcard; nothing to enforce (not evidence scope was checked)");
 
     const lin = $("mlineage"); lin.innerHTML = "";
     if (res.lineage && res.lineage.length) {
@@ -512,6 +522,7 @@
   $("m-valid").addEventListener("click", () => loadScenario("valid"));
   $("m-impostor").addEventListener("click", () => loadScenario("impostor"));
   $("m-revoked").addEventListener("click", () => loadScenario("revoked"));
+  $("m-scoped").addEventListener("click", () => loadScenario("scoped"));
 
   mverifyBtn.addEventListener("click", () => {
     try { mrender(evaluate_mandate_bundle($("minput").value)); }

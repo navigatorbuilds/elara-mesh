@@ -39,7 +39,17 @@ pub const MAGIC: &[u8; 4] = b"ELRA";
 /// Raising this to 6 is the DECODE-CAPABILITY rollout only — v≤5 bytes are
 /// untouched (pinned by `tests/kat_frozen_preimages.rs`), and nothing emits v6
 /// until `CURRENT_SIGNING_VERSION` is raised on the coordinated flag day.
-pub const WIRE_VERSION: u16 = 6;
+/// v7 (2026-08-23, Merkle fold-tag flag-day vehicle — brief
+/// `MERKLE-FOLD-TAG-BRIEF-V2-2026-08-22`): no record-preimage change at all —
+/// v7 wire bytes are shape-identical to v6. The version is the PER-SEAL FOLD
+/// DISPATCH SIGNAL: seals carried by v7+ records fold their Merkle trees with
+/// the tagged v2 recipe (`ELARA_SEAL_MERKLE_NODE_V1` / super-seal /
+/// committee interior tags); v≤6 seals fold bare v1 forever. Raising this to
+/// 7 is again decode-capability only — nothing emits v7 until
+/// `CURRENT_SIGNING_VERSION` is raised on its own named day, and old (v6-
+/// ceiling) binaries reject v7 seals cleanly at decode (fail-closed-by-
+/// rejection — the R2 dispatch rationale).
+pub const WIRE_VERSION: u16 = 7;
 /// The version stamped on FRESH records by `create()`/`create_from_hash()` —
 /// the emission version, split from the [`WIRE_VERSION`] decode ceiling so the
 /// fleet can become v6-decode-capable everywhere before any node emits v6
@@ -48,14 +58,22 @@ pub const WIRE_VERSION: u16 = 6;
 /// AUDIT-FIRST pass; it must never move in the same commit as [`WIRE_VERSION`].
 /// Invariant: `CURRENT_SIGNING_VERSION <= WIRE_VERSION` (pinned in tests).
 ///
-/// **FLIPPED 5 → 6 on 2026-08-19 — THE FLAG DAY** (named by the operator:
-/// "flip it, name the day, do it"; execution per
-/// internal design notes, all preconditions
-/// green: crates 0.2.0 registry-verified, mirror v6-toolset live, seed on the
-/// full Phase-B binary, census 37,231/37,231 v5). Fresh records now emit the
-/// v6 tagged preimage (`ELARA_RECORD_V1` ‖ network binding leads
-/// `signable_bytes()`) and carry `network_id` on the wire.
-pub const CURRENT_SIGNING_VERSION: u16 = 6;
+/// **FLIPPED 5 → 6 on 2026-08-19** (named by the operator: "flip it, name the
+/// day, do it"; execution per internal design notes). Fresh
+/// records emit the v6 tagged preimage and carry `network_id` on the wire.
+///
+/// **FLIPPED 6 → 7 on 2026-08-23 — THE MERKLE FOLD FLAG DAY** (named by the
+/// operator: "flip it"; execution per
+/// internal design notes, all preconditions green: active
+/// fleet = the seed alone on the merged 3a3dcdd9 binary, 4-seat Phase-4
+/// panel + final adversarial verify both clean, elara-verify 0.3.0
+/// registry-live). v7 changes NO record-preimage bytes — it is the per-seal
+/// fold-recipe signal: seals stamped v7 fold their Merkle trees with the
+/// tagged v2 recipe (seal / super-seal / committee interior tags); every
+/// pre-flip seal folds bare v1 forever. Producer folds, committee hashes,
+/// proof builders, and the parse gate all dispatch off this constant or the
+/// seal's own signed version — this edit is the entire flip.
+pub const CURRENT_SIGNING_VERSION: u16 = 7;
 /// Minimum wire version we can read (backward compat). Raised 1→4 on
 /// 2026-08-18 per the T63 flag-day fusion verdict (Phase B): the v1–v3
 /// decode path carried the T80 codec asymmetry (from_bytes read legacy JSON
@@ -67,6 +85,16 @@ pub const CURRENT_SIGNING_VERSION: u16 = 6;
 /// later AUDIT-FIRST pass gated on an offline store version histogram
 /// (T65 D4 Step 3 proper); never bundle it with a decode-ceiling bump.
 pub const WIRE_VERSION_MIN: u16 = 4;
+/// First wire version whose seals fold Merkle trees with the tagged v2
+/// recipe (Merkle fold-tag flag day, MERKLE-FOLD-TAG-BRIEF-V2-2026-08-22).
+/// Single source — node-side `network::sync` re-derives from here so the
+/// ungated `accounting` verify paths and the gated consensus paths can never
+/// disagree. Dispatch is per-seal on the seal's OWN signed version.
+pub const FOLD_V2_MIN_WIRE_VERSION: u16 = 7;
+/// v2 interior-node tag, zone-seal record tree (F1).
+pub const SEAL_FOLD_V2_NODE_TAG: &[u8] = b"ELARA_SEAL_MERKLE_NODE_V1";
+/// v2 interior-node tag, super-seal tree (distinct by decision, 2026-08-22).
+pub const SUPER_SEAL_FOLD_V2_NODE_TAG: &[u8] = b"ELARA_SUPER_SEAL_MERKLE_NODE_V1";
 /// Maximum accepted `network_id` length in the v6 wire field (bytes). Operator
 /// config is short ("testnet", "elara-mainnet-1"); the cap bounds decode-side
 /// allocation and keeps the signable prefix small. Fail-closed at decode.
@@ -588,23 +616,25 @@ mod tests {
         assert_eq!(MAGIC, b"ELRA");
         assert_eq!(MAGIC.len(), 4);
 
-        // WIRE_VERSION literal — v6 DECODE CEILING (T63 domain-separation +
-        // T65 network binding, verdict 2026-08-18). Deliberately raised while
-        // CURRENT_SIGNING_VERSION stays 5: decode-capable everywhere before
-        // emitting anywhere. The ARCH-4 zombie hazard the old comment guarded
-        // (header version ahead of the signing formula) is now structurally
-        // closed by the emission split — fresh records stamp
-        // CURRENT_SIGNING_VERSION, and signable_bytes()/to_bytes() both branch
-        // on self.version, so a bumped ceiling re-writes NOTHING.
-        assert_eq!(WIRE_VERSION, 6);
+        // WIRE_VERSION literal — v7 DECODE CEILING (Merkle fold-tag dispatch
+        // signal, MERKLE-FOLD-TAG-BRIEF-V2-2026-08-22; CONSCIOUS EDIT
+        // 2026-08-23). Same discipline as the v6 raise (T63/T65, 2026-08-18):
+        // ceiling first while CURRENT_SIGNING_VERSION stays 6 — decode-capable
+        // everywhere before emitting anywhere. v7 changes NO byte shapes; it
+        // is the per-seal fold-recipe signal (>=7 folds tagged v2). The
+        // emission split still closes the ARCH-4 zombie hazard: fresh records
+        // stamp CURRENT_SIGNING_VERSION, and signable_bytes()/to_bytes() both
+        // branch on self.version, so a bumped ceiling re-writes NOTHING.
+        assert_eq!(WIRE_VERSION, 7);
 
         // CURRENT_SIGNING_VERSION — the emission version. CONSCIOUS EDIT
-        // 2026-08-19: 5 → 6 — THE FLAG DAY FIRED (operator-named; checklist
-        // internal design notes, every precondition verified).
-        // The designed friction this assert provides now guards the NEXT
-        // emission move (v7, someday): it too must arrive with its own
-        // AUDIT-FIRST pass, fleet decode capability, and a published verifier.
-        assert_eq!(CURRENT_SIGNING_VERSION, 6);
+        // 2026-08-23: 6 → 7 — THE MERKLE FOLD FLAG DAY FIRED (operator-named
+        // "flip it"; runbook internal design notes, every precondition verified:
+        // Phase-4 panel + final verify clean, merged binary deployed on the
+        // seed, verifier 0.3.0 published). The friction guards the NEXT
+        // emission move (v8, someday): its own AUDIT-FIRST pass, fleet decode
+        // capability, and a published verifier — same law, every time.
+        assert_eq!(CURRENT_SIGNING_VERSION, 7);
         // Deliberate constant-on-constant assertion: this is a tripwire PIN,
         // not a runtime check — it must fail the TEST (with this message) when
         // someone moves one constant without the other, which is exactly what

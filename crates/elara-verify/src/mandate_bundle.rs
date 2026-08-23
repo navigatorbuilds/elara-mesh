@@ -98,6 +98,7 @@ pub struct MandateBundle {
 
 /// One verified leaf→root hop, surfaced ONLY on a `Valid` verdict (anti-libel).
 #[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
 pub struct LineageHop {
     pub mandate_id: String,
     pub principal: String,
@@ -106,6 +107,7 @@ pub struct LineageHop {
 
 /// One line of the transparent audit trail (what the offline check proved).
 #[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
 pub struct BundleCheck {
     pub name: String,
     /// `"pass"` | `"fail"` | `"info"`.
@@ -118,6 +120,7 @@ pub struct BundleCheck {
 /// machine boolean and is `true` ONLY for `Valid` — and ONLY *given this
 /// bundle* (see [`Self::soundness_caveats`]).
 #[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
 pub struct BundleVerdict {
     pub verdict: &'static str,
     pub glyph: &'static str,
@@ -146,10 +149,25 @@ pub struct BundleVerdict {
     /// Verified leaf→root chain — empty unless `Valid`.
     pub lineage: Vec<LineageHop>,
     /// What v0 enforces vs. defers (who+when+revocation enforced; op/zone/amount
-    /// recorded, not checked).
+    /// recorded, not checked). Empty on input-error `FAILED` responses —
+    /// nothing was judged, so no scope statement applies.
     pub scope_note: String,
+    /// Per-bundle fact: does the RESOLVED leaf mandate carry a materially
+    /// restricted (non-wildcard) op/zone/amount scope that v0 recorded but did
+    /// NOT check? Same predicate and polarity as the node's `/mandate/status`
+    /// field of the same name (`!scope.is_wildcard()`). `None` whenever no leaf
+    /// mandate was resolved (input errors, `NoChain`) — never a silent `false`
+    /// where nothing was examined. `Some(false)` means the scope is wildcard —
+    /// nothing to enforce; it is NOT evidence that scope was checked.
+    /// Lifecycle: offline bundles carry no epoch, so when the S3 enforcement
+    /// flip ships (v1 evaluator), this freezes at `Some(false)` for enforced
+    /// verdicts — the field is never removed or renamed.
+    pub scope_deferred: Option<bool>,
     /// The non-dismissible honest-scope caveats — what an offline bundle
-    /// structurally CANNOT prove. Always present.
+    /// structurally CANNOT prove. Present on every JUDGED verdict (CONSISTENT
+    /// and NOT AUTHORIZED); empty on input-error `FAILED` responses, where
+    /// nothing was verified and caveats about a green verdict are a
+    /// non-sequitur.
     pub soundness_caveats: Vec<String>,
     /// Per-step audit trail.
     pub checks: Vec<BundleCheck>,
@@ -253,8 +271,13 @@ fn failed(reason: impl Into<String>, checks: Vec<BundleCheck>) -> BundleVerdict 
         act_timestamp_ms: 0,
         explanation: String::new(),
         lineage: Vec::new(),
-        scope_note: scope_note(),
-        soundness_caveats: soundness_caveats(),
+        // Input errors judge NOTHING — no scope statement, no caveats about
+        // what a CONSISTENT verdict proves (R4: a response that verified
+        // nothing must not carry them; they remain non-dismissible on every
+        // judged path).
+        scope_note: String::new(),
+        scope_deferred: None,
+        soundness_caveats: Vec::new(),
         checks,
         reason: reason.into(),
     }
@@ -419,10 +442,26 @@ pub fn evaluate_mandate_bundle(bundle_json: &str) -> BundleVerdict {
             String::new(),
             None,
             Vec::new(),
+            None,
             checks,
         );
     };
     let network = leaf.network_id.clone();
+
+    // Per-bundle scope fact (same predicate as the node's /mandate/status):
+    // recorded restriction that v0 did NOT check, vs wildcard = nothing to
+    // enforce. Both branches worded — `false` must never read as "checked".
+    let scope_deferred = !leaf.scope.is_wildcard();
+    checks.push(BundleCheck {
+        name: "scope".to_string(),
+        status: "info",
+        detail: if scope_deferred {
+            "this mandate carries op/zone/amount scope, but v0 does NOT enforce scope — only who / when / revocation were checked (scope_deferred)"
+        } else {
+            "the mandate's scope is wildcard — nothing to enforce; this is NOT evidence that scope was checked"
+        }
+        .to_string(),
+    });
 
     // 8. Index revocations, keyed by (mandate_id, sha3(carrier_pk)); drop
     //    cross-network. A non-principal revoker lands under a key the evaluator
@@ -520,12 +559,21 @@ pub fn evaluate_mandate_bundle(bundle_json: &str) -> BundleVerdict {
             explanation: explain(flag),
             lineage: lineage_hops,
             scope_note: scope_note(),
+            scope_deferred: Some(scope_deferred),
             soundness_caveats: soundness_caveats(),
             checks,
             reason: "ok".to_string(),
         }
     } else {
-        not_authorized(flag, &bundle, network, principal, lineage_hops, checks)
+        not_authorized(
+            flag,
+            &bundle,
+            network,
+            principal,
+            lineage_hops,
+            Some(scope_deferred),
+            checks,
+        )
     }
 }
 
@@ -539,6 +587,7 @@ fn not_authorized(
     network: String,
     principal: Option<String>,
     lineage: Vec<LineageHop>,
+    scope_deferred: Option<bool>,
     checks: Vec<BundleCheck>,
 ) -> BundleVerdict {
     let signer = sha3_256_hex(&bundle.act.creator_public_key);
@@ -556,6 +605,7 @@ fn not_authorized(
         explanation: explain(flag),
         lineage, // empty for every non-Valid flag
         scope_note: scope_note(),
+        scope_deferred, // None on NoChain (no leaf resolved), Some(…) otherwise
         soundness_caveats: soundness_caveats(),
         checks,
         reason: "ok".to_string(),

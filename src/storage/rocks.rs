@@ -8432,9 +8432,14 @@ mod tests {
 
         let (hist, malformed) = engine.wire_version_histogram().unwrap();
         let malformed = malformed.len() as u64;
-        // Flag day 2026-08-19: create() emits v6 — the two real records land
-        // in the v6 bucket now (the census counts whatever is truly stored).
-        assert_eq!(hist.get(&6).copied().unwrap_or(0), 2, "two real v6 records");
+        // CONSCIOUS EDIT per flag day (v6 2026-08-19, v7 2026-08-23): the
+        // census counts whatever create() truly stamps — key on the emission
+        // constant so the next flip cannot silently skew this pin.
+        assert_eq!(
+            hist.get(&crate::wire::CURRENT_SIGNING_VERSION).copied().unwrap_or(0),
+            2,
+            "two real current-version records"
+        );
         assert_eq!(hist.get(&1).copied().unwrap_or(0), 1, "sub-MIN v1 row MUST be counted");
         assert_eq!(hist.get(&9).copied().unwrap_or(0), 1, "above-ceiling v9 row MUST be counted");
         assert_eq!(malformed, 2, "bad-magic + short stub");

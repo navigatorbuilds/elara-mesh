@@ -214,6 +214,20 @@ fn compute_checksum(snapshot: &NodeSnapshot) -> String {
         let h = crate::network::rotation_finality::rotation_chain_root(&snapshot.rotations);
         data.push_str(&format!("|rotation_chain_root={h}"));
     }
+    // v7 §Fence HOLE-4: bind fence entries by content, conditionally (empty =
+    // legacy checksum reproduces). Deterministic: entries export in BTreeMap
+    // (per-tree) order from the registry.
+    if !snapshot.fold_sunset_entries.is_empty() {
+        for e in &snapshot.fold_sunset_entries {
+            data.push_str(&format!(
+                "|fold_sunset={}:{}:{}:{}",
+                e.tree.as_str(),
+                e.min_fold_version,
+                e.boundary_epoch,
+                e.record_id
+            ));
+        }
+    }
     // SNAP-1 (2026-07-03 audit): genesis_state and bootstrap_state are installed
     // wholesale on bootstrap (`apply_bootstrap_snapshot_full` in sync.rs) but were
     // NOT bound into the checksum, so a trusted-but-tampered/buggy snapshot could
@@ -356,6 +370,14 @@ pub struct NodeSnapshot {
     /// slice; this lands the wire field + the integrity bind + its tamper test).
     #[serde(default)]
     pub rotations: Vec<crate::network::rotation_finality::RotationChainEntry>,
+    /// fold_sunset fence entries (v7 §Fence HOLE-4): a fresh join from
+    /// snapshot starts FENCED, not fail-open. Serde-defaulted (legacy-safe);
+    /// bound into the signed checksum by content when non-empty. A snapshot
+    /// from a pre-fence producer leaves the joiner pre-fence until
+    /// gossip/replay delivers the record — same exposure as today, never
+    /// worse. Entries re-register through the monotonic rule on apply.
+    #[serde(default)]
+    pub fold_sunset_entries: Vec<crate::network::fold_sunset::FoldSunsetEntry>,
     /// Signing-domain selector (T63). `None` = legacy bare-checksum signatures
     /// (all current snapshots; omitted from JSON so the wire shape is
     /// unchanged). `Some(1)` = signatures cover `DOMAIN_TAG_SNAPSHOT_V1 ‖
@@ -402,6 +424,7 @@ impl NodeSnapshot {
             revocations: BTreeMap::new(),
             emergency: None,
             rotations: Vec::new(),
+            fold_sunset_entries: Vec::new(),
             sig_domain: Some(1), // T63 FLAG DAY 2026-08-19: domain-selected sigs live
         }
     }
@@ -445,6 +468,7 @@ pub fn save_snapshot_full(
         finalized: finalized.clone(),
         epoch: Some(epoch.to_snapshot()),
         checksum: None,
+        fold_sunset_entries: Vec::new(),
         genesis_state: genesis_state.cloned(),
         bootstrap_state: bootstrap_state.cloned(),
         merkle_root: None,
@@ -525,6 +549,9 @@ pub struct SignedSnapshotInputs<'a> {
     /// EmergencyHalt state to carry (B1). `None` (or default) leaves the checksum
     /// unchanged. The producer reads `state.emergency_snapshot_state()`.
     pub emergency: Option<crate::emergency::EmergencyState>,
+    /// fold_sunset fence entries to carry (v7 §Fence HOLE-4). Empty leaves
+    /// the checksum unchanged (legacy-identical).
+    pub fold_sunset_entries: Vec<crate::network::fold_sunset::FoldSunsetEntry>,
 }
 
 /// Create a signed snapshot for serving to other nodes (bootstrap sync).
@@ -549,6 +576,7 @@ pub fn create_signed_snapshot(
         mandates,
         revocations,
         emergency,
+        fold_sunset_entries: inputs_fold_sunset_entries,
     } = inputs;
     let now = crate::record::now_timestamp();
 
@@ -576,6 +604,7 @@ pub fn create_signed_snapshot(
         revocations,
         emergency,
         rotations: Vec::new(),
+        fold_sunset_entries: inputs_fold_sunset_entries,
         sig_domain: Some(1), // T63 FLAG DAY 2026-08-19: domain-selected sigs live
     };
 
@@ -1019,6 +1048,7 @@ pub fn load_snapshot(path: impl AsRef<Path>) -> Result<Option<NodeSnapshot>> {
         finalized: HashSet::new(),
         epoch: None,
         checksum: None,
+        fold_sunset_entries: Vec::new(),
         genesis_state: None,
         bootstrap_state: None,
         merkle_root: None,
@@ -2393,6 +2423,7 @@ mod tests {
             mandates: BTreeMap::new(),
             revocations: BTreeMap::new(),
             emergency: None,
+            fold_sunset_entries: Vec::new(),
         }).unwrap();
         (snap, identity)
     }
@@ -2430,6 +2461,7 @@ mod tests {
             mandates: BTreeMap::new(),
             revocations: BTreeMap::new(),
             emergency: None,
+            fold_sunset_entries: Vec::new(),
         })
         .unwrap();
 
@@ -2537,6 +2569,7 @@ mod tests {
             mandates: BTreeMap::new(),
             revocations: BTreeMap::new(),
             emergency: None,
+            fold_sunset_entries: Vec::new(),
         }).unwrap();
         assert_eq!(snap.account_state_root, Some(hex::encode(producer_root)));
         // Pristine snapshot verifies.

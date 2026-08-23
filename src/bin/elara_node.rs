@@ -2826,6 +2826,10 @@ async fn run() -> Result<()> {
     // Load all records ONCE and pass the slice to every subsystem that
     // couldn't be restored from a snapshot. This avoids N full table scans.
 
+    // fold_sunset fence: durable registry load FIRST — independent of the
+    // rebuild gate and the rebuild cap (panel H1: a clean restart must not
+    // disarm the fence).
+    elara_runtime::network::fold_sunset::load_persisted_registry(&node_state);
     let any_need_rebuild = need_epoch || need_trust || need_key_registry
         || need_sunset || need_delegations || need_zone_state
         || need_disputes || need_reputation || need_challenges
@@ -2914,6 +2918,8 @@ async fn run() -> Result<()> {
                 .store(rebuild_cap > 0, std::sync::atomic::Ordering::Relaxed);
 
             let mut total_streamed: usize = 0;
+            let mut boot_fences: Vec<elara_runtime::network::fold_sunset::FoldSunsetEntry> =
+                Vec::new();
             state2.rocks.for_each_record_ordered_bounded(rebuild_cap, |rec| {
                 total_streamed += 1;
 
@@ -2953,6 +2959,21 @@ async fn run() -> Result<()> {
                 // Sunset: register sunset records
                 if let Some(ref mut ss) = sunset_state {
                     ss.process_record(rec, &genesis_auth);
+                }
+
+                // fold_sunset fence (v7 §Fence, HOLE-2 boot half): COLLECT
+                // during the single pass; register + reconcile AFTER it, so
+                // a fence-violating seal on disk is re-judged with the fence
+                // fully armed regardless of record order. Cheap: metadata
+                // key probe first, genesis-authority-gated like sunset.
+                if let Some(entry) =
+                    elara_runtime::network::fold_sunset::extract_fold_sunset(rec)
+                {
+                    if elara_runtime::accounting::types::creator_identity_hash(rec)
+                        == genesis_auth
+                    {
+                        boot_fences.push(entry);
+                    }
                 }
 
                 // F2 PSR-2: skip delegation/dispute/challenge-op replay for a tombstoned
@@ -3006,6 +3027,28 @@ async fn run() -> Result<()> {
                     }
             })?;
             info!("streamed {} records for subsystem rebuild", total_streamed);
+
+            // fold_sunset two-phase boot (HOLE-2): arm every collected fence
+            // (monotonic register absorbs replays/duplicates), then reconcile
+            // once per ARMED tree with the final boundary — the sweep is a
+            // pure function of (fence, store), so post-pass order is exact.
+            if !boot_fences.is_empty() {
+                let armed: Vec<elara_runtime::network::fold_sunset::FoldSunsetEntry> = {
+                    use elara_runtime::network::RwLockRecover;
+                    let mut reg = state2.fold_sunset.write_recover();
+                    for entry in boot_fences.drain(..) {
+                        reg.register(entry);
+                    }
+                    reg.entries().cloned().collect()
+                };
+                elara_runtime::network::fold_sunset::persist_registry(&state2);
+                for entry in armed {
+                    let st = state2.clone();
+                    tokio::task::spawn_blocking(move || {
+                        elara_runtime::network::fold_sunset::reconcile_after_fence(&st, &entry);
+                    });
+                }
+            }
 
             // Subsystem states were populated by the streaming loop above.
             // T61: install the rebuilt continuity state before the tuple returns.
@@ -4986,6 +5029,15 @@ async fn archive_snapshot_loop(
                 mandates: state_for_merkle.rocks.collect_mandates(),
                 revocations: state_for_merkle.rocks.collect_revocations(),
                 emergency: state_for_merkle.emergency_snapshot_carry(),
+                fold_sunset_entries: {
+                    use elara_runtime::network::RwLockRecover;
+                    state_for_merkle
+                        .fold_sunset
+                        .read_recover()
+                        .entries()
+                        .cloned()
+                        .collect()
+                },
             })?;
 
             // Pre-prune to keep_n - 1 BEFORE save_epoch_snapshot so the dir

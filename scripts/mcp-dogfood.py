@@ -141,7 +141,7 @@ if isinstance(rid, str) and em.get("ok") is True:
     # absence passes; an unwrapped appearance is the only failure. The
     # wrapping itself is pinned by the crate's unit tests.
     KEYS = {"tool", "action", "agent_id", "session_id", "explanation",
-            "reason", "scope_note", "ops", "note"}
+            "reason", "ops", "note"}
     def bare(v, path="$"):
         out = []
         if isinstance(v, dict):

@@ -1,6 +1,6 @@
 [package]
 name = "elara-verify"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 # Extraction COMPLETE (Steps 1–4, 2026-07-10; see
 # docs/VERIFIER-EXTRACTION-AUDIT-2026-07-07.md) — the CLI bin, wasm exports,

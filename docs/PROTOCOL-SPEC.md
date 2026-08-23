@@ -577,7 +577,16 @@ FIPS 204 verifier. The pure-stdlib `verify_conformance.py` size-pins those four;
 (the Open Quantum Safe reference C library — a second FIPS 204 implementation,
 independent of the Rust generator), accepting each valid signature and rejecting
 each must-reject twin, and skipping transparently when no PQ library is present.
-Regenerate with `cargo run --example gen_conformance_vectors`. The prose vectors
+Regenerate with `cargo run --example gen_conformance_vectors`.
+
+A **separate, verdict-level vector family** covers the offline mandate-bundle
+judge: `examples/verify/mandate-bundle-{valid,post-revocation,agent-mismatch,
+act-tampered,scope-deferred}.json` — five frozen, real-chain-harvested signed
+bundles whose expected verdicts (including the `scope_deferred` positive/negative
+pair) are pinned by
+`mandate_bundle_tests::committed_mandate_bundle_vectors_pin_their_verdicts`.
+These are not byte-primitive KATs (that is this appendix's A.0 set); they pin the
+`evaluate_mandate_bundle` verdict surface end-to-end. The prose vectors
 A.1–A.8 below are the same primitives in human-readable form.
 
 **A.1 SHA3-256 KAT**
@@ -626,6 +635,14 @@ NOT reconstruct the sealed root, certifying *fail-closed* rejection of forged
 cross-zone inclusion evidence cross-language. An implementer who (wrongly) reuses
 the account-SMT's tagged recipe here gets a different root: that is the mistake
 this vector exists to catch.
+(Scope note, wire v7: "no domain tags" is a property of *this* tree — the zone
+record-membership tree — and stays true by design; its vectors are frozen.
+From wire v7 the *epoch-seal* record tree, the super-seal tree, and the
+committee tree fold with interior domain tags (`ELARA_SEAL_MERKLE_NODE_V1`,
+`ELARA_SUPER_SEAL_MERKLE_NODE_V1`, `ELARA/COMMITTEE_NODE/v1`), dispatched
+per-seal by the seal record's own signed wire version — pre-v7 seals fold
+bare v1 forever. See the `seal-merkle-fold-v2` vector family. Do not read
+this section as "Elara inclusion proofs carry no tags in general.")
 
 **A.5 Identity derivation** — `identity_hash = SHA3-256(creator_public_key)`;
 take the `creator_public_key` from A.3, hash it, and compare to the record's

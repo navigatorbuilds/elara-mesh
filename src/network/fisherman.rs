@@ -1368,7 +1368,7 @@ mod tests {
             account_smt_root: None,
             drand_pulse: None,
             xzone_dest_finality_committees: None,
-            wire_version: crate::wire::WIRE_VERSION,
+            wire_version: crate::wire::CURRENT_SIGNING_VERSION,
             sparse_merkle_root: None,
         };
         epoch_state.register_seal(&mk_seal(1, 500.0, 0x11), "seal_a", [0u8; 32]);
@@ -1417,7 +1417,7 @@ mod tests {
                 account_smt_root: None,
                 drand_pulse: None,
                 xzone_dest_finality_committees: None,
-                wire_version: crate::wire::WIRE_VERSION,
+                wire_version: crate::wire::CURRENT_SIGNING_VERSION,
                 sparse_merkle_root: None,
             };
             epoch_state.register_seal(&seal, &format!("seal_{i}"), [0u8; 32]);
@@ -1464,7 +1464,7 @@ mod tests {
             account_smt_root: None,
             drand_pulse: None,
             xzone_dest_finality_committees: None,
-            wire_version: crate::wire::WIRE_VERSION,
+            wire_version: crate::wire::CURRENT_SIGNING_VERSION,
             sparse_merkle_root: None,
         };
         epoch_state.register_seal(&seal, "seal_a", [0u8; 32]);

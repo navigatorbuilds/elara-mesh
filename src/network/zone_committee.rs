@@ -466,6 +466,22 @@ pub fn committee_hash_from_pks(pks: &[Vec<u8>]) -> [u8; 32] {
     leaves[0]
 }
 
+/// Version-dispatched committee hash (F2, v7 flag day): v7+ folds with the
+/// `ELARA/COMMITTEE_NODE/v1` interior tag; below stays the bare v1 fold of
+/// [`committee_hash_from_pks`]. The version signal is the wire version of
+/// the SEAL that will embed this hash — producers pass
+/// `CURRENT_SIGNING_VERSION`. Flag-day boundary (filed for the Phase-4
+/// panel): a committee hash computed pre-flip must never be embedded by a
+/// post-flip seal; the runbook orders the flip at an epoch boundary so
+/// every v7 seal cites a freshly-built v2 hash.
+pub fn committee_hash_from_pks_for(seal_wire_version: u16, pks: &[Vec<u8>]) -> [u8; 32] {
+    if seal_wire_version >= crate::network::sync::FOLD_V2_MIN_WIRE_VERSION {
+        crate::accounting::cross_zone::committee_root_v2_interior(pks)
+    } else {
+        committee_hash_from_pks(pks)
+    }
+}
+
 /// Build a `zone_path → committee` map for every active zone in one
 /// sweep. `k` is the committee size target; see
 /// [`DEFAULT_COMMITTEE_SIZE`].
@@ -687,6 +703,10 @@ pub async fn finality_committee_pks(
     zone_path: &str,
     epoch: u64,
     k: usize,
+    // Fold-recipe signal for the committee hash (Phase-4 panel 2a): the
+    // SEAL's own wire version wherever a seal is in hand; producers pass
+    // CURRENT_SIGNING_VERSION for their own about-to-be-created seal.
+    seal_wire_version: u16,
 ) -> (Vec<Vec<u8>>, [u8; 32], u32) {
     use super::RwLockRecover;
 
@@ -755,7 +775,9 @@ pub async fn finality_committee_pks(
     pks.sort_by_cached_key(|pk| crate::accounting::cross_zone::committee_leaf_hash(pk));
     pks.dedup();
 
-    let hash = committee_hash_from_pks(&pks);
+    // Dispatch-aware: rides the emission version so the flag-day flip moves
+    // the committee fold in lockstep with the seal fold (F2 rides F1's day).
+    let hash = committee_hash_from_pks_for(seal_wire_version, &pks);
     let size = pks.len() as u32;
     (pks, hash, size)
 }
@@ -2297,7 +2319,7 @@ mod tests {
 
         // First call: cold miss.
         let (pks1, hash1, size1) =
-            finality_committee_pks(&state, "medical/eu", 7, 5).await;
+            finality_committee_pks(&state, "medical/eu", 7, 5, 6).await;
 
         let hits_mid = state
             .zone_committee_resolver
@@ -2320,7 +2342,7 @@ mod tests {
 
         // Second call: same `(zone, epoch, k, candidates)` → hit.
         let (pks2, hash2, size2) =
-            finality_committee_pks(&state, "medical/eu", 7, 5).await;
+            finality_committee_pks(&state, "medical/eu", 7, 5, 6).await;
 
         let hits_after = state
             .zone_committee_resolver
@@ -2398,10 +2420,10 @@ mod tests {
             .load(Ordering::Relaxed);
 
         // 4 distinct cache keys: 2 zones × 2 epochs.
-        let _ = finality_committee_pks(&state, "medical/eu", 1, 5).await;
-        let _ = finality_committee_pks(&state, "medical/us", 1, 5).await;
-        let _ = finality_committee_pks(&state, "medical/eu", 2, 5).await;
-        let _ = finality_committee_pks(&state, "medical/us", 2, 5).await;
+        let _ = finality_committee_pks(&state, "medical/eu", 1, 5, 6).await;
+        let _ = finality_committee_pks(&state, "medical/us", 1, 5, 6).await;
+        let _ = finality_committee_pks(&state, "medical/eu", 2, 5, 6).await;
+        let _ = finality_committee_pks(&state, "medical/us", 2, 5, 6).await;
 
         let misses_after = state
             .zone_committee_resolver

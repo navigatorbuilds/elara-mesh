@@ -187,6 +187,8 @@
         (a.args_hash ? 'args_hash (SHA3-256 of the commit sha): ' + esc(a.args_hash) + '<br>' : '') +
         (a.agent_id ? 'agent_id: ' + esc(a.agent_id) + '<br>' : '') +
         (a.mandate_ref ? 'mandate: ' + esc(shortHex(a.mandate_ref)) + '<br>' : '') +
+        (a.scope_deferred === true ? 'scope_deferred: true — this mandate’s op/zone/amount scope was recorded, NOT enforced (v0 checks who / when / revocation only)<br>' : '') +
+        (a.scope_deferred === false ? 'scope_deferred: false — wildcard scope, nothing to enforce (not evidence scope was checked)<br>' : '') +
         (a.browser_verify ? 'in-browser: <a href="verify/?act=' + encodeURIComponent(a.record_id) + '">verify/?act=' + esc(shortHex(a.record_id)) + '</a> (same receipt+seal, checked on your machine)<br>' +
           'offline (CLI, no server after the two downloads): ' + cliBlock(a.record_id) : '') +
         (a.archived
