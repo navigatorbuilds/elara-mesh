@@ -60,6 +60,20 @@ VERIFY_N="${RECEIPTS_VERIFY_N:-8}"
 VERIFY_DIR="$(dirname "$OUT")/receipts"
 DECODER="$REPO_DIR/examples/verify/decode_record.py"
 VERIFY_BIN="${RECEIPTS_VERIFY_BIN:-$REPO_DIR/target/release/elara-verify}"
+# Ship-gate freshness lock (2026-08-24): a Jul-20 0.1.0 binary sat here through
+# TWO flag days and silently discarded every v6+ envelope — coverage froze at
+# 376 for 5 days with only per-act stderr lines. The grader MUST match the
+# workspace crate version; a stale grader fails the whole refresh LOUDLY.
+if [[ -x "$VERIFY_BIN" ]]; then
+    WANT_V="$(grep -m1 '^version' "$REPO_DIR/crates/elara-verify/Cargo.toml" | cut -d'"' -f2)"
+    HAVE_V="$("$VERIFY_BIN" --version 2>/dev/null | awk '{print $2}')"
+    if [[ -n "$WANT_V" && "$HAVE_V" != "$WANT_V" ]]; then
+        echo "receipts: FATAL — ship-gate verifier is $HAVE_V but workspace is $WANT_V." >&2
+        echo "receipts: stale grader silently discards new-era envelopes. Rebuild:" >&2
+        echo "receipts:   cargo build --release -p elara-verify --features cli" >&2
+        exit 1
+    fi
+fi
 ANCHOR_PK=""
 [[ -f "$REPO_DIR/examples/verify/zone-0-anchor-pubkey.hex" ]] && \
     ANCHOR_PK="$(tr -d '[:space:]' < "$REPO_DIR/examples/verify/zone-0-anchor-pubkey.hex")"

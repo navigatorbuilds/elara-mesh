@@ -742,7 +742,23 @@ pub fn reconcile_genesis_accounts_into_smt(
     // Genesis reconcile only scopes identities present in the ledger (guarded
     // above) — it never tombstones, so the delete set is empty.
     let pairs = snapshot_scoped(ledger, &scope, &HashSet::new());
-    let (n, _root) = apply_snapshot(storage, &pairs)?;
+    // Change-honest counter (Option-B close, 2026-08-24): `apply_snapshot`
+    // returns the SCOPE size unconditionally, so returning it here read as
+    // "re-flushed every boot" and manufactured a phantom drift investigation
+    // (SEC6A-BOOT-MISMATCH-ROOTCAUSE doc). Compare each scoped leaf against
+    // the persisted SMT first and write ONLY the changed/absent ones: the
+    // steady state reports 0, and a nonzero count is real evidence again.
+    let tree = AccountStateSMT::new(storage);
+    let mut changed: Vec<([u8; 32], Option<[u8; 32]>)> = Vec::new();
+    for (account_id, want) in &pairs {
+        if tree.get(account_id).ok().flatten() != *want {
+            changed.push((*account_id, *want));
+        }
+    }
+    if changed.is_empty() {
+        return Ok(0);
+    }
+    let (n, _root) = apply_snapshot(storage, &changed)?;
     Ok(n)
 }
 
@@ -1579,6 +1595,18 @@ mod tests {
             root_over_accounts(&ledger.accounts).unwrap(),
             "reconciled persistent SMT must match the full-set root_over_accounts"
         );
+
+        // Change-honest counter (Option-B close): a re-run over already-matching
+        // leaves reports 0 — the count means CHANGED, never scoped. The old
+        // scope-size return read as "re-flushed every boot" in the journal and
+        // spawned a phantom drift investigation (SEC6A rootcause doc).
+        let n_idem =
+            reconcile_genesis_accounts_into_smt(&storage, &mut ledger, &auth_hex, &validators).unwrap();
+        assert_eq!(n_idem, 0, "steady state: nothing changed, counter must say so");
+        ledger.accounts.get_mut(&auth_hex).unwrap().available = 6_000;
+        let n_drift =
+            reconcile_genesis_accounts_into_smt(&storage, &mut ledger, &auth_hex, &validators).unwrap();
+        assert_eq!(n_drift, 1, "a real divergence reports exactly the changed leaf");
 
         // A genesis identity absent from the ledger is never synthesised as a
         // zero leaf (would corrupt the root).

@@ -13,8 +13,11 @@
 #                                           inspect via GET /mandate/{mandate_id})
 # so installing it today is safe on any checkout.
 #
-# Binding: args_hash = SHA3-256(full 40-char commit sha). Anyone can recompute
-# it from the public repo — see site/receipts.html "Check a receipt yourself".
+# Binding: args_hash = SHA3-256(full 40-char commit sha). Recomputable by
+# anyone WITH ACCESS to the repo the hook runs in — for this project that is
+# the private development repo, so the binding is auditor-checkable, not
+# stranger-checkable, until proofs bind to a publicly recomputable artifact
+# (named open work item). site/receipts.html states the same scope honestly.
 # Emission is backgrounded and never blocks or fails a commit; non-success
 # output (rejections, e.g. the daily record limit) is appended to
 # ~/.elara/receipt-hook.log so real failures stay visible.

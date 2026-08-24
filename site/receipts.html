@@ -99,10 +99,16 @@
     curl &lt;node&gt;/record/&lt;record_id&gt;
     curl &lt;node&gt;/mandate/status/&lt;record_id&gt;
 
-« 2 » Bind it to the public repo — the receipt's args_hash is
+« 2 » What a commit proof binds — the receipt's args_hash is
     SHA3-256 of the full 40-char commit sha it receipts:
     printf '%s' &lt;commit_sha&gt; | python3 -c 'import sys,hashlib; print(hashlib.sha3_256(sys.stdin.buffer.read()).hexdigest())'
-    git show &lt;commit_sha&gt;   # the commit exists, public, signed-off
+    Honest scope: those commits live in the DEVELOPMENT repository, whose
+    history is not published — so today this binding is checkable by parties
+    with repo access, not by strangers. The public mirror is squash-published
+    under different shas. Binding proofs to a publicly recomputable artifact
+    is a named, open work item — until it ships, this row of the check is
+    for insiders and auditors we grant access, and we say so rather than
+    pretend otherwise.
 
 « 3 » Trust no one — verify offline (no node, no network, no trust in us).
     Rows marked “verify in your browser” also serve their evidence as plain files:

@@ -1606,7 +1606,7 @@ async fn run() -> Result<()> {
                 &config.genesis_validators,
             ) {
                 Ok(n) if n > 0 => info!(
-                    "§6a genesis-account SMT reconcile: flushed {n} config leaf/leaves into the persistent SMT"
+                    "§6a genesis-account SMT reconcile: {n} config leaf/leaves CHANGED (replay↔persisted divergence — investigate if this recurs; steady state is silent)"
                 ),
                 Ok(_) => {}
                 Err(e) => warn!("§6a genesis-account SMT reconcile failed: {e}"),
