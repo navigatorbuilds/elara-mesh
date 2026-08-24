@@ -1652,27 +1652,29 @@ async fn run() -> Result<()> {
                 }
                 BootSealedRootOutcome::Mismatch { epoch, zone, replayed, sealed } => {
                     node_state.boot_sealed_root_mismatch_total.fetch_add(1, Ordering::Relaxed);
-                    warn!(
-                        "§6a boot sealed-root MISMATCH: zone={} epoch={} replayed={} sealed={} — supply-neutral replay divergence. Continuing as follower; re-bootstrap from a trusted snapshot if this persists.",
-                        zone.path(), epoch, hex::encode(replayed), hex::encode(sealed)
-                    );
-                    // F-2 diagnostic: pinpoint WHICH account leaf diverges so the
-                    // mismatch is actionable instead of opaque (one-shot O(accounts),
-                    // mismatch-only). Empty list + non-zero roots ⇒ a phantom SMT
-                    // leaf the ledger-side scan cannot enumerate (see the fn doc).
+                    // Option C (SEC6A-BOOT-MISMATCH-ROOTCAUSE-2026-08-24):
+                    // diagnose FIRST, then choose the headline level. The
+                    // phantom class (diverged==0) is root-caused as
+                    // benign-by-construction set asymmetry — every restart
+                    // fired a scary WARN telling the operator to consider
+                    // re-bootstrap for a state the doc proves is expected.
+                    // INFO for the known class; WARN stays for diverged>0.
                     let (diverged, sample) =
                         elara_runtime::network::account_merkle::diagnose_account_smt_divergence(
                             &node_state.rocks,
                             &ledger.accounts,
                             16,
                         );
-                    if diverged == 0 {
+                    if elara_runtime::network::epoch::classify_sec6a_mismatch(diverged)
+                        == elara_runtime::network::epoch::Sec6aMismatchClass::PhantomSetAsymmetry
+                    {
                         // F-5: SMT-ahead-of-ledger phantom — count it distinctly
                         // so it is separable from a real supply-neutral drop in
                         // metrics (real corruption = mismatch − phantom).
                         node_state.boot_sealed_root_phantom_total.fetch_add(1, Ordering::Relaxed);
-                        warn!(
-                            "§6a divergence diagnostic: 0 ledger accounts differ from their SMT leaf → the divergence is a PHANTOM SMT leaf (an identity in the SMT but absent from the ledger: dirtied-then-removed, or a recipient marked dirty whose op never created the account)."
+                        info!(
+                            "§6a boot sealed-root divergence: zone={} epoch={} replayed={} sealed={} — KNOWN set-asymmetry class (phantom SMT leaves the bounded replay cannot rebuild; benign-by-construction, see internal design notes). Counters bumped; no operator action needed.",
+                            zone.path(), epoch, hex::encode(replayed), hex::encode(sealed)
                         );
                         // F-5 "name the phantom": the ledger-side scan above returns
                         // (0, []) for an SMT-ahead leaf by construction. Enumerate the
@@ -1688,16 +1690,20 @@ async fn run() -> Result<()> {
                             1_000_000,
                             16,
                         );
-                        warn!(
+                        info!(
                             "§6a phantom naming: {} orphan SMT leaf/leaves (scanned {} value-leaves{}) — account_id is the AccountStateSMT::delete key:",
                             scan.orphan_count,
                             scan.scanned_leaves,
                             if scan.truncated { ", TRUNCATED at cap" } else { "" }
                         );
                         for (acc, leaf) in &scan.sample {
-                            warn!("  §6a orphan leaf account_id={acc} leaf_hash={leaf}");
+                            info!("  §6a orphan leaf account_id={acc} leaf_hash={leaf}");
                         }
                     } else {
+                        warn!(
+                            "§6a boot sealed-root MISMATCH: zone={} epoch={} replayed={} sealed={} — supply-neutral replay divergence with REAL diverged leaves. Continuing as follower; re-bootstrap from a trusted snapshot if this persists.",
+                            zone.path(), epoch, hex::encode(replayed), hex::encode(sealed)
+                        );
                         warn!(
                             "§6a divergence diagnostic: {diverged} ledger account(s) differ from their persisted SMT leaf (showing {}):",
                             sample.len()

@@ -1,6 +1,6 @@
 [package]
 name = "elara-verify"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 # Extraction COMPLETE (Steps 1–4, 2026-07-10; see
 # docs/VERIFIER-EXTRACTION-AUDIT-2026-07-07.md) — the CLI bin, wasm exports,
@@ -47,7 +47,7 @@ required-features = ["cli"]
 # `path` for workspace builds, `version` so the PUBLISHED manifest carries a
 # real registry dep — cargo strips `path` on publish and REJECTS a version-less
 # dep (same trap as elara-light-client's dev-dep, fixed 2026-06-21).
-elara-record = { path = "../elara-record", version = "0.2.0" }
+elara-record = { path = "../elara-record", version = "0.3.0" }
 elara-smt = { path = "../elara-smt", version = "0.1.0" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["float_roundtrip"] }

@@ -2,6 +2,16 @@
 
 All notable changes to elara-runtime.
 
+## Crates — elara-record 0.3.0 · elara-verify 0.3.1 — 2026-08-24
+
+**elara-record 0.3.0:** wire decode ceiling v7 (v7 = per-seal Merkle fold-dispatch
+signal; NO byte-shape change — v6-shape-identical). New public constants:
+`FOLD_V2_MIN_WIRE_VERSION`, `SEAL_FOLD_V2_NODE_TAG`, `SUPER_SEAL_FOLD_V2_NODE_TAG`.
+Both flag days (v6 2026-08-19, v7 2026-08-23) documented at the constants.
+**elara-verify 0.3.1:** elara-record dep → 0.3.0 so the published CLI decodes
+v7 wire records from the live chain (`--receipt r.bin` cross-check path);
+no verifier behavior change otherwise.
+
 ## [0.3.0] — 2026-08-22
 
 *(Absorbs the unreleased 0.2.2 entries below — 0.2.2 was never tagged.)*

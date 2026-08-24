@@ -19,7 +19,7 @@ A published record carries **two** signatures from its creator — an
 **ML-DSA-65** (Dilithium3, FIPS 204) signature and an **SLH-DSA-SHA2-192f**
 (SPHINCS+, FIPS 205) co-signature — and **both cover the identical preimage**:
 `ValidationRecord::signable_bytes()` — crate
-[`elara-record`](https://crates.io/crates/elara-record) (0.2.x),
+[`elara-record`](https://crates.io/crates/elara-record) (0.3.x),
 `src/record.rs`. The verifier requires the ML-DSA-65 signature and grades the
 SLH-DSA leg as the dual-signature profile check ("Profile A"). The preimage is
 domain-separated (a constant tag leads it from record version 6 on, followed by

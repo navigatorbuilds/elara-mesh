@@ -4346,6 +4346,32 @@ pub fn fallback_latest_sealed_account(
     found
 }
 
+/// §6a mismatch classification (Option C, panel-ratified 2026-08-24): the
+/// boot log level and counter routing derive from the F-2 diagnostic's
+/// diverged count. Pure so the bin's inline branch is pinned by unit test —
+/// the panel found the INFO-vs-WARN selection had no test at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sec6aMismatchClass {
+    /// diverged == 0: every ledger account matches its SMT leaf — the root
+    /// delta is phantom SMT leaves (set asymmetry, benign-by-construction;
+    /// internal design notes). Logs INFO; bumps
+    /// mismatch_total AND phantom_total (operators subtract: real corruption
+    /// = mismatch − phantom).
+    PhantomSetAsymmetry,
+    /// diverged > 0: named ledger accounts differ from their persisted SMT
+    /// leaves — a real supply-neutral divergence. Logs WARN; bumps
+    /// mismatch_total only.
+    RealDivergence,
+}
+
+pub fn classify_sec6a_mismatch(diverged: usize) -> Sec6aMismatchClass {
+    if diverged == 0 {
+        Sec6aMismatchClass::PhantomSetAsymmetry
+    } else {
+        Sec6aMismatchClass::RealDivergence
+    }
+}
+
 /// Outcome of the single-zone sealed-root boot integrity check
 /// ([`check_boot_sealed_root`], internal design notes §6 / "§6a").
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -7529,6 +7555,27 @@ mod tests {
         crate::accounting::ledger::AccountState {
             available,
             ..Default::default()
+        }
+    }
+
+    /// Panel-found gap (2026-08-24): the boot INFO-vs-WARN selection had no
+    /// pinning test. The classifier is now pure — pin both classes and the
+    /// counter contract (phantom rides WITH mismatch, never instead of it:
+    /// real corruption = mismatch_total − phantom_total).
+    #[test]
+    fn sec6a_mismatch_classifier_pins_phantom_vs_real() {
+        use super::{classify_sec6a_mismatch, Sec6aMismatchClass};
+        assert_eq!(
+            classify_sec6a_mismatch(0),
+            Sec6aMismatchClass::PhantomSetAsymmetry,
+            "diverged==0 = phantom set asymmetry: INFO + phantom_total (benign class)"
+        );
+        for n in [1usize, 5, 1_000] {
+            assert_eq!(
+                classify_sec6a_mismatch(n),
+                Sec6aMismatchClass::RealDivergence,
+                "any diverged leaf = real divergence: WARN, no phantom bump"
+            );
         }
     }
 

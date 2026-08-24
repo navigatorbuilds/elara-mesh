@@ -1,6 +1,6 @@
 [package]
 name = "elara-record"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 # Manifest publish-READY (2026-07-11) — extraction complete, repo public. Actual
 # publish = the E3 ceremony (order: elara-smt → elara-record → elara-verify; see
