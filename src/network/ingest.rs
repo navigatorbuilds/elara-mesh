@@ -4679,7 +4679,12 @@ pub(super) async fn flush_witness_smt_for_seal(
         // (the tolerated, self-healing transient), byte-identical to before.
         super::account_merkle::snapshot_scoped(&mut ledger, &scope, &std::collections::HashSet::new())
     };
-    if snapshot.is_empty() && seal.account_smt_root.is_none() {
+    if snapshot.is_empty() {
+        // Nothing to flush. Post-B1′ this is the common case for act-only
+        // seals (empty scope); taking the write gate + spawn_blocking for an
+        // empty apply would be pure waste on a validation-heavy chain, and
+        // the root-mismatch debug it produced diagnosed nothing (an empty
+        // flush cannot advance this node toward the sealed root anyway).
         return;
     }
     let rocks = state.rocks.clone();

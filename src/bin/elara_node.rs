@@ -1684,17 +1684,23 @@ async fn run() -> Result<()> {
                         // only on this (rare) phantom branch.
                         let ledger_ids: std::collections::HashSet<String> =
                             ledger.accounts.keys().cloned().collect();
+                        // Boot-path cap is deliberately SMALL (panel verdict
+                        // 2026-08-25): this scan is O(min(value-leaves, cap))
+                        // RocksDB iteration on the boot path, and the phantom
+                        // branch is steady-state while any phantom exists. The
+                        // full-fidelity enumeration lives behind
+                        // POST /admin/account-smt/orphans (max_scan param).
                         let scan = elara_runtime::network::account_merkle::scan_orphan_smt_leaves(
                             &node_state.rocks,
                             &ledger_ids,
-                            1_000_000,
+                            4_096,
                             16,
                         );
                         info!(
-                            "§6a phantom naming: {} orphan SMT leaf/leaves (scanned {} value-leaves{}) — account_id is the AccountStateSMT::delete key:",
+                            "§6a phantom naming: {} orphan SMT leaf/leaves (scanned {} value-leaves{}) — account_id is the AccountStateSMT::delete key (full enumeration: admin account-smt/orphans endpoint):",
                             scan.orphan_count,
                             scan.scanned_leaves,
-                            if scan.truncated { ", TRUNCATED at cap" } else { "" }
+                            if scan.truncated { ", TRUNCATED at boot cap" } else { "" }
                         );
                         for (acc, leaf) in &scan.sample {
                             info!("  §6a orphan leaf account_id={acc} leaf_hash={leaf}");

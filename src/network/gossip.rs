@@ -295,15 +295,52 @@ pub(crate) fn is_retryable_ingest_rejection(err_str: &str) -> bool {
 /// consulted-and-skipped by every pull driver (timestamp/full/delta pull, delta
 /// sync), so a forged untrusted push of a genuinely-canonical record — rejected
 /// here only because its *creator* tripped this node's local rate limiter
-/// (non-retryable `global rate limit exceeded` / `exceeds propagation rate
+/// (admission-throttle `global rate limit exceeded` / `exceeds propagation rate
 /// limit`) — would censor that record out of this node's sync forever → fork.
 /// Park such rejections instead (bounded, attempt-capped, NOT consulted by pull
 /// skips). Trusted relays (seed/staked/authority/local) keep the prior
 /// retryable-vs-permanent split. The downgrade in B6 is what first exposes the
 /// rate-limit reject strings to the push path, so this guard is load-bearing,
 /// not cosmetic — without it the B6 fix regresses into a censorship fork.
+///
+/// NOTE (2026-08-24, panel PANEL OUTCOME #2): the SAME censorship fork was
+/// still open for FIRST-HOP submits (`HttpSubmit`/`Local`, `untrusted_push`
+/// false ⇒ this returns true for a throttle reason), reproduced live as a
+/// cap-refused record embargoed under `previously_rejected` until restart. The
+/// two submit reject sites now short-circuit an admission-throttle reason via
+/// `is_admission_throttle_rejection` BEFORE this function — dropping it from
+/// both the embargo and the park ring — so a throttle reason no longer reaches
+/// the `should_permanent_reject`/`gossip_rejected` path on the first hop. This
+/// guard still governs the untrusted-PUSH path, which is unchanged.
 pub(crate) fn should_permanent_reject(untrusted_push: bool, reason: &str) -> bool {
     !untrusted_push && !is_retryable_ingest_rejection(reason)
+}
+
+/// True iff `reason` is one of the node's admission-throttle refusals — the
+/// CLOSED set of three rate limiters in `ingest.rs`: the per-identity daily
+/// cap (`daily record limit exceeded`), the per-identity hourly propagation
+/// limit (`exceeds propagation rate limit`), and the global per-minute quota
+/// (`global rate limit exceeded`). These are TIME-VARIANT: the record admits
+/// unchanged once the identity's rolling window rolls. A throttle refusal on a
+/// FIRST-HOP submit (`HttpSubmit`/`Local`) must therefore enter NEITHER the
+/// permanent `gossip_rejected` embargo (consult-and-skip on pull ⇒ censorship
+/// fork — the B6 hole via header omission) NOR the `gossip_retry` park ring
+/// (the drainer only re-fetches from peers, and a first-hop-refused record
+/// exists on none, so parking is inert and merely FIFO-evicts genuine
+/// state-dependent retries). Recovery is the originator's resubmit (the G1
+/// emission spool). This is deliberately NOT folded into
+/// `is_retryable_ingest_rejection`: that function classifies the general
+/// transient-vs-permanent split for the pull/sync path via the typed
+/// `"transient reject: "` prefix (C2), and admission throttles are a distinct,
+/// closed, first-hop-only concern consulted at exactly the two submit reject
+/// sites. Substring-matching a closed 3-element set defined in one file does
+/// not reopen the C2 anti-pattern (a NEW transient reason silently staying
+/// permanent) — a new throttle would be added here and to the ingest emitter
+/// together, both in `ingest.rs`.
+pub(crate) fn is_admission_throttle_rejection(reason: &str) -> bool {
+    reason.contains("daily record limit exceeded")
+        || reason.contains("exceeds propagation rate limit")
+        || reason.contains("global rate limit exceeded")
 }
 
 /// Epoch gap beyond which an incoming epoch seal is too far behind the node's
@@ -6138,6 +6175,52 @@ mod tests {
         assert!(
             !should_permanent_reject(false, "insufficient balance"),
             "trusted/local RETRYABLE rejection must still park, not permanently cache"
+        );
+    }
+
+    #[test]
+    fn is_admission_throttle_rejection_covers_the_closed_set_only() {
+        // The three live throttle strings (verbatim from ingest.rs) classify true.
+        assert!(is_admission_throttle_rejection(
+            "daily record limit exceeded: identity limited to 20/day"
+        ));
+        assert!(is_admission_throttle_rejection(
+            "identity abcd exceeds propagation rate limit (100/hr, base=100, stake_bonus=0)"
+        ));
+        assert!(is_admission_throttle_rejection("global rate limit exceeded (500/min)"));
+        // Genuinely-permanent and retryable-non-throttle verdicts classify false.
+        for other in [
+            "invalid signature",
+            "self-transfer not allowed",
+            "merkle root mismatch",
+            "insufficient balance",
+            "duplicate record",
+        ] {
+            assert!(
+                !is_admission_throttle_rejection(other),
+                "non-throttle reason must not be treated as an admission throttle: {other}"
+            );
+        }
+    }
+
+    #[test]
+    fn throttle_reason_is_permanent_at_direct_submit_absent_the_earlier_branch() {
+        // The load-bearing ORDER pin (PANEL OUTCOME #2): a throttle refusal on a
+        // direct/local submit (untrusted_push=false) is classified PERMANENT by
+        // should_permanent_reject — i.e. WITHOUT the earlier
+        // is_admission_throttle_rejection branch at the two reject sites it would
+        // enter the gossip_rejected embargo (the live `previously_rejected`
+        // censorship bug). This asserts both halves so the branch can never be
+        // reordered after should_permanent_reject without a test failure.
+        let throttle = "daily record limit exceeded: identity limited to 20/day";
+        assert!(
+            is_admission_throttle_rejection(throttle),
+            "the throttle helper must match first"
+        );
+        assert!(
+            should_permanent_reject(/* untrusted_push */ false, throttle),
+            "a direct-submit throttle IS permanent-classified downstream — the \
+             admission-throttle branch MUST run before should_permanent_reject"
         );
     }
 

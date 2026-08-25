@@ -150,7 +150,7 @@ labelled.
 
 ## Ops
 
-- DELL (always-on authority seed) runs `node_profile=archive` as the interim
+- The always-on authority seed runs `node_profile=archive` as the interim
   network-permanence anchor (retention effectively infinite; node-local policy,
   non-fork). Combined with the public receipts archive, this guarantees the
   signed record survives even where a full-zone node's body ages out.

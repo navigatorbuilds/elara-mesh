@@ -1995,8 +1995,13 @@ pub struct NodeState {
     /// mismatch, ledger-state-dependent rejects) park in `gossip_retry`;
     /// stale epoch seals decline PRE-CRYPTO to `declined_seal_ids` (item 8b —
     /// a permanent embargo here killed all consumer processing for
-    /// locally-pruned-history seals re-served by archive peers). In-memory
-    /// only (cleared on restart), pure FIFO eviction at cap 50,000 — no TTL.
+    /// locally-pruned-history seals re-served by archive peers); and — since
+    /// PANEL OUTCOME #2 (2026-08-24) — FIRST-HOP admission-throttle refusals
+    /// (`is_admission_throttle_rejection`), which are time-variant and drop to
+    /// neither cache so the G1 spool can resubmit once the window rolls (a
+    /// permanent embargo here was a live censorship fork: a cap-refused record
+    /// stuck under `previously_rejected` until restart). In-memory only
+    /// (cleared on restart), pure FIFO eviction at cap 50,000 — no TTL.
     pub gossip_rejected: std::sync::Mutex<SeenSet>,
     /// Counter: records skipped due to gossip_rejected cache.
     pub gossip_rejected_dedup_total: AtomicU64,
@@ -2010,6 +2015,13 @@ pub struct NodeState {
     pub gossip_retry: std::sync::Mutex<std::collections::VecDeque<(String, u8)>>,
     /// Counter: records recovered (ingested) via the gossip_retry queue.
     pub gossip_retry_recovered_total: AtomicU64,
+    /// Counter: first-hop admission-throttle refusals dropped from BOTH the
+    /// `gossip_rejected` embargo and the `gossip_retry` park ring (PANEL
+    /// OUTCOME #2). A rising value is the healthy signal that emitters are
+    /// out-running their rolling rate window and relying on the G1 spool to
+    /// resubmit — NOT an error. Pair with `gossip_retry` depth to confirm the
+    /// park ring is not being polluted by this class.
+    pub throttle_refused_dropped_total: AtomicU64,
     /// Auto-reward metrics: total reward records created on settlement.
     pub auto_rewards_total: AtomicU64,
     /// Auto-reward metrics: total reward amount distributed (base units).
@@ -4135,6 +4147,7 @@ impl NodeState {
             gossip_rejected_dedup_total: AtomicU64::new(0),
             gossip_retry: std::sync::Mutex::new(std::collections::VecDeque::new()),
             gossip_retry_recovered_total: AtomicU64::new(0),
+            throttle_refused_dropped_total: AtomicU64::new(0),
             auto_rewards_total: AtomicU64::new(0),
             auto_rewards_amount_total: AtomicU64::new(0),
             gossip_push_failed_total: AtomicU64::new(0),

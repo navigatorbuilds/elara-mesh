@@ -949,6 +949,21 @@ async fn handle_submit_record(
                     0,
                 ) {
                     // seal-class disposed (declined or bounded park)
+                } else if !untrusted_push
+                    && crate::network::gossip::is_admission_throttle_rejection(&reason)
+                {
+                    // PANEL OUTCOME #2 (2026-08-24): a first-hop throttle refusal
+                    // is time-VARIANT — the record admits once the identity's
+                    // rolling window rolls. It enters NEITHER the gossip_rejected
+                    // embargo (consult-and-skip on pull ⇒ the censorship fork B6
+                    // half-closed) NOR the park ring (the drainer re-fetches from
+                    // peers; a first-hop-refused record exists on none, so parking
+                    // is inert and evicts genuine wall-#5/B7/8b retries). Recovery
+                    // is the originator's resubmit via the G1 spool. Gated on
+                    // !untrusted_push so the untrusted-push path keeps B6's park.
+                    state
+                        .throttle_refused_dropped_total
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 } else if crate::network::gossip::should_permanent_reject(untrusted_push, &reason)
                 {
                     state.gossip_rejected.lock_recover().insert(record_id.clone());
@@ -1219,8 +1234,8 @@ async fn handle_fetch_records(state: &Arc<NodeState>, body: &[u8]) -> Result<Vec
         // count cap alone admits 100 × ~128KB-hex max-size records ≈ 12.5 MiB —
         // frame-safe, but it CANNOT transfer within the 30s per-call RPC
         // deadline on the phone-tier slow-link floor (~205s), the exact class of
-        // the delta_sync/query_records byte-blindness that killed the ACER
-        // cellular join (see crate::network::sync::MAX_SYNC_RESPONSE_HEX_BYTES).
+        // the delta_sync/query_records byte-blindness that killed an
+        // external-join node's cellular join (see crate::network::sync::MAX_SYNC_RESPONSE_HEX_BYTES).
         // Unlike query_records, NO has_more signal is needed and the wire shape
         // stays a bare array: every fetch_records caller is id-driven and
         // subset-tolerant — att-pull advances its watermark and the full_pull
@@ -8681,8 +8696,8 @@ recent_bad_sig_record_ids: std::collections::VecDeque::new(),
         // fetch_records call for many fat records must NOT return a page whose
         // hex body blows the 30s slow-link RPC deadline. The count cap
         // (MAX_FETCH_RECORDS=100) alone admits ~12.5 MiB of hex (100 × 64 KiB) —
-        // ~205s at the phone-tier floor — the exact class that killed the ACER
-        // cellular join on delta_sync. handle_fetch_records now byte-budgets to
+        // ~205s at the phone-tier floor — the exact class that killed an
+        // external-join node's cellular join on delta_sync. handle_fetch_records now byte-budgets to
         // MAX_SYNC_RESPONSE_HEX_BYTES. Unlike query_records the wire shape stays
         // a BARE ARRAY (no has_more): callers are id-driven and re-reach the
         // dropped tail via full_pull / re-ask. Completeness of the tail is NOT

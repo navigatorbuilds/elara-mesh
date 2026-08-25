@@ -18,7 +18,7 @@
 //!   facing a future security-bearing envelope must under-claim, never
 //!   under-check). Mirrors `mandate_bundle::MANDATE_BUNDLE_VERSION`.
 //! - **Open legs map, PARTIAL cap:** unknown leg KINDS do not hard-fail the
-//!   parse (the ACER metadata-freeze lesson, internal design notes) —
+//!   parse (the metadata-freeze lesson, internal design notes) —
 //!   they are surfaced in `ReceiptLegs::not_evaluated` and the CLI caps the
 //!   verdict at PARTIAL with explicit disclosure. Never VERIFIED-with-skips.
 //!   Unknown fields at the ENVELOPE level (outside `legs`) are rejected —

@@ -567,20 +567,32 @@ pub fn root_over_accounts(
 /// `smt_dirty` set (which can include records the witness has applied that
 /// belong to FUTURE seals, leaking divergence into THIS seal's root).
 ///
-/// Always includes the record creator. For ops with explicit recipient /
-/// counterparty fields we add those too (Mint, Transfer, WitnessReward,
-/// XZoneLock, XZoneClaim, Slash, DormancyReclaim, DormancyDeclare,
-/// DormancyProofOfLife). Ops whose effects are mediated by lookups
-/// (XZoneReject / XZoneAbort via pending sender) are intentionally
-/// creator-only here:
-/// those identities stay in `smt_dirty` and get flushed at the next seal.
-/// The conservative scope keeps the helper pure (no ledger / cross-zone
-/// reads) and matches the well-formed steady-state case where `smt_dirty`
-/// at seal time ≡ identities touched by records in that seal.
+/// Includes the record creator ONLY for op-carrying records — the exact
+/// mirror of the producer side: `apply_op` (whose ledger.rs creator
+/// dirty-mark is the write this scope must shadow) is reachable only behind
+/// `if let Some(op) = extract_ledger_op(record)?` (ledger.rs:496), and a
+/// malformed `beat_op` errors there before marking anything. An op-less or
+/// malformed record therefore has an EMPTY producer write-set, and this side
+/// returns an empty scope to match. The pre-2026-08-25 unconditional creator
+/// push minted one permanent default-state SMT leaf per act-signing identity
+/// (the §6a phantom class — panel verdict:
+/// internal design notes; note it
+/// NARROWS the class: a record whose op FAILS in apply_op still pushes its
+/// creator here — see the verdict's RISK B and the mint counter below).
+/// For ops with explicit recipient / counterparty fields we add those too
+/// (Mint, Transfer, WitnessReward, XZoneLock, XZoneClaim, Slash,
+/// DormancyReclaim, DormancyDeclare, DormancyProofOfLife). Ops whose effects
+/// are mediated by lookups (XZoneReject / XZoneAbort via pending sender) are
+/// intentionally creator-only here: those identities stay in `smt_dirty` and
+/// get flushed at the next seal. The conservative scope keeps the helper
+/// pure (no ledger / cross-zone reads).
 pub fn record_touched_identities(record: &ValidationRecord) -> Vec<String> {
     let mut out = Vec::with_capacity(2);
+    let Ok(Some(op)) = extract_ledger_op(record) else {
+        return out;
+    };
     out.push(creator_identity_hash(record));
-    if let Ok(Some(op)) = extract_ledger_op(record) {
+    {
         match op {
             ParsedLedgerOp::Mint { to, .. } | ParsedLedgerOp::Transfer { to, .. } => {
                 out.push(to);
@@ -685,14 +697,39 @@ pub fn snapshot_scoped(
             out.push((account_id, None));
             continue;
         }
-        let account = ledger
-            .accounts
-            .get(identity_hex)
-            .cloned()
-            .unwrap_or_default();
+        let account = match ledger.accounts.get(identity_hex) {
+            Some(a) => a.clone(),
+            None => {
+                // Default-state leaf for an in-scope identity with no ledger
+                // account. For op RECIPIENTS this is the deliberate
+                // self-healing transient (ingest.rs flush comment). Post-B1′
+                // any residual hit here is the narrowed phantom class (op
+                // present but apply failed/deduped — verdict RISK B): count
+                // it so mainnet growth of that residual is observable. Of the
+                // three callers only the witness flush can reach this branch
+                // (genesis reconcile pre-filters to present ids; the repair
+                // path routes absent ids through `deletes` above).
+                SCOPED_DEFAULT_LEAF_WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Default::default()
+            }
+        };
         out.push((account_id, Some(hash_account_state(&account))));
     }
     out
+}
+
+/// §6a mint counter (panel verdict 2026-08-25): default-state leaf writes for
+/// ledger-absent identities in `snapshot_scoped`. Pure observability — gates
+/// nothing, marks nothing at write time (deliberately NOT the write-time
+/// exclusion mark the panel rejected as Option-A-shaped). Read via
+/// [`scoped_default_leaf_writes_total`].
+static SCOPED_DEFAULT_LEAF_WRITES: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// Process-lifetime count of default-state leaf writes for ledger-absent
+/// in-scope identities (see [`SCOPED_DEFAULT_LEAF_WRITES`]).
+pub fn scoped_default_leaf_writes_total() -> u64 {
+    SCOPED_DEFAULT_LEAF_WRITES.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// F-2 boot reconcile: ensure the persistent account SMT carries a leaf for
@@ -1854,11 +1891,28 @@ mod tests {
     }
 
     #[test]
-    fn record_touched_identities_no_op_metadata_is_creator_only() {
-        // Non-ledger record: creator only, no op fields.
+    fn record_touched_identities_no_op_metadata_is_empty() {
+        // Non-ledger (act-only) record: EMPTY scope. The producer never runs
+        // apply_op for it (ledger.rs:496 gate), so the witness flush must not
+        // write a leaf either — the pre-2026-08-25 creator-push here minted
+        // one permanent default-state leaf per act-signing identity (§6a
+        // phantom class). This test previously PINNED that bug by asserting
+        // creator-only; it now derives from the producer mirror.
         let rec = make_record_with_creator(creator_pk(b"alice"), Default::default());
         let touched = record_touched_identities(&rec);
-        assert_eq!(touched, vec![id_of(b"alice")]);
+        assert!(touched.is_empty(), "act-only record must have empty scope, got {touched:?}");
+    }
+
+    #[test]
+    fn record_touched_identities_malformed_op_is_empty() {
+        // Malformed beat_op: extract_ledger_op errors, the producer's
+        // `extract_ledger_op(record)?` propagates before any dirty-mark, so
+        // the scope must be empty here too (the Err arm of the let-else).
+        let mut meta = std::collections::BTreeMap::new();
+        meta.insert("beat_op".to_string(), serde_json::json!("not-a-real-op-shape"));
+        let rec = make_record_with_creator(creator_pk(b"alice"), meta);
+        let touched = record_touched_identities(&rec);
+        assert!(touched.is_empty(), "malformed-op record must have empty scope, got {touched:?}");
     }
 
     #[test]

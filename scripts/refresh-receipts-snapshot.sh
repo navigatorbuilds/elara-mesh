@@ -273,6 +273,20 @@ windowed_items = merged[-limit:][::-1]
 entries = []
 wires = {}      # rid -> record wire bytes (for the harvest step)
 seal_ids = {}   # rid -> covering seal record id
+
+# G4 derive-don't-restate (3rd instance): record metadata is PASS-THROUGH
+# minus this reserved-name denylist, so new schema keys (e.g. the
+# mirror_publish_act family: mirror_commit/mirror_repo/prev_mirror_commit/
+# acts_root/acts_count) are visible in the feed BY DEFAULT — the projection
+# never has to learn a key again. The denylist is exactly the field names
+# this projection itself writes on an entry: a record's metadata must never
+# clobber them (the ingest key-allowlist makes most collisions impossible
+# today; this keeps the projection safe as the allowlist grows).
+META_PASSTHROUGH_DENY = {
+    "record_id", "flag", "authorized", "act_timestamp_ms", "scope_deferred",
+    "timestamp", "created_at", "epoch", "zone", "content_hash",
+    "mandate_status", "browser_verify", "archived", "seal_id",
+}
 for item in windowed_items:
     rid = item if isinstance(item, str) else (item.get("record_id") or item.get("id") or "")
     if not rid:
@@ -288,9 +302,11 @@ for item in windowed_items:
     if isinstance(detail, dict):
         rec = detail.get("record", detail)
         meta = rec.get("metadata") or {}
-        for k in ("tool", "action", "args_hash", "agent_id", "session_id", "kind", "mandate_ref"):
-            if k in meta:
-                entry[k] = meta[k]
+        # Pass-through minus denylist (meta wins over item-level fields here —
+        # the pre-G4 precedence for mandate_ref, kept exactly).
+        for k, v in meta.items():
+            if k not in META_PASSTHROUGH_DENY:
+                entry[k] = v
         for k in ("timestamp", "created_at", "epoch", "zone"):
             if k in rec:
                 entry[k] = rec[k]
@@ -308,9 +324,11 @@ for item in windowed_items:
             wires[rid] = wire
             _, meta = decode_wire(wire)
             if isinstance(meta, dict):
-                for k in ("tool", "action", "args_hash", "agent_id", "session_id", "kind", "mandate_ref"):
-                    if k in meta and k not in entry:
-                        entry[k] = meta[k]
+                # Same pass-through; the wire decode only FILLS (never
+                # overwrites) what the /record fetch already set.
+                for k, v in meta.items():
+                    if k not in META_PASSTHROUGH_DENY and k not in entry:
+                        entry[k] = v
     status = fetch(f"{node}/mandate/status/{rid}")
     if isinstance(status, dict):
         entry["mandate_status"] = status.get("status") or status.get("verdict") or status

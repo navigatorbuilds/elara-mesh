@@ -103,12 +103,16 @@
     SHA3-256 of the full 40-char commit sha it receipts:
     printf '%s' &lt;commit_sha&gt; | python3 -c 'import sys,hashlib; print(hashlib.sha3_256(sys.stdin.buffer.read()).hexdigest())'
     Honest scope: those commits live in the DEVELOPMENT repository, whose
-    history is not published — so today this binding is checkable by parties
-    with repo access, not by strangers. The public mirror is squash-published
-    under different shas. Binding proofs to a publicly recomputable artifact
-    is a named, open work item — until it ships, this row of the check is
-    for insiders and auditors we grant access, and we say so rather than
-    pretend otherwise.
+    history is not published — so this PER-COMMIT binding is checkable by
+    parties with repo access, not by strangers. The public mirror is
+    squash-published under different shas. What strangers CAN check, for
+    publishes from 2026-08-25 onward, is the publish-level CONTENT binding:
+    each mirror push emits a chained mirror_publish_act whose window root is
+    recomputable from public history alone — see “The publish chain” below.
+    The boundary is content vs ordering: the publish act binds WHAT became
+    public, per publish window; these per-commit receipts remain the finer
+    instrument for private ordering and rewritten-history forensics. The
+    act narrows that gap; it never subsumes it.
 
 « 3 » Trust no one — verify offline (no node, no network, no trust in us).
     Rows marked “verify in your browser” also serve their evidence as plain files:
@@ -124,6 +128,52 @@
     #   curl &lt;node&gt;/record/&lt;record_id&gt;/wire &gt; r.bin &amp;&amp; elara-verify --receipt r.bin
     # what exactly is signed — the preimage rule, the naming trap, scope_deferred:
     #   <a href="receipts/SIGNING.md">receipts/SIGNING.md</a></pre>
+</section>
+
+<section class="reveal">
+  <h2>The publish chain — mirror pushes, receipted</h2>
+  <p>From <strong>2026-08-25</strong> onward, every push of the public mirror emits a
+  <span class="rc-mono">mirror_publish_act</span>: a signed record binding that push to the mesh.
+  <strong>Forward-only from that date</strong> — earlier publishes are recorded in the private
+  publish ledger but are never back-filled as acts (re-emitting history would manufacture act
+  timestamps). One lag rule to know: a publish act appears in the <em>next</em> publish’s snapshot
+  of this feed — the snapshot shipped at commit C cannot contain the act that attests C. That is
+  construction, not omission.</p>
+  <p>What one act claims — and how a stranger recomputes each claim from public material:</p>
+  <pre class="rc-mono">mirror_commit        the pushed public commit (full git sha) — a POINTER you
+                     re-check against the hosting platform, a third party that
+                     is not the signer. SHA3 binds what WE attest, below.
+prev_mirror_commit   the tip the mirror served BEFORE this push. Each act names
+                     its predecessor, so a missing or suppressed publish is
+                     DETECTABLE by walking the chain. (Absent only on an
+                     initial publish.)
+args_hash            SHA3-256 of the private development tip’s full 40-char
+                     commit sha (ascii). Only the hash ships — the disclosed
+                     construction lets authorized parties confirm the binding
+                     without the private history becoming public.
+acts_root            root over the publish WINDOW: the record_ids present in
+                     site/receipts.json at mirror_commit but NOT at
+                     prev_mirror_commit. Per id: k = SHA3-256(id ascii);
+                     insert (k → k) into an elara-smt sparse Merkle tree
+                     (crates.io: elara-smt); acts_root = the tree root. An
+                     empty window is the SMT empty root — SHA3-256 of empty
+                     input.
+acts_count           how many record_ids are in that window.
+
+# Recompute the window yourself (both commits are public git history):
+git clone https://github.com/navigatorbuilds/elara-mesh &amp;&amp; cd elara-mesh
+git show &lt;mirror_commit&gt;:site/receipts.json        # acts[].record_id …
+git show &lt;prev_mirror_commit&gt;:site/receipts.json   # … minus these = the window
+# then fold the window ids through elara-smt as above: root == acts_root,
+# count == acts_count. `cargo install elara-verify` prints all of an act’s
+# keys verbatim; the verdict covers the signature — the recomputation above
+# is what makes the CLAIMS checkable.</pre>
+  <p class="rc-note">Honesty notes: the act’s signature proves <em>who</em> attested this publish
+  and <em>when</em> — the content claims are checkable exactly as far as the recomputation above
+  reaches, no further. <span class="rc-mono">mirror_commit</span> is a git sha1 and is disclosed
+  as a pointer, never claimed as the cryptographic binding — the SHA3 fields are. And the chain
+  proves publishes that <em>did</em> emit acts; the per-commit receipts and their mandate
+  machinery above are what receipts the day-to-day work between publishes.</p>
 </section>
 
 </main>
@@ -190,6 +240,12 @@
         '</summary>' +
         '<div class="rc-verify rc-mono">' +
         'record_id: ' + esc(a.record_id) + '<br>' +
+        (a.kind === 'mirror_publish_act'
+          ? 'mirror_commit: ' + esc(a.mirror_commit || '?') + '<br>' +
+            (a.prev_mirror_commit ? 'prev_mirror_commit (the chain): ' + esc(a.prev_mirror_commit) + '<br>' : '') +
+            (a.acts_root ? 'acts_root: ' + esc(a.acts_root) + ' · acts_count: ' + esc(a.acts_count || '0') +
+              ' — recompute per “The publish chain” below<br>' : '')
+          : '') +
         (a.args_hash ? 'args_hash (SHA3-256 of the commit sha): ' + esc(a.args_hash) + '<br>' : '') +
         (a.agent_id ? 'agent_id: ' + esc(a.agent_id) + '<br>' : '') +
         (a.mandate_ref ? 'mandate: ' + esc(shortHex(a.mandate_ref)) + '<br>' : '') +

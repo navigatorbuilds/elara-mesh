@@ -26,7 +26,7 @@ set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HOOK="$REPO_DIR/.git/hooks/post-commit"
-MARKER="# elara-receipt-hook v1"
+MARKER="# elara-receipt-hook"
 
 if [[ -f "$HOOK" ]] && ! grep -q "$MARKER" "$HOOK"; then
     echo "REFUSING: $HOOK exists and is not the elara receipt hook." >&2
@@ -37,8 +37,11 @@ fi
 
 cat > "$HOOK" <<'HOOKEOF'
 #!/usr/bin/env bash
-# elara-receipt-hook v1 — receipt this commit on the mesh (best-effort).
+# elara-receipt-hook v2 — receipt this commit on the mesh (best-effort).
 # No-op unless CLI + maintainer identity + mandate are all present.
+# v2 (G1, 2026-08-24): refused/unlanded emissions SPOOL durably to
+# ~/.elara/emit-spool and the drain rides every commit; successes are logged
+# too, so coverage is computable from receipt-hook.log alone.
 set -u
 REPO_DIR="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
 CLI="$REPO_DIR/target/release/elara-cli"
@@ -64,18 +67,32 @@ NODE_URL="${ELARA_NODE:-http://127.0.0.1:9474}"
     # output text. Success prints "accepted: <rid>" then an "agent-emit: <rid>…"
     # summary line (match either leading shape); log anything else, e.g. "daily
     # record limit exceeded: tier0 …" (20/day rolling record-limit budget).
+    SPOOL="$HOME/.elara/emit-spool"
     OUT="$("$CLI" --node "$NODE_URL" agent-emit \
         --identity "$IDENTITY" \
         --tool git \
         --action commit \
         --args-hash "$AH" \
         --agent-id elara-build-agent \
-        --mandate-ref "$MANDATE" 2>&1)"
+        --mandate-ref "$MANDATE" \
+        --spool-dir "$SPOOL" 2>&1)"
+    TS="$(date -u +%FT%TZ)"
     case "$OUT" in
-        "accepted: "*|"agent-emit: "*) : ;;
-        *) printf '%s %s %s\n' "$(date -u +%FT%TZ)" "${SHA:0:8}" "$OUT" \
+        "accepted: "*|"agent-emit: "*)
+            # G1 (c): success logged too — coverage computable from this log.
+            RID="$(printf '%s' "$OUT" | sed -n 's/^accepted: \([0-9a-f-]*\).*/\1/p' | head -1)"
+            printf '%s %s receipted %s commit %s\n' "$TS" "${SHA:0:8}" "${RID:-unknown}" "$SHA" \
+                >> "$HOME/.elara/receipt-hook.log" ;;
+        *"spooled: "*)
+            printf '%s %s spooled commit %s | %s\n' "$TS" "${SHA:0:8}" "$SHA" "$OUT" \
+                >> "$HOME/.elara/receipt-hook.log" ;;
+        *) printf '%s %s %s\n' "$TS" "${SHA:0:8}" "$OUT" \
             >> "$HOME/.elara/receipt-hook.log" ;;
     esac
+    # G1 (b): the drain rides commit cadence — after our own attempt; flock
+    # inside the script makes concurrent drains a no-op.
+    ELARA_SPOOL_DIR="$SPOOL" ELARA_NODE="$NODE_URL" ELARA_CLI="$CLI" \
+        "$REPO_DIR/scripts/elara-spool-drain.sh" >> "$HOME/.elara/receipt-hook.log" 2>&1 || true
 ) &
 disown 2>/dev/null || true
 exit 0

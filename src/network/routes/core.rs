@@ -942,6 +942,16 @@ recent_bad_sig_record_ids: std::collections::VecDeque::new(),
                 // 8b invariant: seal-class never enters gossip_rejected.
                 if crate::network::gossip::dispose_seal_ingest_failure(&state, &record_clone, 0) {
                     // seal-class disposed (declined or bounded park)
+                } else if crate::network::gossip::is_admission_throttle_rejection(&reason) {
+                    // PANEL OUTCOME #2 (2026-08-24): first-hop throttle refusal is
+                    // time-variant — drop from BOTH embargo and park ring; the G1
+                    // spool resubmits once the window rolls. This is the loopback
+                    // HTTP submit path (always a direct first-hop submission), so
+                    // no untrusted_push guard is needed. See the PQ twin in
+                    // pq_transport/router.rs and gossip::is_admission_throttle_rejection.
+                    state
+                        .throttle_refused_dropped_total
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 } else if !crate::network::gossip::is_retryable_ingest_rejection(&reason) {
                     state.gossip_rejected.lock_recover().insert(record_id.clone());
                 } else {
@@ -1740,6 +1750,9 @@ pub async fn gossip_health(
     let att_bad_sig_count = state.attestation_bad_sigs.lock_recover().len();
     let rejected_count = state.gossip_rejected.lock_recover().len();
     let rejected_dedup = state.gossip_rejected_dedup_total.load(Relaxed);
+    let throttle_refused_dropped = state.throttle_refused_dropped_total.load(Relaxed);
+    let gossip_retry_depth = state.gossip_retry.lock_recover().len();
+    let gossip_retry_recovered = state.gossip_retry_recovered_total.load(Relaxed);
 
     Json(serde_json::json!({
         "push_total": push_total,
@@ -1769,6 +1782,9 @@ pub async fn gossip_health(
         "attestation_bad_sig_cache_size": att_bad_sig_count,
         "gossip_rejected_cache_size": rejected_count,
         "gossip_rejected_dedup_total": rejected_dedup,
+        "throttle_refused_dropped_total": throttle_refused_dropped,
+        "gossip_retry_depth": gossip_retry_depth,
+        "gossip_retry_recovered_total": gossip_retry_recovered,
         "uptime_seconds": (uptime * 100.0).round() / 100.0,
     }))
 }

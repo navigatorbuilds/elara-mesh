@@ -304,8 +304,13 @@ pub(crate) async fn compute_account_proof(
             "live_state_matches_sealed".into(),
             serde_json::json!(live_state_matches_sealed),
         );
-        // Always true post-fix: proof.root == latest seal's account_smt_root
-        // because we don't flush past it. Kept for backward compat + monitoring.
+        // TRUE when this node's proof root equals the latest sealed
+        // account_smt_root. NOT structurally guaranteed: the scoped witness
+        // flush converges nodes whose flushed scopes match the producer's
+        // dirty set, and B1′ (2026-08-25) removed the act-only creator
+        // asymmetry that silently diverged them — but propagation lag and the
+        // residual op-failed class (verdict RISK B) can still yield false
+        // here transiently. Consumers must branch on the field, not assume it.
         obj.insert("bound_to_seal".into(), serde_json::json!(bound));
         obj.insert("latest_sealed_account".into(), sealed_json);
     }

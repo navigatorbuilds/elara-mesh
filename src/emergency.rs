@@ -58,10 +58,11 @@ pub const EMERGENCY_HALT_DOMAIN_TAG: &[u8] = b"ELARA_EMERGENCY_HALT_V1";
 /// halt tag so a halt and a resume can never collide on content-address.
 pub const EMERGENCY_RESUME_DOMAIN_TAG: &[u8] = b"ELARA_EMERGENCY_RESUME_V1";
 
-/// Metadata key carrying a serialized [`EmergencyHalt`]. Must be in the
-/// `content_safety::ALLOWED_KEYS` allowlist (else the carrier hard-rejects at
-/// ingest) and in the `is_global_op` zone-filter exemption (else a zone-scoped node
-/// drops the record before store/gossip).
+/// Metadata key carrying a serialized [`EmergencyHalt`]. Registered in the
+/// `content_safety::ALLOWED_KEYS` producer-side schema registry (2026-07-02:
+/// a schema registry, no longer an ingest admission hard-reject) and in the
+/// `is_global_op` zone-filter exemption (else a zone-scoped node drops the
+/// record before store/gossip).
 pub const EMERGENCY_HALT_OP_KEY: &str = "emergency_halt_op";
 /// Metadata key carrying a serialized [`EmergencyResume`].
 pub const EMERGENCY_RESUME_OP_KEY: &str = "emergency_resume_op";

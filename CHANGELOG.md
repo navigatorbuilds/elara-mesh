@@ -2,6 +2,26 @@
 
 All notable changes to elara-runtime.
 
+## Crates — elara-verify 0.3.3 — 2026-08-25
+
+Act-metadata echo becomes pass-through (G4 derive-don't-restate): the six core keys
+still lead in their stable order and still gate act-detection, but every OTHER metadata
+key the record carries now follows in sorted order — so new schema keys (first user: the
+chained mirror-publish act's mirror_commit / mirror_repo / prev_mirror_commit /
+acts_root / acts_count) are visible in prose and `--json` without a verifier release.
+Non-act records unchanged (no echo). No key is denylisted today; a future key that must
+not echo gets an explicit filter, never a return to a fixed allowlist.
+
+## Crates — elara-verify 0.3.2 — 2026-08-24
+
+Act-metadata echo (G2, from the commit-record council): verify output now surfaces the
+six act-metadata keys (tool, action, args_hash, agent_id, mandate_ref, kind) verbatim in
+prose and `--json` (`act_metadata`), each echo carrying the honesty line (metadata are
+signed claims, not verified facts). New `--expect-args-hash <hex>` flag: explicit
+MATCH/MISMATCH/ABSENT line, exit 4 on MISMATCH/ABSENT, decided outside the check list —
+verdict grading untouched; non-act records byte-identical to 0.3.1. Closes the gap where
+a stranger could verify a signature but not what it binds.
+
 ## Crates — elara-record 0.3.0 · elara-verify 0.3.1 — 2026-08-24
 
 **elara-record 0.3.0:** wire decode ceiling v7 (v7 = per-seal Merkle fold-dispatch

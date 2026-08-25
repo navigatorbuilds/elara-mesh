@@ -335,6 +335,19 @@ const ALLOWED_KEYS: &[&str] = &[
     "args_hash",
     "agent_id",
     "session_id",
+    // G4 chained mirror-publish act (kind="mirror_publish_act"): the
+    // publicly-recomputable proof binding of a public-mirror push. Signed by
+    // the maintainer identity; `kind` + `args_hash` are shared with the block
+    // above, these five are the new schema keys (G4-PUBLIC-BINDING FINAL
+    // RULING §2/§7). mirror_commit/prev_mirror_commit = full 40-char git sha1
+    // (pointer, re-verifiable against GitHub); mirror_repo = bare slug (the
+    // general content scan rejects URL-shaped values); acts_root = SHA3 Merkle
+    // root over the window's commit-receipt ids; acts_count = N.
+    "mirror_commit",
+    "mirror_repo",
+    "prev_mirror_commit",
+    "acts_root",
+    "acts_count",
     // REALMS P1.5(b) anchor-proof records (anchor_proof.rs) — a matured
     // epoch-anchor artifact + its Bitcoin-upgraded OTS proof as a mesh
     // record (`kind="anchor_proof"`). Allowlisted INERT before any producer
@@ -409,6 +422,14 @@ const TEXT_LIMITS: &[TextLimit] = &[
     TextLimit { key: "args_hash", max_bytes: 128 },
     TextLimit { key: "agent_id", max_bytes: 64 },
     TextLimit { key: "session_id", max_bytes: 64 },
+    // G4 mirror-publish act value bounds. sha1 = 40 hex + slack; acts_root
+    // sized for SHA3-512 hex like args_hash; mirror_repo is a short slug;
+    // acts_count is a decimal string.
+    TextLimit { key: "mirror_commit", max_bytes: 64 },
+    TextLimit { key: "prev_mirror_commit", max_bytes: 64 },
+    TextLimit { key: "mirror_repo", max_bytes: 128 },
+    TextLimit { key: "acts_root", max_bytes: 128 },
+    TextLimit { key: "acts_count", max_bytes: 32 },
     // Dormancy proof-of-life signature: Dilithium3 hex is ~6,605 bytes; allow 8KB slack.
     TextLimit { key: "beat_proof_signature", max_bytes: 8192 },
     // Anchor-proof records (P1.5(b)). The binding ingest bound is the 8192
@@ -518,8 +539,8 @@ pub const MAX_METADATA_KEY_LEN: usize = 128;
 /// failed the whole record. That made every additive metadata key a
 /// cross-version sync break — a binary built before a key was allowlisted
 /// rejected 100% of newer records carrying it (epoch seals included) and froze
-/// at its epoch tip. Live incident: `drand_previous_signature` vs. the ACER
-/// external-join node. A frozen public-release binary can never be taught new
+/// at its epoch tip. Live incident: `drand_previous_signature` vs. an
+/// external-join test node. A frozen public-release binary can never be taught new
 /// keys, so admission must tolerate them. Decision + adversarial verification:
 /// internal design notes.
 ///
@@ -568,7 +589,8 @@ pub fn is_known_key(key: &str) -> bool {
 
 /// Default max bytes for any string metadata value without a specific TEXT_LIMITS entry.
 /// Prevents using unchecked fields to smuggle content while staying within the
-/// per-value 2KB cap enforced at the record level.
+/// per-value cap enforced at the record level (256 B default here; specific
+/// TEXT_LIMITS entries range up to 8 KB for crypto/proof hex fields).
 const DEFAULT_TEXT_MAX_BYTES: usize = 256;
 
 /// Enforce byte limits and URL rejection on ALL string-valued metadata fields.
@@ -611,6 +633,14 @@ pub fn sanitize_text_fields(metadata: &BTreeMap<String, serde_json::Value>) -> R
                 "global_seal_vrf_proof", "global_seal_vrf_output", "previous_seal_hash",
                 // Agent audit — args_hash is a hex SHA3 digest by design
                 "args_hash",
+                // G4 mirror-publish act — structured protocol values, not prose:
+                // mirror_commit/prev_mirror_commit are 40-char git sha1 hex,
+                // acts_root is a SHA3 Merkle root hex, mirror_repo is a bare
+                // owner/name slug. Like args_hash they must be exempt from the
+                // encoded-data heuristic or every mirror_publish_act record is
+                // rejected at ingest. (URLs in mirror_repo are still rejected by
+                // the contains_url check above; TEXT_LIMITS still bound length.)
+                "mirror_commit", "prev_mirror_commit", "acts_root", "mirror_repo",
             ];
             let is_text_field = TEXT_LIMITS.iter().any(|l| l.key == key.as_str());
             let is_crypto_field = CRYPTO_KEY_FIELDS.contains(&key.as_str())
@@ -1744,6 +1774,50 @@ mod tests {
     }
 
     #[test]
+    fn test_mirror_publish_act_keys_allowed() {
+        // G4 producer meta-test (FINAL RULING §2/§7): the chained mirror-publish
+        // act's full key set must pass the allowlist + text sanitization, the
+        // five new keys must be registered, and mirror_repo must be a bare slug
+        // (a URL-shaped value is rejected — the "contains_url" property).
+        let full40 = "f7b1746a0011eeff2233445566778899aabbccdd";
+        let prev40 = "97ac53d70011eeff2233445566778899aabbccee";
+        let sha3_64 = "6f06dd0e26608013eff30bb1e951cda7de3fdd9e78e907470e0dd5c0ed25e273";
+        let m = meta(&[
+            ("kind", "mirror_publish_act"),
+            ("mirror_commit", full40),
+            ("mirror_repo", "navigatorbuilds/elara-mesh"),
+            ("prev_mirror_commit", prev40),
+            ("args_hash", sha3_64),
+            ("acts_root", sha3_64),
+            ("acts_count", "171"),
+        ]);
+        assert!(validate_metadata_keys(&m).is_ok(), "full mirror_publish_act key set is allowlisted");
+        assert!(sanitize_text_fields(&m).is_ok(), "bare-slug values pass text sanitization");
+
+        // The five NEW keys are in the producer-side schema registry.
+        for k in ["mirror_commit", "mirror_repo", "prev_mirror_commit", "acts_root", "acts_count"] {
+            assert!(ALLOWED_KEYS.contains(&k), "{k} registered in ALLOWED_KEYS");
+            // charset-verified: snake_case, ≤ 42 bytes (the schema-registry convention).
+            assert!(k.len() <= 42, "{k} within the 42-byte key-name bound");
+            assert!(
+                k.chars().next().is_some_and(|c| c.is_ascii_lowercase())
+                    && k.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'),
+                "{k} is snake_case (charset-verified)"
+            );
+        }
+
+        // mirror_repo MUST be a bare slug: a URL-shaped value is rejected.
+        let m_url = meta(&[
+            ("kind", "mirror_publish_act"),
+            ("mirror_repo", "https://github.com/navigatorbuilds/elara-mesh"),
+        ]);
+        assert!(
+            sanitize_text_fields(&m_url).is_err(),
+            "a URL in mirror_repo is rejected (contains_url) — only bare slugs pass"
+        );
+    }
+
+    #[test]
     fn test_agent_audit_args_hash_limit() {
         // args_hash 128-byte limit — SHA3-512 hex (128 chars) fits, larger rejected.
         let long_hash = "a".repeat(200);
@@ -2052,7 +2126,8 @@ mod tests {
     /// TEXT_LIMITS entry. `beat_purpose` is in ALLOWED_KEYS but absent from
     /// TEXT_LIMITS, so it must reject exactly at 257 bytes and accept at 256.
     /// Pre-default-cap this field was completely unchecked — closing it is
-    /// the structural defense behind the 2KB per-value record cap.
+    /// the structural defense behind the per-value record cap (256 B default,
+    /// up to 8 KB for crypto/proof fields).
     #[test]
     fn batch_b_default_text_limit_256_byte_boundary_on_unlisted_allowed_key() {
         let ok_256 = "a".repeat(256);

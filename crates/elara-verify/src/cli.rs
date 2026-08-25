@@ -186,6 +186,84 @@ pub struct Cli {
     /// Mutually exclusive with the per-leg evidence flags.
     #[arg(long)]
     receipt: Option<PathBuf>,
+    /// Expected `args_hash` (hex) for the record's act metadata — the SHA3-256
+    /// an agent-audit act claims to bind (e.g. sha3 of a full 40-char commit
+    /// sha). Compared against the record's `args_hash` metadata key; the run
+    /// prints an explicit "args-hash binding: MATCH/MISMATCH/ABSENT" line and
+    /// EXITS 4 on MISMATCH or ABSENT (the record's cryptographic verdict and
+    /// its exit code are otherwise unchanged). Without this flag, behavior is
+    /// identical to previous releases.
+    #[arg(long = "expect-args-hash")]
+    expect_args_hash: Option<String>,
+}
+
+/// The six core act-metadata keys (G2) — now the PREFERRED-ORDER PREFIX of
+/// the echo, and still the act-detection trigger. Since G4 the echo is
+/// pass-through: these six lead (stable order for the common agent_audit
+/// shape), and every OTHER metadata key the record carries follows in sorted
+/// order — so new schema keys (e.g. the mirror_publish_act family:
+/// mirror_commit / mirror_repo / prev_mirror_commit / acts_root / acts_count)
+/// are visible in the echo BY DEFAULT, with no verifier release. No key is
+/// currently denylisted; a future key that must NOT echo gets an explicit
+/// filter in [`extract_act_metadata`] — never a return to a fixed allowlist.
+pub const ACT_METADATA_KEYS: [&str; 6] =
+    ["tool", "action", "args_hash", "agent_id", "mandate_ref", "kind"];
+
+/// Fixed honesty sentence that rides with every act-metadata echo (G2 §4).
+pub const ACT_METADATA_HONESTY: &str = "SIGNED CLAIMS by the record's creator — the signature proves who said them, not that they are true";
+
+/// Extract the act metadata from a record's metadata map: the
+/// [`ACT_METADATA_KEYS`] present, in that order, then every remaining key in
+/// sorted (map) order — pass-through, values verbatim (strings unquoted; any
+/// non-string value in canonical JSON form). `None` when the record carries
+/// none of the six core keys — non-act records still produce no echo at all
+/// (a ledger record's op metadata is not an act claim).
+pub fn extract_act_metadata(
+    md: &std::collections::BTreeMap<String, serde_json::Value>,
+) -> Option<Vec<(String, String)>> {
+    if !ACT_METADATA_KEYS.iter().any(|k| md.contains_key(*k)) {
+        return None;
+    }
+    let val =
+        |v: &serde_json::Value| v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string());
+    let mut out: Vec<(String, String)> = ACT_METADATA_KEYS
+        .iter()
+        .filter_map(|k| md.get(*k).map(|v| ((*k).to_string(), val(v))))
+        .collect();
+    for (k, v) in md {
+        if !ACT_METADATA_KEYS.contains(&k.as_str()) {
+            out.push((k.clone(), val(v)));
+        }
+    }
+    Some(out)
+}
+
+/// Outcome of the `--expect-args-hash` comparison (G2 §3). Decided OUTSIDE the
+/// check list so the cryptographic verdict grading is untouched; MISMATCH and
+/// ABSENT map to exit code 4.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ArgsHashBinding {
+    Match,
+    Mismatch { expected: String, found: String },
+    Absent { expected: String },
+}
+
+/// Compare an expected args-hash against the extracted act metadata.
+pub fn args_hash_binding(
+    act_meta: Option<&Vec<(String, String)>>,
+    expected: &str,
+) -> ArgsHashBinding {
+    let expected_norm = expected.trim().to_ascii_lowercase();
+    match act_meta.and_then(|m| m.iter().find(|(k, _)| k == "args_hash")) {
+        Some((_, found)) if found.trim().to_ascii_lowercase() == expected_norm => {
+            ArgsHashBinding::Match
+        }
+        Some((_, found)) => ArgsHashBinding::Mismatch {
+            expected: expected_norm,
+            found: found.clone(),
+        },
+        None => ArgsHashBinding::Absent { expected: expected_norm },
+    }
 }
 
 // `Status`, `Verdict`, `Check`, `RecordSummary`, `AnchorSummary`, `st` and the
@@ -265,6 +343,9 @@ pub fn run() -> ExitCode {
     // Advisory receipt metadata for the emitters (producer is displayed with a
     // provenance caveat, never graded).
     let mut receipt_display: Option<ReceiptDisplay> = None;
+    // G2: act-metadata echo — set wherever a record decodes; None for
+    // non-act records and record-less runs (zero output change for those).
+    let mut act_meta: Option<Vec<(String, String)>> = None;
     // Resolve --content ONCE (whichever transport's record leg runs consumes
     // it): the artifact bytes, or the read-failure reason the record's content
     // check will FAIL with (never a silent skip).
@@ -321,11 +402,20 @@ pub fn run() -> ExitCode {
                         }
                     }
                 };
+                act_meta = extract_act_metadata(&record.metadata);
                 let (summary, hash) = record_leg(&record, content.as_ref(), &mut checks);
                 out.record_summary = Some(summary);
                 out.record_hash = Some(hash);
             }
             Ok(receipt::ReceiptInput::V1(legs)) => {
+                // G2: the record leg decodes inside grade_receipt_v1 and only
+                // summaries escape — re-decode the wire here purely for the
+                // act-metadata echo (trivial cost, shared types untouched).
+                act_meta = legs
+                    .record_wire
+                    .as_deref()
+                    .and_then(|w| ValidationRecord::from_bytes(w).ok())
+                    .and_then(|r| extract_act_metadata(&r.metadata));
                 let pins = TrustPins {
                     trusted_anchor: &cli.trusted_anchor,
                     expected_hash: cli.expected_hash.as_deref(),
@@ -378,6 +468,7 @@ pub fn run() -> ExitCode {
             }
         };
 
+        act_meta = extract_act_metadata(&record.metadata);
         let (summary, hash) = record_leg(&record, content.as_ref(), &mut checks);
         out.record_summary = Some(summary);
         out.record_hash = Some(hash);
@@ -457,6 +548,13 @@ pub fn run() -> ExitCode {
 
     let verdict = Verdict::of(&checks);
 
+    // G2 §3: the args-hash binding is decided OUTSIDE the check list — the
+    // cryptographic verdict and its grading are untouched by this flag.
+    let binding = cli
+        .expect_args_hash
+        .as_deref()
+        .map(|exp| args_hash_binding(act_meta.as_ref(), exp));
+
     if cli.json {
         emit_json(
             &checks,
@@ -465,6 +563,8 @@ pub fn run() -> ExitCode {
             out.account_facts.as_ref(),
             out.absence_facts.as_ref(),
             receipt_display.as_ref(),
+            act_meta.as_ref(),
+            binding.as_ref(),
             verdict,
         );
     } else {
@@ -475,11 +575,20 @@ pub fn run() -> ExitCode {
             out.account_facts.as_ref(),
             out.absence_facts.as_ref(),
             receipt_display.as_ref(),
+            act_meta.as_ref(),
+            binding.as_ref(),
             verdict,
         );
     }
 
-    verdict_exit(verdict)
+    // G2 §3 exit contract: MISMATCH or ABSENT → 4, regardless of the record
+    // verdict (documented on the flag). MATCH defers to the normal verdict exit.
+    match binding {
+        Some(ArgsHashBinding::Mismatch { .. }) | Some(ArgsHashBinding::Absent { .. }) => {
+            ExitCode::from(4)
+        }
+        _ => verdict_exit(verdict),
+    }
 }
 
 // ── Thin file-reading wrappers around the verify_core legs ──────────────────
@@ -882,6 +991,7 @@ pub fn producer_summary(p: &Value) -> String {
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn emit_json(
     checks: &[Check],
     record: &Option<RecordSummary>,
@@ -889,6 +999,8 @@ pub fn emit_json(
     account: Option<&AccountInclusionFacts>,
     absence: Option<&AccountExclusionFacts>,
     receipt: Option<&ReceiptDisplay>,
+    act_meta: Option<&Vec<(String, String)>>,
+    binding: Option<&ArgsHashBinding>,
     verdict: Verdict,
 ) {
     let mut out = serde_json::json!({
@@ -977,9 +1089,25 @@ pub fn emit_json(
             "note": "unverified_producer is self-declared by the receipt file — advisory, never graded, outside every signature; legs_not_evaluated non-empty caps the verdict at PARTIAL",
         });
     }
+    if let Some(m) = act_meta {
+        let mut obj = serde_json::Map::new();
+        for (k, v) in m {
+            obj.insert(k.clone(), Value::from(v.clone()));
+        }
+        out["act_metadata"] = Value::Object(obj);
+        out["act_metadata_note"] = Value::from(ACT_METADATA_HONESTY);
+    }
+    if let Some(b) = binding {
+        out["args_hash_binding"] = Value::from(match b {
+            ArgsHashBinding::Match => "MATCH",
+            ArgsHashBinding::Mismatch { .. } => "MISMATCH",
+            ArgsHashBinding::Absent { .. } => "ABSENT",
+        });
+    }
     println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn emit_prose(
     checks: &[Check],
     record: &Option<RecordSummary>,
@@ -987,6 +1115,8 @@ pub fn emit_prose(
     account: Option<&AccountInclusionFacts>,
     absence: Option<&AccountExclusionFacts>,
     receipt: Option<&ReceiptDisplay>,
+    act_meta: Option<&Vec<(String, String)>>,
+    binding: Option<&ArgsHashBinding>,
     verdict: Verdict,
 ) {
     // The one-line gates-driven headline (verify_core::verdict_headline) leads;
@@ -1007,6 +1137,27 @@ pub fn emit_prose(
         println!("  {} {:<17} {}", c.status.glyph(), c.name, c.detail);
     }
     println!();
+    // G2: act-metadata echo — only for records that carry any of the six act
+    // keys; the honesty sentence always rides with it.
+    if let Some(m) = act_meta {
+        println!("  act metadata ({ACT_METADATA_HONESTY}):");
+        for (k, v) in m {
+            println!("    {k:<12} {v}");
+        }
+        println!();
+    }
+    if let Some(b) = binding {
+        match b {
+            ArgsHashBinding::Match => println!("  ✓ args-hash binding: MATCH"),
+            ArgsHashBinding::Mismatch { expected, found } => println!(
+                "  ✗ args-hash binding: MISMATCH (expected {expected}, record carries {found})"
+            ),
+            ArgsHashBinding::Absent { expected } => println!(
+                "  ✗ args-hash binding: ABSENT (expected {expected}, record carries no args_hash key)"
+            ),
+        }
+        println!();
+    }
 
     match verdict {
         Verdict::Failed => {
@@ -1225,5 +1376,111 @@ mod t58_producer_summary_tests {
     fn deterministic_for_same_value() {
         let p = serde_json::json!({"name": "acme"});
         assert_eq!(producer_summary(&p), producer_summary(&p));
+    }
+}
+
+#[cfg(test)]
+mod g2_act_metadata_tests {
+    use super::{args_hash_binding, extract_act_metadata, ArgsHashBinding, Cli};
+    use std::collections::BTreeMap;
+
+    fn meta(pairs: &[(&str, serde_json::Value)]) -> BTreeMap<String, serde_json::Value> {
+        pairs.iter().map(|(k, v)| (k.to_string(), v.clone())).collect()
+    }
+
+    /// (a) act record: the six core keys lead in ACT_METADATA_KEYS order,
+    /// values verbatim (strings unquoted); every OTHER key rides after them
+    /// (G4 pass-through — new schema keys visible with no verifier release).
+    #[test]
+    fn extraction_yields_present_keys_in_order_verbatim() {
+        let md = meta(&[
+            ("mandate_ref", serde_json::json!("2f1bf75c")),
+            ("tool", serde_json::json!("git")),
+            ("args_hash", serde_json::json!("8f4397cf")),
+            ("action", serde_json::json!("commit")),
+            ("unrelated", serde_json::json!("x")),
+        ]);
+        let got = extract_act_metadata(&md).expect("act keys present");
+        assert_eq!(
+            got,
+            vec![
+                ("tool".to_string(), "git".to_string()),
+                ("action".to_string(), "commit".to_string()),
+                ("args_hash".to_string(), "8f4397cf".to_string()),
+                ("mandate_ref".to_string(), "2f1bf75c".to_string()),
+                ("unrelated".to_string(), "x".to_string()),
+            ]
+        );
+    }
+
+    /// (a2) G4: a mirror_publish_act echoes ALL seven schema keys — the six
+    /// core keys that are present lead, the mirror family follows in sorted
+    /// order. This is the pass-through that lets `cargo install elara-verify`
+    /// show a publish act's full binding without a coordinated release.
+    #[test]
+    fn mirror_publish_act_echoes_all_schema_keys() {
+        let md = meta(&[
+            ("kind", serde_json::json!("mirror_publish_act")),
+            ("action", serde_json::json!("publish-mirror")),
+            ("mirror_commit", serde_json::json!("f7b1746a0011eeff2233445566778899aabbccdd")),
+            ("mirror_repo", serde_json::json!("navigatorbuilds/elara-mesh")),
+            ("prev_mirror_commit", serde_json::json!("97ac53d70011eeff2233445566778899aabbccee")),
+            ("args_hash", serde_json::json!("8f4397cf")),
+            ("acts_root", serde_json::json!("a7ffc6f8")),
+            ("acts_count", serde_json::json!("4")),
+        ]);
+        let got = extract_act_metadata(&md).expect("act-shaped");
+        let keys: Vec<&str> = got.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(
+            keys,
+            vec![
+                // core prefix, ACT_METADATA_KEYS order (present subset):
+                "action", "args_hash", "kind",
+                // pass-through tail, sorted:
+                "acts_count", "acts_root", "mirror_commit", "mirror_repo",
+                "prev_mirror_commit",
+            ]
+        );
+        assert!(got.iter().any(|(k, v)| k == "acts_count" && v == "4"), "values verbatim");
+    }
+
+    /// (b) non-act record: none of the six keys → None (emitters print nothing
+    /// new; output stays byte-identical to previous releases).
+    #[test]
+    fn non_act_record_extracts_none() {
+        let md = meta(&[("content", serde_json::json!("hello")), ("v", serde_json::json!(7))]);
+        assert!(extract_act_metadata(&md).is_none());
+        assert!(extract_act_metadata(&BTreeMap::new()).is_none());
+    }
+
+    /// (c) --expect-args-hash decision: MATCH (case/space-insensitive),
+    /// MISMATCH, ABSENT — decided outside the check list.
+    #[test]
+    fn args_hash_binding_match_mismatch_absent() {
+        let md = meta(&[("args_hash", serde_json::json!("AbC123"))]);
+        let m = extract_act_metadata(&md);
+        assert_eq!(args_hash_binding(m.as_ref(), " abc123 "), ArgsHashBinding::Match);
+        assert!(matches!(
+            args_hash_binding(m.as_ref(), "def456"),
+            ArgsHashBinding::Mismatch { .. }
+        ));
+        let none_meta = extract_act_metadata(&meta(&[("tool", serde_json::json!("git"))]));
+        assert!(matches!(
+            args_hash_binding(none_meta.as_ref(), "abc123"),
+            ArgsHashBinding::Absent { .. }
+        ));
+        assert!(matches!(
+            args_hash_binding(None, "abc123"),
+            ArgsHashBinding::Absent { .. }
+        ));
+    }
+
+    /// (d) --help documents the flag and its exit code.
+    #[test]
+    fn help_documents_expect_args_hash_and_exit_code() {
+        use clap::CommandFactory;
+        let help = Cli::command().render_long_help().to_string();
+        assert!(help.contains("--expect-args-hash"), "flag missing from --help");
+        assert!(help.contains("EXITS 4"), "exit code 4 not documented in --help");
     }
 }

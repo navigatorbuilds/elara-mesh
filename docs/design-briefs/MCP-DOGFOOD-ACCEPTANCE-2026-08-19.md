@@ -2,7 +2,7 @@
 
 Per MCP-MANDATE-SERVER-VERDICT-2026-08-19.md Q8: dogfood is v0's acceptance
 gate, run BEFORE any external mention. Harness: `scripts/mcp-dogfood.py`
-(real stdio JSON-RPC against the release binary, live DELL node, network
+(real stdio JSON-RPC against the release binary, live authority-seed node, network
 `testnet`).
 
 ## Run 1 — fail-closed proof (unplanned, kept deliberately)

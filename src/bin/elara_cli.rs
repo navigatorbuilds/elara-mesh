@@ -16,7 +16,7 @@
 //!   @spec internal design notes
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
@@ -135,6 +135,12 @@ enum Commands {
     Submit {
         /// Path to wire bytes file.
         file: PathBuf,
+        /// Machine mode (the spool drain's boundary): ONE JSON line with a
+        /// classified outcome — class ∈ accepted/duplicate/quota/embargoed/
+        /// unreachable/error/indeterminate. Exit 0 iff the record is on the
+        /// chain (accepted, or duplicate = already there); nonzero otherwise.
+        #[arg(long)]
+        json: bool,
     },
     /// Build, sign, and submit an anchor-proof record (P1.5(b)) from a
     /// matured sidecar artifact + its Bitcoin-UPGRADED .ots proof. The
@@ -508,6 +514,14 @@ enum Commands {
         /// Session id (UUID or Claude session). Optional.
         #[arg(long)]
         session_id: Option<String>,
+        /// G1: spool directory. When set, a signed record whose submit does
+        /// NOT land (rate refusal, node down, unreadable response) is written
+        /// durably to <dir>/pending/<record_id>.wire instead of being
+        /// discarded; scripts/elara-spool-drain.sh resubmits later. Exit code
+        /// and output are UNCHANGED — the emission still truthfully failed to
+        /// land now.
+        #[arg(long = "spool-dir")]
+        spool_dir: Option<PathBuf>,
         /// Optional mandate_id this act is performed under. When set, the record
         /// carries `mandate_ref` metadata so `GET /mandate/status/{record_id}`
         /// resolves the act against that mandate (Valid / PostRevocation /
@@ -525,6 +539,66 @@ enum Commands {
         /// submit failure so PostToolUse hooks never cascade, which is exactly
         /// the wrong contract for a caller that needs the truth
         /// (MCP-MANDATE-SERVER-VERDICT-2026-08-19 build-order item 1).
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Emit the chained mirror-publish act: a Public ValidationRecord with
+    /// metadata `kind=mirror_publish_act` binding a public-mirror push to the
+    /// chain (G4-PUBLIC-BINDING FINAL RULING §2/§7). This is an EXPLICIT emit
+    /// path — the schema is fixed here, never a generic metadata pass-through.
+    /// A stranger recomputes every claim: `mirror_commit` against GitHub,
+    /// `acts_root` from the published feed diff between `mirror_commit` and
+    /// `prev_mirror_commit`, `args_hash` from the disclosed construction.
+    /// Unlike `agent-emit`, the plain mode exits NONZERO when the record
+    /// neither landed nor spooled — this emission is load-bearing for the
+    /// publish flow, not a fire-and-forget hook.
+    MirrorPublishEmit {
+        /// Path to the MAINTAINER signer identity JSON (T94 outward-act
+        /// class). REQUIRED — deliberately no ~/.elara/identity.json default,
+        /// so a mis-wired caller can never sign a publish act with the
+        /// build-agent identity.
+        #[arg(long)]
+        identity: PathBuf,
+        /// Full 40-hex sha of the JUST-PUSHED public mirror commit. The
+        /// ledger's short sha stays human-only — 28 bits is not a binding.
+        #[arg(long)]
+        mirror_commit: String,
+        /// Bare owner/name slug of the public mirror. URL-shaped values are
+        /// rejected here AND by the node's content scan.
+        #[arg(long, default_value = "navigatorbuilds/elara-mesh")]
+        mirror_repo: String,
+        /// Full 40-hex sha of the tip the mirror served BEFORE this push
+        /// (== the previous act's mirror_commit once every publish emits —
+        /// the CHAIN that makes a suppressed publish detectable). Omit ONLY
+        /// when the mirror had no pre-push tip (initial publish).
+        #[arg(long)]
+        prev_mirror_commit: Option<String>,
+        /// Full 40-hex sha of the PRIVATE tip this publish staged from. Only
+        /// SHA3-256(this ascii string) rides in the record as `args_hash`;
+        /// the raw private sha itself never ships.
+        #[arg(long)]
+        private_tip: String,
+        /// Path to the publish-window act list: one commit-receipt record_id
+        /// per line (the receipt ids NEW in this publish's feed vs
+        /// prev_mirror_commit's feed). Deduplicated; `acts_count` = unique
+        /// ids; `acts_root` = elara-smt root over `update(k, k)` where
+        /// `k = SHA3-256(record_id ascii)`. An empty file yields the SMT
+        /// empty root (SHA3-256 of empty input).
+        #[arg(long)]
+        acts_file: PathBuf,
+        /// G1 spool directory (same durability contract as agent-emit): a
+        /// signed record whose submit does not land is written to
+        /// <dir>/pending/ and resubmitted by scripts/elara-spool-drain.sh,
+        /// which drains this class PRIORITY-first and fires the P1
+        /// publish-receipt-spooled alert.
+        #[arg(long = "spool-dir")]
+        spool_dir: Option<PathBuf>,
+        /// Machine output: exactly one JSON line
+        /// (`{"ok":…,"record_id":…,"spooled":…}`) and NONZERO exit on any
+        /// outcome that is not a node-confirmed accept. publish-mirror.sh
+        /// uses this mode and treats ok==true OR spooled==true as
+        /// emit-or-spool verified.
         #[arg(long)]
         json: bool,
     },
@@ -844,9 +918,54 @@ async fn run() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&resp)?);
         }
 
-        Commands::Submit { file } => {
+        Commands::Submit { file, json } => {
             let wire_bytes = std::fs::read(&file).map_err(ElaraError::Io)?;
-            submit_record(&pq, &pq_addr, &wire_bytes).await?;
+            if json {
+                // G1 M3: machine mode for the spool drain — ONE JSON line with a
+                // Rust-side `class` computed from the node's reason strings in
+                // `submit_class`, so no shell ever substring-matches prose.
+                // Exit 0 iff the record is on the chain (accepted now or
+                // already there). Transport failures (dial/handshake/read —
+                // the node never answered) classify "unreachable" BEFORE any
+                // reason parsing: environmental, says nothing about the
+                // record; the drain stops its sweep without burning attempts.
+                let body = match pq.submit_record(&pq_addr, &wire_bytes).await {
+                    Ok(body) => body,
+                    Err(e) => {
+                        println!("{}", serde_json::json!({
+                            "ok": false, "class": "unreachable", "reason": e.to_string(),
+                        }));
+                        return Err(e);
+                    }
+                };
+                match outcome_from_body(&body) {
+                    Ok(SubmitOutcome::Accepted(id)) => {
+                        println!("{}", serde_json::json!({
+                            "ok": true, "class": "accepted", "record_id": id,
+                        }));
+                    }
+                    Ok(SubmitOutcome::Indeterminate(body)) => {
+                        println!("{}", serde_json::json!({
+                            "ok": false, "class": "indeterminate", "body": body,
+                        }));
+                        return Err(ElaraError::Network(
+                            "submit --json: indeterminate node response".into(),
+                        ));
+                    }
+                    Err(e) => {
+                        let reason = e.to_string();
+                        let class = submit_class(&reason);
+                        println!("{}", serde_json::json!({
+                            "ok": class == "duplicate", "class": class, "reason": reason,
+                        }));
+                        if class != "duplicate" {
+                            return Err(e);
+                        }
+                    }
+                }
+            } else {
+                submit_record(&pq, &pq_addr, &wire_bytes).await?;
+            }
         }
 
         Commands::AnchorSubmit { artifact, ots, identity, dry_run } => {
@@ -1161,6 +1280,7 @@ async fn run() -> Result<()> {
 
         Commands::AgentEmit {
             identity, tool, action, args_hash, agent_id, session_id, mandate_ref, quiet, json,
+            spool_dir,
         } => {
             // Resolve identity path — default to ~/.elara/identity.json.
             let id_path = identity.unwrap_or_else(|| {
@@ -1194,10 +1314,35 @@ async fn run() -> Result<()> {
                 );
             }
 
+            // G1 M5 INVARIANT: agent_audit records keep ZERO parents (the
+            // `vec![]` below). The safety of late/spooled submission rests on
+            // it — parentless records structurally skip both the causal check
+            // and the 30-day past-skew gate at ingest; chaining them into a
+            // DAG lineage would reactivate that gate and break the spool.
             let record = elara_runtime::accounting::types::create_ledger_record_with_nonce(
                 &id, vec![], meta, session_nonce(),
             )?;
             let rid = record.id.clone();
+            // G1 (a): one spool closure for every non-landed path (M2: Err AND
+            // Indeterminate). Best-effort — a spool failure is loud on stderr
+            // but never changes the emit's exit contract.
+            let wire = record.to_bytes();
+            let maybe_spool = |reason: &str| -> bool {
+                if let Some(dir) = spool_dir.as_deref() {
+                    match spool_record(dir, &rid, &wire, reason) {
+                        Ok(()) => {
+                            eprintln!("spooled: {rid} reason={reason}");
+                            true
+                        }
+                        Err(e) => {
+                            eprintln!("spool FAILED for {rid}: {e}");
+                            false
+                        }
+                    }
+                } else {
+                    false
+                }
+            };
             if json {
                 // Machine mode (the MCP server's boundary): exactly ONE JSON
                 // line on stdout, NONZERO exit on anything that is not a
@@ -1207,7 +1352,12 @@ async fn run() -> Result<()> {
                 // (The default human mode below deliberately exits 0 on failure
                 // so PostToolUse hooks never cascade — the exit-0 inheritance
                 // the elara-mcp audit refused to ship into programmatic use.)
-                match submit_record_quiet(&pq, &pq_addr, &record.to_bytes()).await {
+                let outcome = submit_record_quiet(&pq, &pq_addr, &wire).await;
+                // G1 M2: the spool decision comes from spool_reason (ONE
+                // tested place, shared with the plain mode below) — Err AND
+                // Indeterminate spool, Accepted never.
+                let spooled = spool_reason(&outcome).map(|r| maybe_spool(&r)).unwrap_or(false);
+                match outcome {
                     Ok(SubmitOutcome::Accepted(accepted_id)) => {
                         println!("{}", serde_json::json!({
                             "ok": true,
@@ -1225,6 +1375,7 @@ async fn run() -> Result<()> {
                             "error": "indeterminate: unclassifiable node response",
                             "record_id": rid,
                             "body": body,
+                            "spooled": spooled,
                         }));
                         return Err(ElaraError::Network(
                             "agent-emit --json: indeterminate node response".into(),
@@ -1235,6 +1386,7 @@ async fn run() -> Result<()> {
                             "ok": false,
                             "error": format!("submit failed: {e}"),
                             "record_id": rid,
+                            "spooled": spooled,
                         }));
                         return Err(ElaraError::Network(format!(
                             "agent-emit --json: submit failed: {e}"
@@ -1243,17 +1395,174 @@ async fn run() -> Result<()> {
                 }
                 return Ok(());
             }
-            if let Err(e) = submit_record(&pq, &pq_addr, &record.to_bytes()).await {
-                if !quiet {
-                    eprintln!("agent-emit failed: {e}");
+            // G1 M2: the plain path adopts the same three-way — the old
+            // submit_record None-arm printed the raw body and returned Ok,
+            // silently DISCARDING an unlanded record. Output stays
+            // compatible (the "accepted: <id>" line the quickstart and the
+            // receipt hook grep is preserved); only durability changes. The
+            // spool decision is the SAME spool_reason as --json mode.
+            let outcome = submit_record_quiet(&pq, &pq_addr, &wire).await;
+            if let Some(reason) = spool_reason(&outcome) {
+                maybe_spool(&reason);
+            }
+            match outcome {
+                Ok(SubmitOutcome::Accepted(accepted_id)) => {
+                    println!("accepted: {accepted_id}");
                 }
-                // Exit 0 so hook failures don't cascade into the agent.
-                return Ok(());
+                Ok(SubmitOutcome::Indeterminate(body)) => {
+                    println!("{body}");
+                    // Exit 0 so hook failures don't cascade into the agent.
+                    return Ok(());
+                }
+                Err(e) => {
+                    // Mirror the old submit_record's own rejection eprintln so
+                    // stderr stays shape-compatible with pre-spool releases.
+                    eprintln!("{e}");
+                    if !quiet {
+                        eprintln!("agent-emit failed: {e}");
+                    }
+                    // Exit 0 so hook failures don't cascade into the agent.
+                    return Ok(());
+                }
             }
             if !quiet {
                 match mandate_ref.as_ref() {
                     Some(mref) => println!("agent-emit: {rid} tool={tool} action={action} mandate_ref={mref}"),
                     None => println!("agent-emit: {rid} tool={tool} action={action}"),
+                }
+            }
+        }
+
+        Commands::MirrorPublishEmit {
+            identity, mirror_commit, mirror_repo, prev_mirror_commit, private_tip,
+            acts_file, spool_dir, json,
+        } => {
+            // Fail-closed validation BEFORE anything is signed: a malformed
+            // input must never produce a signed-but-wrong binding.
+            let mirror_commit = validate_full_sha(&mirror_commit, "--mirror-commit")?;
+            let prev_mirror_commit = prev_mirror_commit
+                .as_deref()
+                .map(|p| validate_full_sha(p, "--prev-mirror-commit"))
+                .transpose()?;
+            let private_tip = validate_full_sha(&private_tip, "--private-tip")?;
+            let repo = mirror_repo.trim();
+            if repo.is_empty()
+                || repo.contains("://")
+                || repo.contains(char::is_whitespace)
+                || !repo.contains('/')
+            {
+                return Err(ElaraError::Config(format!(
+                    "--mirror-repo must be a bare owner/name slug, got {repo:?}"
+                )));
+            }
+            let rids = parse_acts_file(&acts_file)?;
+            let acts_root = mirror_acts_root(&rids)?;
+
+            let id = load_identity(&identity)?;
+            let meta = build_mirror_publish_meta(
+                &mirror_commit,
+                repo,
+                prev_mirror_commit.as_deref(),
+                &private_tip,
+                &acts_root,
+                rids.len(),
+            );
+            // Zero parents — the same G1 M5 invariant as agent_audit: a
+            // parentless record skips the causal + 30-day past-skew gates at
+            // ingest, which is what makes late/spooled submission safe.
+            let record = elara_runtime::accounting::types::create_ledger_record_with_nonce(
+                &id, vec![], meta, session_nonce(),
+            )?;
+            let rid = record.id.clone();
+            let wire = record.to_bytes();
+            let maybe_spool = |reason: &str| -> bool {
+                if let Some(dir) = spool_dir.as_deref() {
+                    match spool_record(dir, &rid, &wire, reason) {
+                        Ok(()) => {
+                            eprintln!("spooled: {rid} reason={reason}");
+                            true
+                        }
+                        Err(e) => {
+                            eprintln!("spool FAILED for {rid}: {e}");
+                            false
+                        }
+                    }
+                } else {
+                    false
+                }
+            };
+            let outcome = submit_record_quiet(&pq, &pq_addr, &wire).await;
+            let spooled = spool_reason(&outcome).map(|r| maybe_spool(&r)).unwrap_or(false);
+            if json {
+                // Machine mode: publish-mirror.sh reads this ONE line and
+                // treats ok==true OR spooled==true as emit-or-spool verified.
+                match outcome {
+                    Ok(SubmitOutcome::Accepted(accepted_id)) => {
+                        println!("{}", serde_json::json!({
+                            "ok": true,
+                            "record_id": accepted_id,
+                            "acts_root": acts_root,
+                            "acts_count": rids.len(),
+                            "spooled": false,
+                        }));
+                        return Ok(());
+                    }
+                    Ok(SubmitOutcome::Indeterminate(body)) => {
+                        println!("{}", serde_json::json!({
+                            "ok": false,
+                            "error": "indeterminate: unclassifiable node response",
+                            "record_id": rid,
+                            "body": body,
+                            "spooled": spooled,
+                        }));
+                        return Err(ElaraError::Network(
+                            "mirror-publish-emit --json: indeterminate node response".into(),
+                        ));
+                    }
+                    Err(e) => {
+                        println!("{}", serde_json::json!({
+                            "ok": false,
+                            "error": format!("submit failed: {e}"),
+                            "record_id": rid,
+                            "spooled": spooled,
+                        }));
+                        return Err(ElaraError::Network(format!(
+                            "mirror-publish-emit --json: submit failed: {e}"
+                        )));
+                    }
+                }
+            }
+            // Plain mode. DELIBERATE divergence from agent-emit: this emission
+            // is load-bearing (emit-or-spool must be verifiable by the publish
+            // flow), so a record that neither landed nor spooled exits NONZERO
+            // instead of inheriting the hook-safe exit-0 contract.
+            match outcome {
+                Ok(SubmitOutcome::Accepted(accepted_id)) => {
+                    println!("accepted: {accepted_id}");
+                    println!(
+                        "mirror-publish-emit: {rid} mirror_commit={mirror_commit} acts_count={} acts_root={acts_root}",
+                        rids.len()
+                    );
+                }
+                Ok(SubmitOutcome::Indeterminate(body)) => {
+                    eprintln!("indeterminate node response: {body}");
+                    if spooled {
+                        println!("mirror-publish-emit: {rid} NOT confirmed — spooled for drain");
+                    } else {
+                        return Err(ElaraError::Network(
+                            "mirror-publish-emit: record neither confirmed nor spooled".into(),
+                        ));
+                    }
+                }
+                Err(e) => {
+                    eprintln!("mirror-publish-emit submit failed: {e}");
+                    if spooled {
+                        println!("mirror-publish-emit: {rid} NOT landed — spooled for drain");
+                    } else {
+                        return Err(ElaraError::Network(format!(
+                            "mirror-publish-emit: submit failed and spool unavailable: {e}"
+                        )));
+                    }
                 }
             }
         }
@@ -1681,6 +1990,194 @@ fn classify_submit_body(body: &serde_json::Value) -> Option<Result<String>> {
 enum SubmitOutcome {
     Accepted(String),
     Indeterminate(String),
+}
+
+/// G1 M3: map a node rejection reason to the drain taxonomy, matching the
+/// EXACT ingest reason strings in ONE tested place (never shell substrings):
+/// - "quota" — any admission throttle (daily cap ingest.rs "daily record
+///   limit exceeded", hourly "exceeds propagation rate limit", global
+///   "global rate limit exceeded"); drain STOPS, retries next run.
+/// - "embargoed" — the node's gossip_rejected memo ("previously_rejected"):
+///   it remembers refusing this id once and short-circuits every resubmit
+///   until the memo clears (node restart, or the transient-reject
+///   reclassification). Not the record's fault: drain keeps the file, burns
+///   NO attempt, continues.
+/// - "duplicate" — duplicate-shaped rejection (already on chain via a path
+///   that errors instead of the success-shaped storage dedup); drain treats
+///   as landed.
+/// - "error" — everything else; drain leaves the file, loud, continues.
+///
+/// ─── mirror-publish-emit helpers (G4-PUBLIC-BINDING FINAL RULING §2/§7) ───
+///
+/// Validate + normalize a full git object sha: exactly 40 ASCII hex chars,
+/// returned lowercase. Fail-closed — a short/abbreviated sha is REFUSED, never
+/// padded or accepted (28 bits is not a binding).
+fn validate_full_sha(s: &str, what: &str) -> Result<String> {
+    let t = s.trim();
+    if t.len() == 40 && t.chars().all(|c| c.is_ascii_hexdigit()) {
+        Ok(t.to_ascii_lowercase())
+    } else {
+        Err(ElaraError::Config(format!(
+            "{what} must be a FULL 40-hex-char sha (got {} chars) — short shas are not a binding",
+            t.len()
+        )))
+    }
+}
+
+/// The publicly-documented acts_root construction: an elara-smt tree with one
+/// entry per unique commit-receipt record_id — `update(k, k)` where
+/// `k = SHA3-256(record_id ascii bytes)` — root hex-encoded. Order-independent
+/// and dedup-canonical by construction (keyed tree, set semantics), so a
+/// stranger recomputing from the published feed diff needs no ordering rules.
+/// The empty window yields the SMT empty root (SHA3-256 of empty input).
+fn mirror_acts_root(rids: &std::collections::BTreeSet<String>) -> Result<String> {
+    use sha3::{Digest, Sha3_256};
+    let mut tree = elara_smt::SparseMerkleTree::new(elara_smt::MemorySmtStore::new());
+    for rid in rids {
+        let k: [u8; 32] = Sha3_256::digest(rid.as_bytes()).into();
+        tree.update(&k, &k)
+            .map_err(|e| ElaraError::Config(format!("acts_root smt update: {e:?}")))?;
+    }
+    tree.commit()
+        .map_err(|e| ElaraError::Config(format!("acts_root smt commit: {e:?}")))?;
+    let root = tree
+        .root()
+        .map_err(|e| ElaraError::Config(format!("acts_root smt root: {e:?}")))?;
+    Ok(hex::encode(root))
+}
+
+/// Parse the acts file: one record_id per line, trimmed, blank lines skipped,
+/// deduplicated. Each id is bounded (≤64 bytes) and charset-checked (lowercase
+/// hex + hyphens — the receipt-id shape) so a mangled file fails HERE, before
+/// anything is signed.
+fn parse_acts_file(path: &Path) -> Result<std::collections::BTreeSet<String>> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| ElaraError::Config(format!("acts file {}: {e}", path.display())))?;
+    let mut rids = std::collections::BTreeSet::new();
+    for (n, line) in text.lines().enumerate() {
+        let rid = line.trim();
+        if rid.is_empty() {
+            continue;
+        }
+        let ok = rid.len() <= 64
+            && rid
+                .chars()
+                .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c) || c == '-');
+        if !ok {
+            return Err(ElaraError::Config(format!(
+                "acts file line {}: {rid:?} is not a receipt record_id (lowercase hex + hyphens, ≤64 bytes)",
+                n + 1
+            )));
+        }
+        rids.insert(rid.to_string());
+    }
+    Ok(rids)
+}
+
+/// Build the mirror_publish_act metadata map — the FIXED schema, all seven
+/// keys (+ the `action` verb): kind, action, mirror_commit, mirror_repo,
+/// prev_mirror_commit (omitted only on an initial publish), args_hash =
+/// SHA3-256(private tip sha ascii), acts_root, acts_count. Inputs are assumed
+/// already validated/normalized by the callers above.
+fn build_mirror_publish_meta(
+    mirror_commit: &str,
+    mirror_repo: &str,
+    prev_mirror_commit: Option<&str>,
+    private_tip: &str,
+    acts_root: &str,
+    acts_count: usize,
+) -> BTreeMap<String, serde_json::Value> {
+    use sha3::{Digest, Sha3_256};
+    let s = |v: &str| serde_json::Value::String(v.into());
+    let mut meta: BTreeMap<String, serde_json::Value> = BTreeMap::new();
+    meta.insert("kind".into(), s("mirror_publish_act"));
+    meta.insert("action".into(), s("publish-mirror"));
+    meta.insert("mirror_commit".into(), s(mirror_commit));
+    meta.insert("mirror_repo".into(), s(mirror_repo));
+    if let Some(prev) = prev_mirror_commit {
+        meta.insert("prev_mirror_commit".into(), s(prev));
+    }
+    let args_hash: [u8; 32] = Sha3_256::digest(private_tip.as_bytes()).into();
+    meta.insert("args_hash".into(), s(&hex::encode(args_hash)));
+    meta.insert("acts_root".into(), s(acts_root));
+    meta.insert("acts_count".into(), s(&acts_count.to_string()));
+    meta
+}
+
+fn submit_class(reason: &str) -> &'static str {
+    let r = reason.to_ascii_lowercase();
+    if r.contains("daily record limit exceeded")
+        || r.contains("exceeds propagation rate limit")
+        || r.contains("global rate limit exceeded")
+    {
+        "quota"
+    } else if r.contains("previously_rejected") {
+        "embargoed"
+    } else if r.contains("duplicate") {
+        "duplicate"
+    } else {
+        "error"
+    }
+}
+
+/// G1 M2: the ONE spool decision, shared by both agent-emit output modes —
+/// every non-landed outcome spools. `Accepted` = landed (never spool);
+/// `Indeterminate` AND `Err` both spool (the pre-G1 plain path silently
+/// discarded unlanded records on exactly these arms).
+fn spool_reason(outcome: &Result<SubmitOutcome>) -> Option<String> {
+    match outcome {
+        Ok(SubmitOutcome::Accepted(_)) => None,
+        Ok(SubmitOutcome::Indeterminate(_)) => Some("indeterminate node response".into()),
+        Err(e) => Some(format!("submit failed: {e}")),
+    }
+}
+
+/// G1 (a): durably spool a signed-but-unlanded emission. Layout:
+/// `<dir>/pending/<record_id>.wire` (the verbatim canonical bytes `elara-cli
+/// submit` takes — M1: the drain NEVER re-signs) + `<record_id>.reason` (one
+/// line: why it did not land). Atomic within one filesystem: write to a tmp
+/// name INSIDE pending/, then rename. Bounded: at ≥4096 pending entries the
+/// spool refuses LOUDLY (stderr) rather than grow unbounded; the count-then-
+/// write race is accepted as bounded overshoot (single-digit concurrent
+/// writers at worst — the drain holds the real lock).
+fn spool_record(dir: &Path, rid: &str, wire: &[u8], reason: &str) -> std::io::Result<()> {
+    let pending = dir.join("pending");
+    std::fs::create_dir_all(&pending)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+        let _ = std::fs::set_permissions(&pending, std::fs::Permissions::from_mode(0o700));
+    }
+    let count = std::fs::read_dir(&pending)?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().is_some_and(|x| x == "wire"))
+        .count();
+    if count >= 4096 {
+        eprintln!(
+            "spool FULL ({count} pending) — refusing to spool {rid}; drain the spool (scripts/elara-spool-drain.sh)"
+        );
+        return Err(std::io::Error::other("spool full"));
+    }
+    let tmp = pending.join(format!(".tmp-{rid}"));
+    std::fs::write(&tmp, wire)?;
+    std::fs::rename(&tmp, pending.join(format!("{rid}.wire")))?;
+    let ts = chrono::Utc::now().to_rfc3339();
+    std::fs::write(
+        pending.join(format!("{rid}.reason")),
+        format!("{ts} {reason}\n"),
+    )?;
+    // G4 leg: a `<rid>.class` sidecar = the record's `kind`, so the spool drain
+    // can PRIORITIZE the mirror_publish_act class and fire the P1 "publish
+    // receipt spooled" alert without decoding the wire in bash. Best-effort —
+    // a decode failure or missing `kind` just omits the sidecar (the drain
+    // then treats the entry as normal priority), and NEVER fails the spool.
+    if let Ok(rec) = elara_runtime::record::ValidationRecord::from_bytes(wire) {
+        if let Some(kind) = rec.metadata.get("kind").and_then(|v| v.as_str()) {
+            let _ = std::fs::write(pending.join(format!("{rid}.class")), format!("{kind}\n"));
+        }
+    }
+    Ok(())
 }
 
 /// Pure mapping from a node response body to the machine-caller outcome —
@@ -2131,5 +2628,191 @@ mod tests {
         realm_issue_cert(&member.to_ascii_uppercase(), &root_path, 30, &out2).unwrap();
         let cert2 = RealmMembershipCert::load(&out2).unwrap();
         cert2.verify(&hex::encode(&root.public_key), &member, now).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod g1_spool_tests {
+    use super::{
+        build_mirror_publish_meta, mirror_acts_root, parse_acts_file, spool_reason, spool_record,
+        submit_class, validate_full_sha, ElaraError, SubmitOutcome,
+    };
+
+    /// M3: the quota class matches the EXACT live ingest reason strings for
+    /// all three throttle shapes (the stake-gated daily cap exits through the
+    /// same ingest.rs:2288 string as the tier cap — one string, four shapes);
+    /// the node's gossip_rejected memo classifies embargoed; duplicates
+    /// classify duplicate; anything else is error. (Strings verbatim from
+    /// src/network/ingest.rs + routes/core.rs.)
+    #[test]
+    fn submit_class_covers_all_throttle_shapes_embargo_and_duplicate() {
+        assert_eq!(
+            submit_class("submit failed: daily record limit exceeded: identity limited to 20/day"),
+            "quota"
+        );
+        assert_eq!(
+            submit_class("submit failed: identity abcd exceeds propagation rate limit (100/hr, base=100, stake_bonus=0)"),
+            "quota"
+        );
+        assert_eq!(submit_class("submit failed: global rate limit exceeded (500/min)"), "quota");
+        // Live-observed 2026-08-24: resubmitting a cap-refused record returns
+        // the rejection-memo reason, not the cap string.
+        assert_eq!(submit_class("Network error: submit failed: \"previously_rejected\""), "embargoed");
+        assert_eq!(submit_class("submit failed: duplicate record"), "duplicate");
+        assert_eq!(submit_class("submit failed: invalid signature"), "error");
+    }
+
+    /// M2 pin: the ONE spool decision both agent-emit output modes share —
+    /// Indeterminate AND Err spool (the pre-G1 silent-loss arms), Accepted
+    /// never does.
+    #[test]
+    fn spool_reason_covers_indeterminate_and_err_never_accepted() {
+        assert!(spool_reason(&Ok(SubmitOutcome::Accepted("rid".into()))).is_none());
+        let indeterminate = spool_reason(&Ok(SubmitOutcome::Indeterminate("{}".into())))
+            .expect("indeterminate must spool");
+        assert!(indeterminate.contains("indeterminate"));
+        let err = spool_reason(&Err(ElaraError::Network("connection refused".into())))
+            .expect("submit error must spool");
+        assert!(err.contains("connection refused"));
+    }
+
+    /// M1 pin (the substance): what is spooled is the VERBATIM canonical wire
+    /// of the already-signed record — decoding the spool file yields the SAME
+    /// record id, so `elara-cli submit <file>` resubmits without re-signing
+    /// (no fresh nonce, no new id, no extra cap slots).
+    #[test]
+    fn spooled_wire_roundtrips_to_the_same_record_id() {
+        let id = elara_runtime::identity::Identity::generate(
+            elara_runtime::identity::EntityType::Ai,
+            elara_runtime::identity::CryptoProfile::ProfileB,
+        )
+        .expect("identity");
+        let mut meta = std::collections::BTreeMap::new();
+        meta.insert("kind".into(), serde_json::Value::String("agent_audit".into()));
+        meta.insert("tool".into(), serde_json::Value::String("git".into()));
+        let record = elara_runtime::accounting::types::create_ledger_record_with_nonce(
+            &id, vec![], meta, 42,
+        )
+        .expect("record");
+        let rid = record.id.clone();
+        let wire = record.to_bytes();
+
+        let dir = tempfile::tempdir().expect("tmpdir");
+        spool_record(dir.path(), &rid, &wire, "test: daily record limit exceeded").expect("spool");
+
+        let spooled = std::fs::read(dir.path().join("pending").join(format!("{rid}.wire")))
+            .expect("spool file");
+        assert_eq!(spooled, wire, "spool must be byte-verbatim");
+        let decoded = elara_runtime::record::ValidationRecord::from_bytes(&spooled)
+            .expect("spooled bytes decode");
+        assert_eq!(decoded.id, rid, "drained id == spooled id (M1)");
+        let reason = std::fs::read_to_string(
+            dir.path().join("pending").join(format!("{rid}.reason")),
+        )
+        .expect("sidecar");
+        assert!(reason.contains("daily record limit exceeded"));
+    }
+
+    // ─── mirror-publish-emit (G4-PUBLIC-BINDING FINAL RULING §2/§7) ────────
+
+    #[test]
+    fn validate_full_sha_is_fail_closed() {
+        // 40 hex passes and normalizes to lowercase.
+        let up = "F7B1746A0011EEFF2233445566778899AABBCCDD";
+        assert_eq!(
+            validate_full_sha(up, "t").expect("full sha"),
+            up.to_ascii_lowercase()
+        );
+        // Short (the ledger's human-only 8-char), long, and non-hex all REFUSE —
+        // an abbreviated sha must never become a signed binding.
+        for bad in ["f7b1746a", &format!("{}0", up), "z7b1746a0011eeff2233445566778899aabbccdd"] {
+            assert!(validate_full_sha(bad, "t").is_err(), "{bad:?} must be refused");
+        }
+    }
+
+    #[test]
+    fn mirror_acts_root_matches_documented_construction() {
+        use sha3::{Digest, Sha3_256};
+        // Empty window = the SMT empty root = SHA3-256 of empty input. This is
+        // the documented sentinel a stranger can verify without our code.
+        let empty = mirror_acts_root(&std::collections::BTreeSet::new()).expect("empty root");
+        assert_eq!(empty, hex::encode(elara_smt::empty_hash()));
+
+        // Non-empty: the helper must equal a direct elara-smt build with the
+        // documented construction — update(k, k), k = SHA3-256(rid ascii).
+        let rids: std::collections::BTreeSet<String> = [
+            "01a0339a-4860-7ea2-8f74-b9f37885e8bb",
+            "01a033b9-b267-7540-bb87-bd253aab4a40",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let got = mirror_acts_root(&rids).expect("root");
+        let mut tree = elara_smt::SparseMerkleTree::new(elara_smt::MemorySmtStore::new());
+        for rid in &rids {
+            let k: [u8; 32] = Sha3_256::digest(rid.as_bytes()).into();
+            tree.update(&k, &k).unwrap();
+        }
+        tree.commit().unwrap();
+        assert_eq!(got, hex::encode(tree.root().unwrap()));
+        assert_ne!(got, empty, "non-empty window has a distinct root");
+    }
+
+    #[test]
+    fn parse_acts_file_dedups_and_fails_closed() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let p = dir.path().join("acts.txt");
+        // Duplicates + blank lines + surrounding whitespace: one unique id.
+        std::fs::write(&p, "01a0339a-4860-7ea2-8f74-b9f37885e8bb\n\n  01a0339a-4860-7ea2-8f74-b9f37885e8bb  \n").unwrap();
+        let rids = parse_acts_file(&p).expect("parse");
+        assert_eq!(rids.len(), 1, "duplicate rids collapse (acts_count = unique ids)");
+
+        // A non-receipt-shaped line refuses the WHOLE file — a mangled window
+        // list must never produce a signed root over garbage.
+        for bad in ["01A0339A-4860-7EA2-8F74-B9F37885E8BB", "rm -rf /", "abc_def"] {
+            std::fs::write(&p, format!("{bad}\n")).unwrap();
+            assert!(parse_acts_file(&p).is_err(), "{bad:?} must refuse the file");
+        }
+    }
+
+    #[test]
+    fn mirror_publish_meta_passes_the_nodes_ingest_gates() {
+        use sha3::{Digest, Sha3_256};
+        let mc = "f7b1746a0011eeff2233445566778899aabbccdd";
+        let prev = "97ac53d70011eeff2233445566778899aabbccee";
+        let tip = "a4dbb5469bb2be703cb3a51074c1c0fe9c62877c";
+        let root = mirror_acts_root(&std::collections::BTreeSet::new()).unwrap();
+        let meta = build_mirror_publish_meta(mc, "navigatorbuilds/elara-mesh", Some(prev), tip, &root, 0);
+
+        // The FIXED schema: exactly these keys, nothing generic.
+        let keys: Vec<&str> = meta.keys().map(|k| k.as_str()).collect();
+        assert_eq!(
+            keys,
+            vec![
+                "action", "acts_count", "acts_root", "args_hash", "kind",
+                "mirror_commit", "mirror_repo", "prev_mirror_commit",
+            ],
+            "the fixed mirror_publish_act key set (BTreeMap order)"
+        );
+        assert_eq!(meta["kind"], "mirror_publish_act");
+        assert_eq!(meta["action"], "publish-mirror");
+        // args_hash is SHA3-256 of the ASCII private-tip sha — the disclosed
+        // construction (the raw private sha itself never ships).
+        let expect: [u8; 32] = Sha3_256::digest(tip.as_bytes()).into();
+        assert_eq!(meta["args_hash"], hex::encode(expect).as_str());
+
+        // End-to-end producer→gate pin: the meta this CLI builds passes the
+        // node's OWN ingest validation (allowlist + text sanitization) — the
+        // exact gates a4dbb546 registered the schema into.
+        elara_runtime::content_safety::validate_metadata_keys(&meta)
+            .expect("mirror_publish_act meta is allowlisted");
+        elara_runtime::content_safety::sanitize_text_fields(&meta)
+            .expect("mirror_publish_act values pass text sanitization");
+
+        // Initial-publish shape: prev omitted, everything else present.
+        let first = build_mirror_publish_meta(mc, "navigatorbuilds/elara-mesh", None, tip, &root, 3);
+        assert!(!first.contains_key("prev_mirror_commit"));
+        assert_eq!(first["acts_count"], "3");
+        elara_runtime::content_safety::validate_metadata_keys(&first).expect("initial shape allowlisted");
     }
 }
