@@ -1332,9 +1332,15 @@ async fn insert_record_inner(state: &Arc<NodeState>, mut record: ValidationRecor
     // misconfigured) record — reject before any expensive work. Empty =
     // legacy-accept: v≤5 records never carry the field, and that acceptance
     // is exactly what makes the v6 emission flip non-forking. This chokepoint
-    // covers EVERY ingress (HTTP, PQ, gossip, initial/snapshot sync, probe),
-    // including the T74/T75 paths that bypass the transport-header gate; the
-    // header check (routes/core.rs, pq router) stays advisory-layer.
+    // covers every ingress that routes through insert_record_inner (HTTP, PQ,
+    // gossip relay, initial/snapshot sync via insert_record_synced, probe).
+    // NOT universal (corrected 2026-08-25, T85/T86 verifier): the genesis
+    // bootstrap puller `bootstrap_pull_from_zero` (gossip.rs) writes straight
+    // to RocksDB via put_record and re-implements admission itself — it now
+    // carries its OWN signature + network_id_admits gate (skipping only ledger
+    // validation, by the chicken-and-egg design there). Any NEW direct
+    // put_record writer must do the same or it is an admission bypass.
+    // The header check (routes/core.rs, pq router) stays advisory-layer.
     if !network_id_admits(&record.network_id, &state.config.network_id) {
         state
             .ingest_network_id_mismatch_rejected_total

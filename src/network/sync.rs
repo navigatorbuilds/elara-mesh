@@ -1680,6 +1680,10 @@ pub async fn snapshot_bootstrap(
                 snapshot.ledger.total_supply,
                 snapshot.ledger.applied_record_ids.len(),
             );
+            // §E fence site 2b: prove hash-at-pin from this peer before any
+            // apply (the snapshot only carries latest_*). Err → caller falls
+            // back to other peers/paths.
+            verify_pinned_anchor_via_headers(state, base_url, &snapshot).await?;
             // Gap 7 real closure: load ledger + CF_APPLIED from snapshot. Delta
             // sync still runs to fetch record bytes into RocksDB/DAG, but the
             // seeded CF_APPLIED means pre-snapshot records are ledger-deduped
@@ -1752,6 +1756,10 @@ pub async fn snapshot_bootstrap(
         snapshot.ledger.total_supply,
     );
 
+    // §E fence site 2b (live-fallback path): same peer-probe as the
+    // epoch-indexed path — prove hash-at-pin before any apply.
+    verify_pinned_anchor_via_headers(state, base_url, &snapshot).await?;
+
     // Step 4: Load ledger + metadata + CF_APPLIED from the signed snapshot.
     // Gap 7 real closure: snapshot IS authoritative; pre-snapshot records
     // will be deduped by CF_APPLIED during the subsequent delta sync.
@@ -1761,6 +1769,189 @@ pub async fn snapshot_bootstrap(
 
     info!("snapshot bootstrap (live fallback): ledger loaded, delta sync will dedup pre-snapshot records");
     Ok(false)
+}
+
+/// §E re-genesis fence, site 2a (pure half): validate a bootstrap snapshot's
+/// carried epoch tips against the chain-anchor table BEFORE any state
+/// mutation. Per pinned `(zone, epoch E, hash H)`:
+///
+/// - snap tip == E  → the carried `latest_seal_hash` must equal H (a snapshot
+///   claiming the pinned epoch with a different/undecodable hash is
+///   wrong-chain or forged — refuse).
+/// - snap tip <  E AND snap tip > our local tip for that zone → refuse: the
+///   step-4b merge installs on `snap > local`, so this snapshot WOULD move our
+///   tip onto below-pin history that nothing can authenticate against the pin
+///   (the frozen pre-re-genesis chain and a badly-lagging peer are
+///   indistinguishable here — no anchor exists below E). Covers the virgin
+///   case (local 0) AND the mid-catch-up band 0 < local < snap < E, which a
+///   `local == 0` guard missed (adversarial-verify finding N3). Snapshots at
+///   or below our own tip pass — the monotone merge ignores them, so
+///   archive-restore flows are untouched.
+/// - snap tip >  E  → nothing to assert here: the snapshot only carries
+///   `latest_*`, so hash-at-E is proven by the bounded `/headers/from/{E}`
+///   peer probe (site 2b) in `snapshot_bootstrap` before apply is reached.
+/// - zone absent    → no tip-install happens for it; the
+///   `apply_canonical_seal` fence and the completion guard own the rest.
+///
+/// Pure and table-parameterized for direct unit testing; production callers
+/// pass `EpochState::chain_anchors()` (network-scoped, test-overridable).
+pub(crate) fn snapshot_anchor_precheck(
+    anchors: &[(&'static str, u64, [u8; 32])],
+    snap: &crate::network::epoch::EpochStateSnapshot,
+    local_tip_for_zone: impl Fn(&str) -> u64,
+) -> std::result::Result<(), String> {
+    for (zone_path, pin_epoch, pin_hash) in anchors {
+        let Some((zone_id, tip)) = snap
+            .latest_epoch
+            .iter()
+            .find(|(z, _)| z.path() == *zone_path)
+            .map(|(z, t)| (z.clone(), *t))
+        else {
+            continue;
+        };
+        use std::cmp::Ordering;
+        match tip.cmp(pin_epoch) {
+            Ordering::Equal => {
+                let carried = snap.latest_seal_hash.get(&zone_id).and_then(|hex_str| {
+                    let bytes = hex::decode(hex_str).ok()?;
+                    <[u8; 32]>::try_from(bytes).ok()
+                });
+                if carried != Some(*pin_hash) {
+                    return Err(format!(
+                        "snapshot claims the PINNED epoch {pin_epoch} for zone {zone_path} but \
+                         its latest_seal_hash does not match the compiled-in chain anchor — \
+                         wrong-chain or forged snapshot, refusing before any state mutation \
+                         (SEC-REGENESIS-FENCE)"
+                    ));
+                }
+            }
+            Ordering::Less => {
+                if tip > local_tip_for_zone(zone_path) {
+                    return Err(format!(
+                        "snapshot tip {tip} for pinned zone {zone_path} is below the pinned \
+                         epoch {pin_epoch} yet ahead of our local tip — installing it would \
+                         move this node onto below-pin history that nothing can authenticate \
+                         against the pin (frozen pre-re-genesis chain and lagging peer are \
+                         indistinguishable there); refusing it as a tip-setter, other \
+                         peers/paths will be tried (SEC-REGENESIS-FENCE)"
+                    ));
+                }
+            }
+            Ordering::Greater => {}
+        }
+    }
+    Ok(())
+}
+
+/// §E re-genesis fence, site 2b: when the snapshot's carried tip for a pinned
+/// zone is PAST the pinned epoch, the carried `latest_*` maps cannot prove
+/// hash-at-pin — probe the serving peer's `/headers/from/{E}?zone=&limit=1`
+/// (ONE bounded single-record PQ fetch, pinned zones only, once per bootstrap
+/// attempt). Called by `snapshot_bootstrap` on both acquisition paths BEFORE
+/// `apply_bootstrap_snapshot_full`.
+///
+/// THREAT-MODEL HONESTY (adversarial-verify finding, 2026-08-26): this is a
+/// CONSISTENCY check, not an authentication gate — it compares the peer's
+/// unsigned JSON against our own compiled-in constant, so a lying peer can
+/// simply echo the public pin back. What actually authenticates a
+/// tip-past-pin snapshot is its Dilithium3 signer trust gate: the frozen
+/// pre-re-genesis chain CANNOT produce a validly-signed snapshot with
+/// tip > pin (it froze at 35245), and an attacker who can forge one holds
+/// the authority key and has won regardless of any pin. This probe therefore
+/// refuses ONLY on an AFFIRMATIVE CONTRADICTION — the peer actively serving
+/// a DIFFERENT hash at the pinned epoch (a provably wrong-chain peer).
+/// Transport failure or absence is INCONCLUSIVE (warn + count + proceed):
+/// the peer may have legitimately GC-pruned the 45k-deep seal record
+/// (`compute_epoch_headers` skips pruned entries), so refusing on absence
+/// would eventually refuse EVERY honest peer forever. The signer trust gate
+/// and the periodic completion guard carry the inconclusive case. Upgrading
+/// this to a real proof (fetch the seal record bytes at the pin, recompute
+/// record_hash, verify the signature) is a filed follow-up.
+async fn verify_pinned_anchor_via_headers(
+    state: &Arc<NodeState>,
+    base_url: &str,
+    snapshot: &super::snapshot::NodeSnapshot,
+) -> crate::errors::Result<()> {
+    let Some(ref ep_snap) = snapshot.epoch else {
+        return Ok(());
+    };
+    let anchors = state.epoch.read_recover().chain_anchors().to_vec();
+    for (zone_path, pin_epoch, pin_hash) in anchors {
+        let tip = ep_snap
+            .latest_epoch
+            .iter()
+            .find(|(z, _)| z.path() == zone_path)
+            .map(|(_, t)| *t);
+        let Some(tip) = tip else { continue };
+        if tip <= pin_epoch {
+            // == and < are handled pre-mutation by snapshot_anchor_precheck.
+            continue;
+        }
+        let probed = match derive_pq_addr(state, base_url) {
+            Ok(pq_addr) => state
+                .pq_client
+                .headers_from(&pq_addr, pin_epoch, Some(zone_path), Some(1))
+                .await
+                .map(|resp| {
+                    resp.get("headers")
+                        .and_then(|h| h.as_array())
+                        .and_then(|arr| arr.first())
+                        .cloned()
+                }),
+            Err(e) => Err(e),
+        };
+        let first_header = match probed {
+            Ok(h) => h,
+            Err(e) => {
+                state
+                    .pinned_anchor_probe_inconclusive_total
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                warn!(
+                    "SEC-REGENESIS-FENCE: pinned-anchor header probe to {base_url} at epoch \
+                     {pin_epoch} INCONCLUSIVE (transport: {e}) — proceeding; the snapshot \
+                     signer trust gate + completion guard carry this case"
+                );
+                continue;
+            }
+        };
+        // Decisive ONLY when the peer serves a header claiming exactly the
+        // pinned (zone, epoch): a mismatched hash there is an affirmative
+        // contradiction → refuse this peer. Anything else (empty result,
+        // some other epoch/zone echoed back) is inconclusive.
+        let claims_pin = first_header.as_ref().is_some_and(|h| {
+            h.get("epoch_number").and_then(|v| v.as_u64()) == Some(pin_epoch)
+                && h.get("zone").and_then(|v| v.as_str()) == Some(zone_path)
+        });
+        if !claims_pin {
+            state
+                .pinned_anchor_probe_inconclusive_total
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            warn!(
+                "SEC-REGENESIS-FENCE: peer {base_url} (claimed tip {tip}) did not serve the \
+                 pinned epoch {pin_epoch} for zone {zone_path} (likely GC-pruned there) — \
+                 INCONCLUSIVE, proceeding on the signer trust gate"
+            );
+            continue;
+        }
+        let hash_matches = first_header
+            .as_ref()
+            .and_then(|h| h.get("seal_record_hash"))
+            .and_then(|v| v.as_str())
+            == Some(hex::encode(pin_hash).as_str());
+        if !hash_matches {
+            state
+                .pinned_anchor_bootstrap_refusals_total
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let reason = format!(
+                "SEC-REGENESIS-FENCE: peer {base_url} AFFIRMATIVELY serves a different seal \
+                 hash at the pinned (zone {zone_path}, epoch {pin_epoch}) — wrong chain; \
+                 refusing bootstrap from this peer (other peers/paths will be tried)"
+            );
+            error!("{reason}");
+            return Err(crate::errors::ElaraError::Wire(reason));
+        }
+    }
+    Ok(())
 }
 
 /// Gap 7 real closure: apply a verified bootstrap snapshot as the authoritative
@@ -1811,6 +2002,34 @@ async fn apply_bootstrap_snapshot_full(
              (CF_APPLIED dedup suppresses re-apply of the newer records). If the local ledger \
              is known-bad, retry with force=true"
         )));
+    }
+
+    // 0b. §E re-genesis fence, site 2a (pre-mutation). The step-4b tip merge
+    //     below structurally bypasses `register_seal`, so a snapshot could
+    //     otherwise install a wrong-chain tip directly. Assert the carried
+    //     tips against the chain anchors BEFORE any state mutation — failing
+    //     here refuses the whole snapshot fail-closed (no half-applied
+    //     ledger) and the caller falls back to other peers/paths. The
+    //     tip-past-pin case is proven by the `/headers/from/{E}` probe in
+    //     `snapshot_bootstrap` (site 2b) before this fn is reached.
+    if let Some(ref ep_snap) = snapshot.epoch {
+        let anchors = state.epoch.read_recover().chain_anchors().to_vec();
+        let local_tip = |zone_path: &str| {
+            state
+                .epoch
+                .read_recover()
+                .latest_epoch
+                .get(&crate::ZoneId::new(zone_path))
+                .copied()
+                .unwrap_or(0)
+        };
+        if let Err(reason) = snapshot_anchor_precheck(&anchors, ep_snap, local_tip) {
+            state
+                .pinned_anchor_bootstrap_refusals_total
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            error!("{reason}");
+            return Err(crate::errors::ElaraError::Wire(reason));
+        }
     }
 
     // 1. Load ledger. Snapshot's ledger carries applied_record_ids now (Step 1).
@@ -3633,6 +3852,95 @@ mod tests {
         let state = Arc::new(NodeState::new(config, identity, rocks, wmgr));
         std::mem::forget(tmp); // keep dir alive for the life of the test
         state
+    }
+
+    /// §E re-genesis fence, site 2a decision table (pure fn — the production
+    /// caller in `apply_bootstrap_snapshot_full` wires the same anchors and a
+    /// live local-tip lookup). Covers: pinned-epoch hash match/mismatch,
+    /// below-pin virgin refusal vs non-virgin pass, past-pin pass (2b's job),
+    /// absent zone, and the empty (deactivated) table.
+    #[test]
+    fn fence_snapshot_anchor_precheck_decision_table() {
+        use crate::network::epoch::EpochState;
+        let z0 = crate::ZoneId::from_legacy(0);
+        let pin: &[(&'static str, u64, [u8; 32])] = &[("0", 5, [0xAB; 32])];
+        let snap = |tip: u64, hash: [u8; 32]| {
+            let mut ep = EpochState::new();
+            ep.latest_epoch.insert(z0.clone(), tip);
+            ep.latest_seal_hash.insert(z0.clone(), hash);
+            ep.to_snapshot()
+        };
+        // tip == pin: carried hash decides, virgin or not.
+        assert!(snapshot_anchor_precheck(pin, &snap(5, [0xAB; 32]), |_| 0).is_ok());
+        assert!(snapshot_anchor_precheck(pin, &snap(5, [0xEE; 32]), |_| 0).is_err());
+        assert!(snapshot_anchor_precheck(pin, &snap(5, [0xEE; 32]), |_| 9).is_err());
+        // tip < pin: refused whenever it would ADVANCE our tip onto
+        // unauthenticatable below-pin history — virgin (local 0) AND the
+        // mid-catch-up band local < snap (N3); passes once our own tip is at
+        // or past the snapshot's (monotone merge ignores it then).
+        assert!(snapshot_anchor_precheck(pin, &snap(3, [0x11; 32]), |_| 0).is_err());
+        assert!(snapshot_anchor_precheck(pin, &snap(3, [0x11; 32]), |_| 2).is_err());
+        assert!(snapshot_anchor_precheck(pin, &snap(3, [0x11; 32]), |_| 3).is_ok());
+        assert!(snapshot_anchor_precheck(pin, &snap(3, [0x11; 32]), |_| 4).is_ok());
+        // tip > pin: passes here — hash-at-pin is site 2b's peer probe.
+        assert!(snapshot_anchor_precheck(pin, &snap(9, [0x44; 32]), |_| 0).is_ok());
+        // pinned zone absent from the snapshot: nothing installs for it.
+        assert!(snapshot_anchor_precheck(pin, &EpochState::new().to_snapshot(), |_| 0).is_ok());
+        // deactivated table (off-network / pre-fence world): everything passes.
+        assert!(snapshot_anchor_precheck(&[], &snap(5, [0xEE; 32]), |_| 0).is_ok());
+    }
+
+    /// §E fence site 2a WIRING (adversarial-verify S8): the pure decision
+    /// table above is enforced by `apply_bootstrap_snapshot_full` itself,
+    /// pre-mutation. Drives the real fn with an ACTIVE synthetic anchor table
+    /// (the helper's network id deactivates the compiled-in one, so arm an
+    /// override explicitly): below-pin virgin snapshot and at-pin mismatched
+    /// snapshot both refuse fail-closed — counter bumped, ledger untouched,
+    /// no tip installed; the at-pin correct snapshot applies.
+    #[tokio::test]
+    async fn fence_apply_bootstrap_snapshot_refuses_wrong_chain_pre_mutation() {
+        use crate::network::epoch::EpochState;
+        use crate::network::snapshot::NodeSnapshot;
+        use crate::accounting::ledger::LedgerState;
+        use std::collections::HashSet;
+
+        let state = test_state_for_bootstrap();
+        state.epoch.write().unwrap().chain_anchor_override =
+            Some(vec![("0", 5, [0xAB; 32])]);
+        let z0 = crate::ZoneId::from_legacy(0);
+        let snap_with = |tip: u64, hash: [u8; 32]| {
+            let mut ep = EpochState::new();
+            ep.latest_epoch.insert(z0.clone(), tip);
+            ep.latest_seal_hash.insert(z0.clone(), hash);
+            let mut ledger = LedgerState::new();
+            ledger.total_supply = 777;
+            NodeSnapshot::new(ledger, HashSet::new(), ep)
+        };
+
+        // (a) below-pin tip on a virgin node → refused before ANY mutation.
+        let res = apply_bootstrap_snapshot_full(&state, &snap_with(3, [0x11; 32]), false).await;
+        assert!(res.is_err(), "below-pin virgin snapshot must refuse");
+        // (b) at-pin tip with a foreign hash → refused.
+        let res = apply_bootstrap_snapshot_full(&state, &snap_with(5, [0xEE; 32]), false).await;
+        assert!(res.is_err(), "at-pin mismatched snapshot must refuse");
+        assert_eq!(
+            state.pinned_anchor_bootstrap_refusals_total.load(std::sync::atomic::Ordering::Relaxed),
+            2
+        );
+        assert_eq!(
+            state.ledger.read().await.total_supply, 0,
+            "refusal must leave the ledger untouched (fail-closed pre-mutation)"
+        );
+        assert!(
+            !state.epoch.read().unwrap().latest_epoch.contains_key(&z0),
+            "refusal must not install any epoch tip"
+        );
+        // (c) at-pin tip with the pinned hash → applies.
+        apply_bootstrap_snapshot_full(&state, &snap_with(5, [0xAB; 32]), false)
+            .await
+            .expect("pinned-hash snapshot must apply");
+        assert_eq!(state.epoch.read().unwrap().latest_epoch.get(&z0).copied(), Some(5));
+        assert_eq!(state.ledger.read().await.total_supply, 777);
     }
 
     #[tokio::test]

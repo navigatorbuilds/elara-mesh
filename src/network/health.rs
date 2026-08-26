@@ -12,7 +12,7 @@ use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
 use super::state::NodeState;
-use super::LockRecover;
+use super::{LockRecover, RwLockRecover};
 
 /// Emergency readiness level per Protocol Section 12.3.
 ///
@@ -762,6 +762,81 @@ pub async fn health_check_loop(state: Arc<NodeState>, mut shutdown: watch::Recei
         // a scheduled transition doesn't rot when the node boots with
         // current_max_epoch < target_epoch and is not seal-eligible.
         super::epoch::apply_pending_zone_transition_if_due(&state);
+
+        // §E re-genesis fence: completion guard (periodic form). The
+        // point-assertion at the seal funnels is VACUOUS against the frozen
+        // pre-re-genesis chain — a node fed only that history parks BELOW the
+        // pinned epoch and the at-pin check never fires. This periodic check
+        // is the alarm for that shape: epoch state populated (an empty state
+        // is "not yet replayed", never an alarm — the original bootstrap-cycle
+        // placement fired exactly there and was a guaranteed false positive,
+        // caught by the build's adversarial verify) yet a pinned zone still
+        // below its anchor. Debounced PINNED_ANCHOR_DEFICIT_ALARM_TICKS
+        // consecutive STAGNANT ticks — any tip progress resets the streak
+        // (N2: a catching-up node is not "parked"; a frozen chain cannot
+        // move its tips) — then alarms EVERY tick while the stagnant deficit
+        // persists: a node parked on a dead/foreign chain must stay loud.
+        // Alarm only, never brick.
+        {
+            const PINNED_ANCHOR_DEFICIT_ALARM_TICKS: u64 = 5;
+            let deficit = {
+                let ep = state.epoch.read_recover();
+                if ep.latest_epoch.is_empty() {
+                    Vec::new()
+                } else {
+                    ep.pinned_anchor_deficit()
+                }
+            };
+            if deficit.is_empty() {
+                state
+                    .pinned_anchor_deficit_streak
+                    .store(0, std::sync::atomic::Ordering::Relaxed);
+                state
+                    .pinned_anchor_deficit_tip_sum
+                    .store(0, std::sync::atomic::Ordering::Relaxed);
+            } else {
+                // Progress term (N2): a node still ADVANCING toward the pin is
+                // catching up, not parked — only a tip-frozen deficit
+                // accumulates streak. Saturating sum over the (few) deficit
+                // zones; a frozen chain cannot move it.
+                let tip_sum: u64 = deficit
+                    .iter()
+                    .fold(0u64, |acc, (_, _, tip)| acc.saturating_add(*tip));
+                let prev_sum = state
+                    .pinned_anchor_deficit_tip_sum
+                    .swap(tip_sum, std::sync::atomic::Ordering::Relaxed);
+                if prev_sum != tip_sum {
+                    // Tips moved — catching up, not parked. Quiet reset.
+                    state
+                        .pinned_anchor_deficit_streak
+                        .store(0, std::sync::atomic::Ordering::Relaxed);
+                } else {
+                    let streak = state
+                        .pinned_anchor_deficit_streak
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                        .saturating_add(1);
+                    if streak >= PINNED_ANCHOR_DEFICIT_ALARM_TICKS {
+                        state
+                            .pinned_anchor_completion_alarms_total
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        for (zone, pin_epoch, tip) in &deficit {
+                            tracing::error!(
+                                zone = %zone,
+                                pinned_epoch = pin_epoch,
+                                local_tip = tip,
+                                consecutive_stagnant_ticks = streak,
+                                "PINNED CHAIN ANCHOR NOT CROSSED — this node's chain is \
+                                 parked BELOW the compiled-in re-genesis anchor with NO \
+                                 progress (frozen pre-ceremony history, or a hostile/partial \
+                                 peer set; a catching-up node resets this alarm). Node keeps \
+                                 syncing; operator attention required: check seed peers. \
+                                 (SEC-REGENESIS-FENCE)"
+                            );
+                        }
+                    }
+                }
+            }
+        }
 
         // zone_count is consensus-critical and MUST be identical fleet-wide
         // (routing is `sha3(record_id)[0..8] % zone_count` — disagreement routes

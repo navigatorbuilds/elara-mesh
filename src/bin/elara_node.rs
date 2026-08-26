@@ -1472,6 +1472,9 @@ async fn run() -> Result<()> {
             if !epoch_state.latest_epoch.is_empty() {
                 let mut epoch = node_state.epoch.write_recover();
                 *epoch = epoch_state;
+                // §E fence: wholesale install resets the anchor scoping —
+                // re-derive it from the configured network.
+                epoch.scope_chain_anchors_to_network(&node_state.config.network_id);
                 info!("restored epoch state: {} zones from snapshot", epoch.latest_epoch.len());
             }
         }
@@ -2262,7 +2265,13 @@ async fn run() -> Result<()> {
                 // No JSON epoch — use RocksDB entirely
                 let zone_count = rocks_epoch.latest_epoch.len();
                 let total_seals: u64 = rocks_epoch.latest_epoch.values().map(|n| n + 1).sum();
-                *node_state.epoch.write_recover() = rocks_epoch;
+                {
+                    let mut ep = node_state.epoch.write_recover();
+                    *ep = rocks_epoch;
+                    // §E fence: wholesale install resets the anchor scoping —
+                    // re-derive it from the configured network.
+                    ep.scope_chain_anchors_to_network(&node_state.config.network_id);
+                }
                 if total_seals > 0 {
                     info!("epoch state loaded from RocksDB: {} zones, {} total seals", zone_count, total_seals);
                 }
@@ -2898,7 +2907,18 @@ async fn run() -> Result<()> {
             let mut continuity_rebuild = if need_continuity {
                 Some(elara_runtime::continuity::ContinuityState::new())
             } else { None };
-            let mut epoch_state = if f_epoch { Some(epoch::EpochState::new()) } else { None };
+            let mut epoch_state = if f_epoch {
+                // §E fence: scope the anchors BEFORE feeding records through
+                // process_record — a bare EpochState::new() has the compiled-in
+                // anchors ACTIVE, which would refuse a non-testnet devnet's own
+                // legitimate seal at the pinned epoch DURING the rebuild
+                // (ordering bug, adversarial-verify finding W6). The post-
+                // install re-scope at the write-back site stays as belt-and-
+                // braces for the installed instance.
+                let mut es = epoch::EpochState::new();
+                es.scope_chain_anchors_to_network(&state2.config.network_id);
+                Some(es)
+            } else { None };
             let mut trust_engine = if f_trust { Some(elara_runtime::accounting::trust::TrustEngine::new()) } else { None };
             let mut key_registry = if f_key { Some(key_rotation::KeyRegistry::new()) } else { None };
             let mut sunset_state = if f_sunset { Some(sunset::SunsetState::new()) } else { None };
@@ -3158,7 +3178,13 @@ async fn run() -> Result<()> {
                 if let Some(epoch_state) = epoch_r {
                     let zone_count = epoch_state.latest_epoch.len();
                     let total_seals: u64 = epoch_state.latest_epoch.values().map(|n| n + 1).sum();
-                    *rebuild_state.epoch.write_recover() = epoch_state;
+                    {
+                        let mut ep = rebuild_state.epoch.write_recover();
+                        *ep = epoch_state;
+                        // §E fence: wholesale install resets the anchor
+                        // scoping — re-derive from the configured network.
+                        ep.scope_chain_anchors_to_network(&rebuild_state.config.network_id);
+                    }
                     if total_seals > 0 {
                         info!("epoch state rebuilt from records: {} zones, {} total seals", zone_count, total_seals);
                     }

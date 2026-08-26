@@ -441,6 +441,23 @@ pub struct EpochState {
     /// recovery should call [`Self::recount_total_epochs`] once after
     /// `from_snapshot` (idempotent on already-coherent state).
     pub total_epochs_total: u64,
+    /// §E re-genesis fence: monotonic count of seals REFUSED canonicalization
+    /// because their `record_hash` contradicted a compiled-in
+    /// `PINNED_CHAIN_ANCHORS` entry at the pinned `(zone, epoch)`. Surfaced on
+    /// /metrics as `elara_pinned_anchor_seal_rejections_total`. Any non-zero
+    /// value is a security signal: this node was served a seal from the wrong
+    /// chain (frozen pre-re-genesis history or a forgery) at the anchor point.
+    /// In-memory only — deliberately NOT snapshotted (forensic, per-boot).
+    pub pinned_anchor_seal_rejections_total: u64,
+    /// Injection point for the chain-anchor table: `None` (every constructor
+    /// hard-codes it) enforces the compiled-in `config::PINNED_CHAIN_ANCHORS`;
+    /// `Some(table)` replaces it. Two writers only: in-crate tests, and
+    /// `scope_chain_anchors_to_network` (which deactivates the table on
+    /// non-anchored networks). `pub(crate)` deliberately — a `pub` field here
+    /// would be a silent disable-switch on a security control for any
+    /// downstream crate. Fail-closed by construction: forgetting this field
+    /// in a new constructor is a compile error, and `None` = anchors active.
+    pub(crate) chain_anchor_override: Option<Vec<(&'static str, u64, [u8; 32])>>,
 }
 
 /// PARTITION-MERGE Phase B: max orphan record_ids retained per (zone, epoch).
@@ -995,6 +1012,8 @@ impl EpochState {
             orphan_seals_total: 0,
             orphan_promotions_total: 0,
             total_epochs_total: 0,
+            pinned_anchor_seal_rejections_total: 0,
+            chain_anchor_override: None,
         };
         // Derive total_epochs_total from the restored latest_epoch
         // so the metrics scrape reads the post-restart value in O(1) without
@@ -1025,6 +1044,8 @@ impl EpochState {
             orphan_seals_total: 0,
             orphan_promotions_total: 0,
             total_epochs_total: 0,
+            pinned_anchor_seal_rejections_total: 0,
+            chain_anchor_override: None,
         }
     }
 
@@ -1193,13 +1214,21 @@ impl EpochState {
         if !in_ring {
             return false;
         }
+        // §E fence precheck: refuse BEFORE the demote side-effects — an
+        // anchor-rejected sibling must leave the canonical seal, the orphan
+        // ring, and the promotion counter untouched.
+        if !self.chain_anchor_admits(&seal.zone, seal.epoch_number, &record_hash) {
+            self.note_anchor_rejection(&seal.zone, seal.epoch_number, &record_hash);
+            return false;
+        }
         // Demote current canonical → orphan ring (idempotent if somehow
         // already there; record_orphan_sibling de-dups).
         if let Some(prev_id) = self.latest_seal_id.get(&seal.zone).cloned() {
             self.record_orphan_sibling(seal.zone.clone(), seal.epoch_number, prev_id);
         }
-        // Install incoming as canonical.
-        self.apply_canonical_seal(seal, record_id, record_hash);
+        // Install incoming as canonical. (Anchor admission was prechecked
+        // above with identical inputs, so this cannot fence-reject here.)
+        let _ = self.apply_canonical_seal(seal, record_id, record_hash);
         // Remove the promoted entry from the ring (no longer an orphan).
         if let Some(ring) = self.orphan_siblings.get_mut(&key) {
             ring.retain(|s| s != record_id);
@@ -1278,7 +1307,9 @@ impl EpochState {
             false
         };
         if should_canonicalize {
-            self.apply_canonical_seal(seal, record_id, record_hash);
+            // §E fence: a rejected (wrong-chain) seal is dropped entirely —
+            // it must not canonicalize AND must not seed the VRF ring.
+            let _ = self.apply_canonical_seal(seal, record_id, record_hash);
         } else if let Some(vrf) = seal.vrf_output {
             // Mode 2 (Fisherman ring fork): this seal lost the tip race (stale
             // epoch < current, or same-epoch lex-loser) so it never reaches
@@ -1333,8 +1364,9 @@ impl EpochState {
         let current = self.latest_epoch.get(&seal.zone).copied().unwrap_or(0);
 
         if seal.epoch_number > current {
-            self.apply_canonical_seal(seal, record_id, record_hash);
-            return true;
+            // §E fence: propagates `false` on an anchor rejection so callers
+            // never push attestations for a refused wrong-chain seal.
+            return self.apply_canonical_seal(seal, record_id, record_hash);
         }
         if seal.epoch_number < current {
             // Mode 2 (Fisherman ring fork): stale-epoch seal never canonicalizes,
@@ -1366,11 +1398,17 @@ impl EpochState {
         };
 
         if incoming_wins {
-            // Demote existing — record its seal_id in orphan ring.
+            // §E fence ordering: install FIRST, demote the loser only on
+            // success — otherwise an anchor-rejected incoming seal would leave
+            // the still-canonical previous seal_id sitting in the orphan ring.
+            // `record_orphan_sibling` only touches the ring (never `latest_*`),
+            // so apply-then-demote is behavior-identical on the success path.
+            if !self.apply_canonical_seal(seal, record_id, record_hash) {
+                return false;
+            }
             if let Some(prev_id) = current_seal_id {
                 self.record_orphan_sibling(seal.zone.clone(), seal.epoch_number, prev_id);
             }
-            self.apply_canonical_seal(seal, record_id, record_hash);
             true
         } else {
             // Demote incoming — record its record_id in orphan ring.
@@ -1390,6 +1428,94 @@ impl EpochState {
         }
     }
 
+    /// §E re-genesis fence: the effective chain-anchor table — the override
+    /// when set (tests, or network scoping), else the compiled-in
+    /// `PINNED_CHAIN_ANCHORS`.
+    pub fn chain_anchors(&self) -> &[(&'static str, u64, [u8; 32])] {
+        self.chain_anchor_override
+            .as_deref()
+            .unwrap_or(crate::network::config::PINNED_CHAIN_ANCHORS)
+    }
+
+    /// §E re-genesis fence: bind the anchor table to the network this node
+    /// actually runs. The compiled-in anchors describe ONE chain
+    /// (`PINNED_CHAIN_ANCHORS_NETWORK_ID`); on any other `network_id`
+    /// (private devnets, future re-genesis networks) they are deactivated —
+    /// otherwise a young chain would alarm until the pinned epoch and wedge
+    /// there when its natural seal hash differs. Deterministic re-derivation:
+    /// call after EVERY wholesale `EpochState` install (NodeState::new, the
+    /// boot CF merge, the streaming rebuild) rather than carrying the flag.
+    /// Idempotent. A missed call fails CLOSED (anchors active) — safe for the
+    /// canonical chain, loud-but-diagnosable on a devnet.
+    pub fn scope_chain_anchors_to_network(&mut self, network_id: &str) {
+        if network_id == crate::network::config::PINNED_CHAIN_ANCHORS_NETWORK_ID {
+            self.chain_anchor_override = None;
+        } else if self.chain_anchor_override.is_none() {
+            tracing::info!(
+                network = %network_id,
+                anchored_network = %crate::network::config::PINNED_CHAIN_ANCHORS_NETWORK_ID,
+                "PINNED_CHAIN_ANCHORS deactivated — compiled for a different network"
+            );
+            self.chain_anchor_override = Some(Vec::new());
+        }
+    }
+
+    /// §E re-genesis fence: positive point-assertion. `true` for every
+    /// `(zone, epoch)` EXCEPT a pinned one, where the seal record's hash must
+    /// equal the pinned value. O(anchors) scan + one 32-byte compare — the
+    /// anchor table is a handful of entries, not a map.
+    pub fn chain_anchor_admits(&self, zone: &ZoneId, epoch: u64, record_hash: &[u8; 32]) -> bool {
+        match self
+            .chain_anchors()
+            .iter()
+            .find(|(z, e, _)| *e == epoch && *z == zone.path())
+        {
+            Some((_, _, pinned)) => record_hash == pinned,
+            None => true,
+        }
+    }
+
+    /// §E re-genesis fence: count + log a refused canonicalization. Shared by
+    /// `apply_canonical_seal`, the `promote_orphan_to_canonical` precheck,
+    /// and `register_global_seal` so every rejection lands in ONE counter
+    /// (`elara_pinned_anchor_seal_rejections_total`).
+    fn note_anchor_rejection(&mut self, zone: &ZoneId, epoch: u64, record_hash: &[u8; 32]) {
+        self.pinned_anchor_seal_rejections_total =
+            self.pinned_anchor_seal_rejections_total.saturating_add(1);
+        tracing::error!(
+            zone = %zone.path(),
+            epoch,
+            got = %hex::encode(record_hash),
+            "PINNED CHAIN ANCHOR VIOLATION — seal at a pinned (zone, epoch) does not match the \
+             compiled-in re-genesis anchor; refusing canonicalization. This node was served a \
+             seal from the WRONG chain (frozen pre-re-genesis history or a forgery). \
+             (SEC-REGENESIS-FENCE, PINNED_CHAIN_ANCHORS)"
+        );
+    }
+
+    /// §E re-genesis fence: pinned anchors this state has NOT yet crossed —
+    /// `(zone_path, pinned_epoch, current_tip)` per unmet anchor. Empty when
+    /// every pinned zone's tip is at/past its pin. Consumed by the PERIODIC
+    /// completion guard in `health.rs::health_check_loop` (populated-state
+    /// gate + progress-aware debounce): a node whose epoch state is populated
+    /// yet parked below the pin without progress is on a frozen/foreign chain
+    /// that cannot serve the pinned epoch — the point-assertion alone never
+    /// fires in that shape (vacuity gap), so the guard ALARMS and keeps
+    /// syncing. (An earlier bootstrap-cycle placement read a structurally
+    /// empty state and was removed — adversarial-verify CRITICAL 2.)
+    pub fn pinned_anchor_deficit(&self) -> Vec<(String, u64, u64)> {
+        self.chain_anchors()
+            .iter()
+            .filter_map(|(z, e, _)| {
+                let tip = self.latest_epoch.get(&ZoneId::new(z)).copied();
+                match tip {
+                    Some(t) if t >= *e => None,
+                    t => Some(((*z).to_string(), *e, t.unwrap_or(0))),
+                }
+            })
+            .collect()
+    }
+
     /// Internal canonical-seal installation. Both `register_seal` (legacy
     /// lex-min path) and `register_seal_with_reconcile` (weight-aware path)
     /// route through this once they've decided the incoming seal wins.
@@ -1397,12 +1523,24 @@ impl EpochState {
     /// `latest_vrf_output` + VRF history ring, `epoch_start_ts`,
     /// `latest_sealed_account` (if seal carries SMT root), `latest_seal_end`,
     /// adaptive activity counters, and the rolling super-seal buffer.
+    ///
+    /// Returns `false` (state untouched) when the seal contradicts a
+    /// `PINNED_CHAIN_ANCHORS` entry — the §E re-genesis fence. This is the
+    /// convergence point for the ZONE-seal register family (live ingest, boot
+    /// replay via `process_record`, F-10 recovery, rebuild, orphan
+    /// promotion); the OTHER tip-mutation funnel, `register_global_seal`,
+    /// carries its own identical check. Fail-closed: a rejected seal never
+    /// sets the tip and never enters the VRF ring.
     fn apply_canonical_seal(
         &mut self,
         seal: &ParsedEpochSeal,
         record_id: &str,
         record_hash: [u8; 32],
-    ) {
+    ) -> bool {
+        if !self.chain_anchor_admits(&seal.zone, seal.epoch_number, &record_hash) {
+            self.note_anchor_rejection(&seal.zone, seal.epoch_number, &record_hash);
+            return false;
+        }
         // Maintain `total_epochs_total = sum(latest+1)` incrementally.
         // Callers (register_seal, register_seal_with_reconcile) gate on
         // `seal.epoch_number >= current`, so the delta is non-negative.
@@ -1484,6 +1622,7 @@ impl EpochState {
             buf.pop_front();
         }
         buf.push_back(record_hash);
+        true
     }
 
     /// Gap 3: True if the zone's rolling buffer has exactly `SUPER_SEAL_INTERVAL`
@@ -1607,6 +1746,16 @@ impl EpochState {
         record_id: &str,
         record_hash: [u8; 32],
     ) {
+        // §E re-genesis fence: this is the SECOND tip-mutation funnel besides
+        // `apply_canonical_seal` (found by the build's adversarial verify) —
+        // it writes `latest_seal_hash[stuck_zone]` with `>=`, so an unfenced
+        // global seal replayed at boot via `process_record` (no verification
+        // on that path) could overwrite the pinned anchor hash AT the pin.
+        // Same positive point-assertion, same counter.
+        if !self.chain_anchor_admits(&seal.stuck_zone, seal.stuck_epoch, &record_hash) {
+            self.note_anchor_rejection(&seal.stuck_zone, seal.stuck_epoch, &record_hash);
+            return;
+        }
         let current = self.latest_epoch.get(&seal.stuck_zone).copied().unwrap_or(0);
         if seal.stuck_epoch >= current {
             // Incremental total_epochs_total update.
@@ -8896,6 +9045,278 @@ mod tests {
             wire_version: crate::wire::CURRENT_SIGNING_VERSION,
             sparse_merkle_root: None,
         }
+    }
+
+    // ─── §E re-genesis fence (SEC-REGENESIS-FENCE-VERDICT-2026-08-25) ──────
+
+    const FENCE_TEST_PIN_EPOCH: u64 = 5;
+    const FENCE_TEST_PIN_HASH: [u8; 32] = [0xAB; 32];
+
+    fn fence_test_table() -> Option<Vec<(&'static str, u64, [u8; 32])>> {
+        Some(vec![("0", FENCE_TEST_PIN_EPOCH, FENCE_TEST_PIN_HASH)])
+    }
+
+    fn fence_hash(tag: u8, e: u64) -> [u8; 32] {
+        let mut h = [tag; 32];
+        h[31] = e as u8;
+        h
+    }
+
+    /// The compiled-in anchor is load-bearing the moment a release binary
+    /// ships it — lock the transcription against the live-verified probe value
+    /// (4× stable 2026-08-25/26, 45k+ epochs deep, chain-linked by 49987).
+    #[test]
+    fn fence_pinned_chain_anchor_const_locked() {
+        let anchors = crate::network::config::PINNED_CHAIN_ANCHORS;
+        assert_eq!(anchors.len(), 1);
+        let (zone, epoch, hash) = &anchors[0];
+        assert_eq!(*zone, "0");
+        assert_eq!(*epoch, 49986);
+        assert_eq!(
+            hex::encode(hash),
+            "c5832ab4b9740ab18ad82dd8f4545bbb8efa878b5c561053c3780ef3e0770879"
+        );
+        assert_eq!(crate::network::config::PINNED_CHAIN_ANCHORS_NETWORK_ID, "testnet");
+    }
+
+    /// RED half of the fork-replay pair: with NO anchor (empty table — the
+    /// pre-fence world), a from-zero replay of a chain claiming the pinned
+    /// epoch with a foreign hash is adopted SILENTLY. Documents the hole;
+    /// the GREEN test below proves the closure of the identical shape.
+    #[test]
+    fn fence_red_without_anchor_wrong_chain_at_pin_is_adopted() {
+        let z0 = ZoneId::from_legacy(0);
+        let mut ep = EpochState::new();
+        ep.chain_anchor_override = Some(Vec::new()); // pre-fence world
+        let mut prev = [0u8; 32];
+        for e in 0..=6u64 {
+            let h = fence_hash(0xEE, e); // foreign hashes, incl. at the pin
+            ep.register_seal(&mk_rank_seal(&z0, e, prev, 0), &format!("hostile_{e}"), h);
+            prev = h;
+        }
+        assert_eq!(ep.latest_epoch.get(&z0).copied(), Some(6), "pre-fence: silent adoption");
+        assert_eq!(ep.pinned_anchor_seal_rejections_total, 0);
+    }
+
+    /// GREEN half + the completion-guard signal:
+    /// (a) the frozen old chain (stops BELOW the pin) adopts as far as it goes
+    ///     — the point-assertion is deliberately no floor (A2 rejected) — but
+    ///     `pinned_anchor_deficit` reports the un-crossed pin (A1 alone is
+    ///     vacuous in exactly this shape; the completion guard consumes this);
+    /// (b) the true chain carrying the pinned hash AT the pin replays through
+    ///     and clears the deficit;
+    /// (c) a hostile chain claiming the pin with a foreign hash is REFUSED at
+    ///     the pin: tip freezes below it, the rejection counter bumps, the VRF
+    ///     ring is untouched — and the true seal still lands afterwards.
+    #[test]
+    fn fence_green_point_assertion_and_completion_deficit() {
+        let z0 = ZoneId::from_legacy(0);
+
+        // (a) frozen old chain: epochs 0..=3 only.
+        let mut ep = EpochState::new();
+        ep.chain_anchor_override = fence_test_table();
+        let mut prev = [0u8; 32];
+        for e in 0..=3u64 {
+            let h = fence_hash(0x11, e);
+            ep.register_seal(&mk_rank_seal(&z0, e, prev, 0), &format!("old_{e}"), h);
+            prev = h;
+        }
+        assert_eq!(ep.latest_epoch.get(&z0).copied(), Some(3));
+        assert_eq!(ep.pinned_anchor_seal_rejections_total, 0, "no floor below the pin");
+        assert_eq!(
+            ep.pinned_anchor_deficit(),
+            vec![("0".to_string(), FENCE_TEST_PIN_EPOCH, 3)],
+            "the completion guard must see the un-crossed pin"
+        );
+
+        // (b) true chain: 0..=6 with the pinned hash at the pin.
+        let mut ep = EpochState::new();
+        ep.chain_anchor_override = fence_test_table();
+        let mut prev = [0u8; 32];
+        for e in 0..=6u64 {
+            let h = if e == FENCE_TEST_PIN_EPOCH { FENCE_TEST_PIN_HASH } else { fence_hash(0x22, e) };
+            ep.register_seal(&mk_rank_seal(&z0, e, prev, 0), &format!("true_{e}"), h);
+            prev = h;
+        }
+        assert_eq!(ep.latest_epoch.get(&z0).copied(), Some(6));
+        assert_eq!(ep.pinned_anchor_seal_rejections_total, 0);
+        assert!(ep.pinned_anchor_deficit().is_empty(), "crossing the pin clears the deficit");
+
+        // (c) hostile chain refused AT the pin.
+        let mut ep = EpochState::new();
+        ep.chain_anchor_override = fence_test_table();
+        let mut prev = [0u8; 32];
+        for e in 0..=4u64 {
+            let h = fence_hash(0x33, e);
+            ep.register_seal(&mk_rank_seal(&z0, e, prev, 0), &format!("h_{e}"), h);
+            prev = h;
+        }
+        let vrf_len_before = ep.vrf_history.get(&z0).map(|r| r.len());
+        let mut hostile5 = mk_rank_seal(&z0, FENCE_TEST_PIN_EPOCH, prev, 0);
+        hostile5.vrf_output = Some([0x77; 32]);
+        ep.register_seal(&hostile5, "hostile_5", fence_hash(0xEE, 5));
+        assert_eq!(ep.latest_epoch.get(&z0).copied(), Some(4), "refused at the pin");
+        assert_eq!(ep.pinned_anchor_seal_rejections_total, 1);
+        assert_eq!(
+            ep.vrf_history.get(&z0).map(|r| r.len()),
+            vrf_len_before,
+            "a rejected seal must not seed the VRF ring"
+        );
+        ep.register_seal(&mk_rank_seal(&z0, FENCE_TEST_PIN_EPOCH, prev, 0), "true_5", FENCE_TEST_PIN_HASH);
+        assert_eq!(ep.latest_epoch.get(&z0).copied(), Some(5), "the true seal still lands");
+        assert_eq!(ep.pinned_anchor_seal_rejections_total, 1);
+    }
+
+    /// Non-forking regression: below the pin, a fenced node and an unfenced
+    /// node process the identical seal stream to identical state.
+    #[test]
+    fn fence_below_pin_behavior_identical_with_and_without_anchor() {
+        let z0 = ZoneId::from_legacy(0);
+        let mut fenced = EpochState::new();
+        fenced.chain_anchor_override = fence_test_table();
+        let mut unfenced = EpochState::new();
+        unfenced.chain_anchor_override = Some(Vec::new());
+        let mut prev = [0u8; 32];
+        for e in 0..=4u64 {
+            let h = fence_hash(0x44, e);
+            let s = mk_rank_seal(&z0, e, prev, 0);
+            fenced.register_seal(&s, &format!("s{e}"), h);
+            unfenced.register_seal(&s, &format!("s{e}"), h);
+            prev = h;
+        }
+        assert_eq!(fenced.latest_epoch, unfenced.latest_epoch);
+        assert_eq!(fenced.latest_seal_hash, unfenced.latest_seal_hash);
+        assert_eq!(fenced.latest_seal_id, unfenced.latest_seal_id);
+        assert_eq!(fenced.pinned_anchor_seal_rejections_total, 0);
+    }
+
+    /// Same-epoch collision AT the pin via the weight-reconcile path: the
+    /// wrong-hash sibling loses on the anchor even when weight/lex tiebreaks
+    /// favor it, the canonical seal stays — and (pinning the §E
+    /// install-then-demote ordering) the orphan ring stays clean of the
+    /// still-canonical seal id.
+    #[test]
+    fn fence_collision_at_pin_rejects_and_leaves_ring_clean() {
+        let z0 = ZoneId::from_legacy(0);
+        let mut ep = EpochState::new();
+        ep.chain_anchor_override = fence_test_table();
+        let mut prev = [0u8; 32];
+        for e in 0..=4u64 {
+            let h = fence_hash(0x55, e);
+            ep.register_seal(&mk_rank_seal(&z0, e, prev, 0), &format!("c_{e}"), h);
+            prev = h;
+        }
+        assert!(ep.register_seal_with_reconcile(
+            &mk_rank_seal(&z0, FENCE_TEST_PIN_EPOCH, prev, 0), "true_5", FENCE_TEST_PIN_HASH, 1, 1,
+        ));
+        // Hostile sibling: lex-smaller hash AND heavier weight — wins every
+        // tiebreak, still refused by the anchor.
+        let won = ep.register_seal_with_reconcile(
+            &mk_rank_seal(&z0, FENCE_TEST_PIN_EPOCH, prev, 0), "hostile_5", [0x00; 32], 10, 1,
+        );
+        assert!(!won);
+        assert_eq!(ep.latest_seal_hash.get(&z0), Some(&FENCE_TEST_PIN_HASH));
+        assert_eq!(ep.latest_seal_id.get(&z0).map(String::as_str), Some("true_5"));
+        assert_eq!(ep.pinned_anchor_seal_rejections_total, 1);
+        assert!(
+            !ep.orphan_siblings_for(&z0, FENCE_TEST_PIN_EPOCH).contains(&"true_5".to_string()),
+            "install-then-demote: a refused incoming must not orphan the canonical"
+        );
+    }
+
+    /// Orphan-promotion path at the pin: an anchor-rejected sibling cannot be
+    /// promoted, and the precheck fires BEFORE any demote/ring side-effect.
+    #[test]
+    fn fence_promote_orphan_at_pin_refused_without_side_effects() {
+        let z0 = ZoneId::from_legacy(0);
+        let mut ep = EpochState::new();
+        ep.chain_anchor_override = fence_test_table();
+        let mut prev = [0u8; 32];
+        for e in 0..=4u64 {
+            let h = fence_hash(0x66, e);
+            ep.register_seal(&mk_rank_seal(&z0, e, prev, 0), &format!("p_{e}"), h);
+            prev = h;
+        }
+        assert!(ep.register_seal_with_reconcile(
+            &mk_rank_seal(&z0, FENCE_TEST_PIN_EPOCH, prev, 0), "true_5", FENCE_TEST_PIN_HASH, 5, 5,
+        ));
+        // Hostile sibling loses on weight → lands in the orphan ring (the ring
+        // is forensic — the fence blocks canonicalization, not recording).
+        let hostile_hash = fence_hash(0xEE, 5);
+        assert!(!ep.register_seal_with_reconcile(
+            &mk_rank_seal(&z0, FENCE_TEST_PIN_EPOCH, prev, 0), "hostile_5", hostile_hash, 1, 5,
+        ));
+        assert!(ep.orphan_siblings_for(&z0, FENCE_TEST_PIN_EPOCH).contains(&"hostile_5".to_string()));
+        // Promotion attempt (as if it later out-weighed the canonical):
+        let promoted = ep.promote_orphan_to_canonical(
+            &mk_rank_seal(&z0, FENCE_TEST_PIN_EPOCH, prev, 0), "hostile_5", hostile_hash,
+        );
+        assert!(!promoted);
+        assert_eq!(ep.latest_seal_id.get(&z0).map(String::as_str), Some("true_5"));
+        assert_eq!(ep.orphan_promotions_total, 0);
+        assert_eq!(ep.pinned_anchor_seal_rejections_total, 1);
+        assert!(
+            ep.orphan_siblings_for(&z0, FENCE_TEST_PIN_EPOCH).contains(&"hostile_5".to_string()),
+            "refused promotion must leave the ring unchanged"
+        );
+        assert!(
+            !ep.orphan_siblings_for(&z0, FENCE_TEST_PIN_EPOCH).contains(&"true_5".to_string()),
+            "refused promotion must not demote the canonical into the ring"
+        );
+    }
+
+    /// The SECOND tip-mutation funnel (adversarial-verify CRITICAL 1): a
+    /// cross-zone escalation seal writes `latest_seal_hash[stuck_zone]` with
+    /// `>=` semantics and is replayed UNVERIFIED at boot via `process_record`
+    /// — unfenced, a poisoned global-quorum record in RocksDB could overwrite
+    /// the pinned anchor hash AT the pin. Pin the fence on this path too.
+    #[test]
+    fn fence_global_seal_at_pin_refused() {
+        let z0 = ZoneId::from_legacy(0);
+        let mk_gseal = |epoch: u64| ParsedGlobalQuorumSeal {
+            stuck_zone: z0.clone(),
+            emitter_zone: ZoneId::from_legacy(1),
+            stuck_epoch: epoch,
+            previous_seal_hash: [0u8; 32],
+            observed_base_timeout_ms: 2000,
+            observed_elapsed_ms: 600_000,
+            emitted_at: 100.0,
+            vrf_output: [0x42; 32],
+            vrf_proof: vec![],
+            seal_zone_count: None,
+        };
+        let mut ep = EpochState::new();
+        ep.chain_anchor_override = fence_test_table();
+        // Below the pin: global seal registers normally.
+        ep.register_global_seal(&mk_gseal(3), "g_3", fence_hash(0x77, 3));
+        assert_eq!(ep.latest_epoch.get(&z0).copied(), Some(3));
+        // AT the pin with a foreign hash (the >= overwrite shape): refused,
+        // tip and hash untouched, counter bumps.
+        ep.register_global_seal(&mk_gseal(FENCE_TEST_PIN_EPOCH), "g_hostile", fence_hash(0xEE, 5));
+        assert_eq!(ep.latest_epoch.get(&z0).copied(), Some(3), "hostile global seal refused");
+        assert_eq!(ep.latest_seal_hash.get(&z0).copied(), Some(fence_hash(0x77, 3)));
+        assert_eq!(ep.pinned_anchor_seal_rejections_total, 1);
+        // AT the pin with the pinned hash: admitted.
+        ep.register_global_seal(&mk_gseal(FENCE_TEST_PIN_EPOCH), "g_true", FENCE_TEST_PIN_HASH);
+        assert_eq!(ep.latest_epoch.get(&z0).copied(), Some(FENCE_TEST_PIN_EPOCH));
+        assert_eq!(ep.latest_seal_hash.get(&z0).copied(), Some(FENCE_TEST_PIN_HASH));
+        assert_eq!(ep.pinned_anchor_seal_rejections_total, 1);
+    }
+
+    /// Network scoping: anchors are active exactly on the network they were
+    /// compiled for, deactivate elsewhere, re-derive idempotently.
+    #[test]
+    fn fence_network_scoping_activates_only_on_anchored_network() {
+        let mut ep = EpochState::new();
+        assert!(ep.chain_anchor_override.is_none(), "fail-closed default: anchors active");
+        ep.scope_chain_anchors_to_network("some-devnet");
+        assert_eq!(ep.chain_anchor_override, Some(Vec::new()));
+        assert!(ep.chain_anchors().is_empty());
+        ep.scope_chain_anchors_to_network("some-devnet"); // idempotent
+        assert!(ep.chain_anchors().is_empty());
+        ep.scope_chain_anchors_to_network(crate::network::config::PINNED_CHAIN_ANCHORS_NETWORK_ID);
+        assert!(ep.chain_anchor_override.is_none());
+        assert!(!ep.chain_anchors().is_empty());
     }
 
     #[test]

@@ -7750,6 +7750,9 @@ pub(crate) async fn metrics_body_tiered(
     let boot_root_phantom = state.boot_sealed_root_phantom_total.load(std::sync::atomic::Ordering::Relaxed);
     let boot_root_skipped = state.boot_sealed_root_skipped_total.load(std::sync::atomic::Ordering::Relaxed);
     let sb_ledger_flag   = state.ledger_loaded_from_snapshot.load(std::sync::atomic::Ordering::Relaxed) as u64;
+    let pin_boot_refusals = state.pinned_anchor_bootstrap_refusals_total.load(std::sync::atomic::Ordering::Relaxed);
+    let pin_completion_alarms = state.pinned_anchor_completion_alarms_total.load(std::sync::atomic::Ordering::Relaxed);
+    let pin_probe_inconclusive = state.pinned_anchor_probe_inconclusive_total.load(std::sync::atomic::Ordering::Relaxed);
     let arc_emit    = state.archive_snapshot_emit_total.load(std::sync::atomic::Ordering::Relaxed);
     let arc_prune   = state.archive_snapshot_prune_total.load(std::sync::atomic::Ordering::Relaxed);
     let arc_last_ep = state.archive_snapshot_last_epoch.load(std::sync::atomic::Ordering::Relaxed);
@@ -7794,6 +7797,15 @@ pub(crate) async fn metrics_body_tiered(
          # HELP elara_boot_sealed_root_skipped_total §6a boot checks that could not run soundly (multi-zone, no tip epoch, no Gap-1 seal at tip, or unsealed overhang). Each is a zero-false-positive bail-out, not a pass.\n\
          # TYPE elara_boot_sealed_root_skipped_total counter\n\
          elara_boot_sealed_root_skipped_total {boot_root_skipped}\n\
+         # HELP elara_pinned_anchor_bootstrap_refusals_total SEC-REGENESIS-FENCE: bootstrap snapshots/peers refused because their carried epoch tip contradicted a PINNED_CHAIN_ANCHORS entry (pre-mutation check) or the peer AFFIRMATIVELY served a different hash at the pinned epoch on the bounded /headers/from/{{E}} probe. Per-peer DEFER/retry, never a brick. Any non-zero value means a peer served provably wrong-chain data at the pin.\n\
+         # TYPE elara_pinned_anchor_bootstrap_refusals_total counter\n\
+         elara_pinned_anchor_bootstrap_refusals_total {pin_boot_refusals}\n\
+         # HELP elara_pinned_anchor_completion_alarms_total SEC-REGENESIS-FENCE completion guard (periodic, health_check_loop): ticks where epoch state was populated yet a pinned zone sat below its compiled-in anchor epoch for >= the debounce window — the node is parked on frozen pre-re-genesis or foreign history that cannot serve the pin (the at-pin point-assertion is vacuous in that shape). Node keeps syncing; sustained growth requires operator attention (check seed peers).\n\
+         # TYPE elara_pinned_anchor_completion_alarms_total counter\n\
+         elara_pinned_anchor_completion_alarms_total {pin_completion_alarms}\n\
+         # HELP elara_pinned_anchor_probe_inconclusive_total SEC-REGENESIS-FENCE: pinned-anchor header probes that were inconclusive — transport error, or the peer no longer serves the pinned epoch's seal record (GC-pruned; compute_epoch_headers skips pruned entries). These proceed rather than refuse: the probe's only decisive signal is an affirmative contradiction; the snapshot signer trust gate + completion guard carry this case. Sustained growth = peers have pruned the anchor epoch and the probe is aging out.\n\
+         # TYPE elara_pinned_anchor_probe_inconclusive_total counter\n\
+         elara_pinned_anchor_probe_inconclusive_total {pin_probe_inconclusive}\n\
          # HELP elara_ledger_loaded_from_snapshot 1 if the current in-memory ledger was loaded from a peer snapshot this run; 0 if rebuilt locally\n\
          # TYPE elara_ledger_loaded_from_snapshot gauge\n\
          elara_ledger_loaded_from_snapshot {sb_ledger_flag}\n\
@@ -9905,12 +9917,13 @@ pub(crate) async fn metrics_body_tiered(
     // (capped at 1024 keys × 256 entries). Slice 3 wires the demotion path
     // into register_seal; until then both gauges stay at 0 fleet-wide and
     // serve as the operator-side scaffolding to confirm wiring once enabled.
-    let (orphan_seals_total, orphan_siblings_live, orphan_promotions_total) = {
+    let (orphan_seals_total, orphan_siblings_live, orphan_promotions_total, pin_seal_rejections) = {
         let e = state.epoch.read_recover();
         (
             e.orphan_seals_total,
             e.orphan_siblings_live_count() as u64,
             e.orphan_promotions_total,
+            e.pinned_anchor_seal_rejections_total,
         )
     };
     // PARTITION-MERGE conservation trip-wire (xzone_demotion_probe).
@@ -10195,6 +10208,9 @@ pub(crate) async fn metrics_body_tiered(
          # HELP elara_orphan_promotions_total Monotonic count of canonical seals replaced by a previously-orphaned sibling that accumulated more attestation weight after the original canonicalization. This is the load-bearing signal that the partition-merge operator is doing real work post-heal - each bump means the canonical chain shifted to follow the heavier (more-attested) side of a partition. Gated on partition_merge_weight_reconcile flag.\n\
          # TYPE elara_orphan_promotions_total counter\n\
          elara_orphan_promotions_total {orphan_promotions_total}\n\
+         # HELP elara_pinned_anchor_seal_rejections_total SEC-REGENESIS-FENCE: seals refused canonicalization because their record hash contradicted the compiled-in PINNED_CHAIN_ANCHORS entry at the pinned (zone, epoch). Enforced at BOTH tip-mutation funnels — apply_canonical_seal (zone seals: live ingest, boot replay, recovery, orphan promotion) and register_global_seal (cross-zone escalation seals). Any non-zero value is a security signal: this node was served a seal from the wrong chain (frozen pre-re-genesis history or a forgery) at the anchor point.\n\
+         # TYPE elara_pinned_anchor_seal_rejections_total counter\n\
+         elara_pinned_anchor_seal_rejections_total {pin_seal_rejections}\n\
          # HELP elara_same_epoch_seal_demotions_total Monotonic count of same-epoch seal DEMOTIONS observed at seal-registration ingest, across BOTH the default lex-min path (register_seal) and the weight-reconcile path (register_seal_with_reconcile). Distinct from elara_orphan_seals_total, which only counts the weight-reconcile path's orphan-ring inserts; this counts every same-epoch canonical swap/drop regardless of the partition_merge_weight_reconcile flag. Non-zero rate is expected during partition heals / dual-proposer races. Feeds the cross-zone coverage scan (xzone_demotion_probe).\n\
          # TYPE elara_same_epoch_seal_demotions_total counter\n\
          elara_same_epoch_seal_demotions_total {xz_same_epoch_demotions}\n\

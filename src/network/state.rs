@@ -869,6 +869,43 @@ pub struct NodeState {
     /// verify executed against producer-side `account_state_root`. Counts
     /// successful verifies (rebuilt SMT root == producer's signed root).
     pub snapshot_bootstrap_root_verified_total: AtomicU64,
+    /// §E re-genesis fence: bootstrap snapshots/peers REFUSED because their
+    /// carried epoch tip contradicted a `PINNED_CHAIN_ANCHORS` entry (site 2a
+    /// pre-mutation check) or the peer failed the bounded `/headers/from/{E}`
+    /// anchor probe (site 2b). Refusal is per-peer DEFER/retry, never a brick.
+    /// Surfaced as `elara_pinned_anchor_bootstrap_refusals_total`.
+    pub pinned_anchor_bootstrap_refusals_total: AtomicU64,
+    /// §E re-genesis fence completion guard (periodic, health_check_loop):
+    /// ticks where epoch state was populated yet a pinned zone sat below its
+    /// anchor epoch for ≥ the debounce window — the node is parked on a
+    /// frozen/foreign chain that cannot serve the pin (the point-assertion
+    /// alone is vacuous in that shape). Alarm + keep syncing, never brick.
+    /// Surfaced as `elara_pinned_anchor_completion_alarms_total`.
+    pub pinned_anchor_completion_alarms_total: AtomicU64,
+    /// §E fence completion guard debounce: consecutive health ticks the
+    /// anchor deficit has persisted WITHOUT PROGRESS. Reset to 0 the moment
+    /// the deficit clears, while epoch state is still empty ("not yet
+    /// replayed"), or whenever the deficit-zone tips moved since the last
+    /// tick (a catching-up node is not "parked" — adversarial-verify N2).
+    /// In-memory only.
+    pub pinned_anchor_deficit_streak: AtomicU64,
+    /// §E fence completion guard progress term (N2): saturating sum of the
+    /// deficit zones' tips as of the previous health tick. The streak above
+    /// only accumulates while this sum is UNCHANGED tick-over-tick — a
+    /// genuinely frozen chain cannot move it, a catching-up node moves it
+    /// every epoch. Coarse across multiple pinned zones by construction
+    /// (one zone's advance masks another's freeze for the debounce window);
+    /// exact per-zone tracking can come with a second anchor entry.
+    /// In-memory only.
+    pub pinned_anchor_deficit_tip_sum: AtomicU64,
+    /// §E fence site 2b: pinned-anchor header probes that were INCONCLUSIVE —
+    /// transport error, or the peer no longer holds the pinned epoch's seal
+    /// record (GC-pruned; compute_epoch_headers skips pruned entries). These
+    /// do NOT refuse the bootstrap: the probe's only decisive signal is an
+    /// AFFIRMATIVE contradiction (peer serves a different hash at the pin).
+    /// Sustained growth = peers have pruned the anchor epoch; the probe is
+    /// aging out. Surfaced as `elara_pinned_anchor_probe_inconclusive_total`.
+    pub pinned_anchor_probe_inconclusive_total: AtomicU64,
     /// Gap 7 follow-up: post-apply SMT-root verify mismatches. Counter-only
     /// signal — ledger mutation has committed by the time the check runs,
     /// so we can't roll back. Operator playbook: cross-check producer trust
@@ -3842,6 +3879,7 @@ impl NodeState {
         });
 
         // Capture values needed after `config` is moved into `Self`.
+        let network_id_for_anchor_scope = config.network_id.clone();
         let auto_zone_scale_max_for_scaler = config.auto_zone_scale_max;
         let pq_read_capacity = config.pq_read_capacity;
         let pq_read_refill_per_sec = config.pq_read_refill_per_sec;
@@ -3867,7 +3905,15 @@ impl NodeState {
             pending_boot_reconciled_total: AtomicU64::new(0),
             finalized: RwLock::new(finalized_index),
             dht: std::sync::Mutex::new(RoutingTable::new(local_node_id)),
-            epoch: std::sync::RwLock::new(EpochState::new()),
+            epoch: std::sync::RwLock::new({
+                // §E re-genesis fence: bind PINNED_CHAIN_ANCHORS to the
+                // network this node runs (deactivated off-network). Re-applied
+                // after every wholesale epoch-state install (boot CF merge,
+                // streaming rebuild) — see scope_chain_anchors_to_network.
+                let mut ep = EpochState::new();
+                ep.scope_chain_anchors_to_network(&network_id_for_anchor_scope);
+                ep
+            }),
             light_state: std::sync::RwLock::new(super::light::LightState::new()),
             sunset: std::sync::RwLock::new(SunsetState::new()),
             fold_sunset: std::sync::RwLock::new(super::fold_sunset::FoldSunsetRegistry::new()),
@@ -3959,6 +4005,11 @@ impl NodeState {
             ledger_loaded_from_snapshot: std::sync::atomic::AtomicBool::new(false),
             snapshot_bootstrap_ledger_loaded_total: AtomicU64::new(0),
             snapshot_bootstrap_root_verified_total: AtomicU64::new(0),
+            pinned_anchor_bootstrap_refusals_total: AtomicU64::new(0),
+            pinned_anchor_completion_alarms_total: AtomicU64::new(0),
+            pinned_anchor_deficit_streak: AtomicU64::new(0),
+            pinned_anchor_deficit_tip_sum: AtomicU64::new(0),
+            pinned_anchor_probe_inconclusive_total: AtomicU64::new(0),
             snapshot_bootstrap_root_mismatch_total: AtomicU64::new(0),
             snapshot_bootstrap_root_absent_total: AtomicU64::new(0),
             boot_sealed_root_verified_total: AtomicU64::new(0),

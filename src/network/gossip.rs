@@ -2762,6 +2762,36 @@ fn bootstrap_record_ts_admissible(record: &ValidationRecord) -> bool {
     record.timestamp.is_finite() && !record.timestamp.is_sign_negative()
 }
 
+/// Verify a record's OWN signatures against its `signable_bytes` — Dilithium3
+/// always, SPHINCS+ if present, both-or-neither (the identical admission
+/// contract as `insert_record_inner`, ingest.rs:1770-1804). Pure crypto: no
+/// ledger, no network, no node state — so the bootstrap puller can enforce it
+/// while still skipping ledger validation (the chicken-and-egg), and so it is
+/// unit-testable without a fake bootstrap peer (same discipline as
+/// `bootstrap_record_ts_admissible` above). Added 2026-08-25 after the T85/T86
+/// panel found `bootstrap_pull_from_zero` wrote records to RocksDB with no
+/// signature check at all — an unauthenticated genesis-authority forgery path
+/// on the virgin-rejoin bootstrap.
+fn bootstrap_record_signature_valid(record: &ValidationRecord) -> bool {
+    let Some(sig) = record.signature.as_ref() else {
+        return false; // unsigned records never enter the store
+    };
+    let signable = record.signable_bytes();
+    if !matches!(dilithium3_verify(&signable, sig, &record.creator_public_key), Ok(true)) {
+        return false;
+    }
+    match (&record.creator_sphincs_pk, &record.sphincs_signature) {
+        // Complete Profile A dual-sig: verify it.
+        (Some(spk), Some(ssig)) => {
+            matches!(crate::crypto::pqc::sphincs_verify(&signable, ssig, spk), Ok(true))
+        }
+        // Incomplete (pk xor sig) — reject, matching ingest's both-or-neither.
+        (Some(_), None) | (None, Some(_)) => false,
+        // Profile B / no dual-sig — Dilithium3 alone is the contract.
+        (None, None) => true,
+    }
+}
+
 async fn bootstrap_pull_from_zero(state: &Arc<NodeState>, base_url: &str) -> crate::errors::Result<u64> {
     // Paginate: pull batches of 100 until peer returns <100 (exhausted)
     // Smaller pages avoid 10s client timeout on high-latency links (Tailscale relay)
@@ -2820,6 +2850,45 @@ async fn bootstrap_pull_from_zero(state: &Arc<NodeState>, base_url: &str) -> cra
         if already_seen {
             skipped += 1;
             continue;
+        }
+
+        // SIGNATURE + NETWORK ADMISSION (T85/T86 panel finding, 2026-08-25):
+        // this bootstrap writer deliberately skips insert_record_inner's LEDGER
+        // validation (the chicken-and-egg documented below) — but signature and
+        // network verification are ORTHOGONAL to the ledger and were being
+        // skipped too, so a fresh/wiped node pulling from a hostile peer stored
+        // forged records straight into RocksDB (consumed unverified by the
+        // ledger rebuild, epoch replay, fence + trust registries, witness
+        // co-sign). Concretely closed: an attacker forging a genesis mint under
+        // the published genesis pubkey with a junk signature, which sorts first
+        // and would otherwise claim the single genesis-mint slot below and mint
+        // to its own accounts. This block runs BEFORE that dedup so only a
+        // signature-VALID record can claim the slot. Same admission contract as
+        // insert_record_inner (ingest.rs:1770-1804): Dilithium3 always, SPHINCS+
+        // if present, both-or-neither. Legitimately-stored records re-verify by
+        // construction (identical signable_bytes/sig/pk — the sibling
+        // timestamp_pull path already verifies every record it stores, so our
+        // own history is known to pass). Ledger validation stays skipped.
+        {
+            // Signature: run the pure verifier in spawn_blocking (SPHINCS+
+            // verify is heavy; a from-zero node has no seal loop to stall, but
+            // keep the executor free anyway). Clone is a one-time bootstrap cost.
+            let rec_for_verify = record.clone();
+            let sig_ok = tokio::task::spawn_blocking(move || bootstrap_record_signature_valid(&rec_for_verify))
+                .await
+                .unwrap_or(false);
+            if !sig_ok {
+                info!("bootstrap: rejecting record with invalid/missing signature {}", &record_id[..record_id.len().min(16)]);
+                skipped += 1;
+                continue;
+            }
+            // Network binding (reuses the tested ingest predicate; empty =
+            // legacy-accept for pre-v6 records, non-forking).
+            if !super::ingest::network_id_admits(&record.network_id, &state.config.network_id) {
+                info!("bootstrap: rejecting foreign-network record {} (network_id={:?})", &record_id[..record_id.len().min(16)], record.network_id);
+                skipped += 1;
+                continue;
+            }
         }
 
         // Duplicate genesis mint guard: only accept the first genesis mint
@@ -7523,6 +7592,55 @@ mod tests {
             200,
             "initial cap must equal pre-autotune MAX_PUSH=200",
         );
+    }
+
+    /// The bootstrap signature gate (T85/T86 2026-08-25) admits a validly
+    /// signed record and rejects a one-byte-tampered signature, an unsigned
+    /// record, and a genesis-authority-impersonating forgery (right pubkey,
+    /// wrong signer) — the NEW RISK B/C exploit the panel found. This is the
+    /// non-regression proof the verdict demanded: legit records PASS, forgeries
+    /// DON'T, without a live bootstrap peer.
+    #[test]
+    fn bootstrap_signature_gate_admits_valid_rejects_forged() {
+        use crate::identity::{CryptoProfile, EntityType, Identity};
+        let signer = Identity::generate(EntityType::Device, CryptoProfile::ProfileB).unwrap();
+
+        // Valid: signed by its own creator key → passes.
+        let mut good = crate::record::ValidationRecord::create(
+            b"bootstrap_sig_valid",
+            signer.public_key.clone(),
+            vec![],
+            crate::record::Classification::Public,
+            None,
+        );
+        signer.sign_record(&mut good).unwrap();
+        assert!(bootstrap_record_signature_valid(&good), "validly-signed record must pass");
+
+        // Tampered: flip one signature byte → fails.
+        let mut tampered = good.clone();
+        tampered.signature.as_mut().unwrap()[0] ^= 0x01;
+        assert!(!bootstrap_record_signature_valid(&tampered), "tampered signature must fail");
+
+        // Unsigned: no signature at all → fails (never enters the store).
+        let mut unsigned = good.clone();
+        unsigned.signature = None;
+        assert!(!bootstrap_record_signature_valid(&unsigned), "unsigned record must fail");
+
+        // Impersonation forgery (NEW RISK B): claim the VICTIM's pubkey but
+        // sign with the ATTACKER's key. signable_bytes covers creator_public_key
+        // (the claimed victim key), so the attacker's signature cannot verify
+        // against it — the forged genesis-authority mint is rejected before it
+        // can claim the single genesis-mint slot.
+        let attacker = Identity::generate(EntityType::Device, CryptoProfile::ProfileB).unwrap();
+        let mut forged = crate::record::ValidationRecord::create(
+            b"bootstrap_sig_forged",
+            signer.public_key.clone(), // claim the victim's identity
+            vec![],
+            crate::record::Classification::Public,
+            None,
+        );
+        attacker.sign_record(&mut forged).unwrap(); // but sign with attacker's key
+        assert!(!bootstrap_record_signature_valid(&forged), "impersonation forgery must fail");
     }
 
     #[test]
