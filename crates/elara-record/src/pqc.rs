@@ -40,6 +40,31 @@ pub fn sphincs_verify(message: &[u8], signature: &[u8], public_key: &[u8]) -> Re
     Ok(SlhDsaSignature::verify(signature, public_key, message, SLH_DSA_SHA2_192F))
 }
 
+/// Verify an ML-DSA-44 (FIPS 204 / Dilithium2) signature over `message` with `public_key`.
+///
+/// XRPL interop (XLS draft "Post-Quantum Signatures (ML-DSA-44)", XRPLF/XRPL-Standards
+/// discussion #295): XRPL's `Quantum` amendment standardizes ML-DSA-44 with the FIPS 204
+/// external interface and **empty context** — the exact variant pinned here (ctx = `b""`).
+/// Elara records themselves remain ML-DSA-65 (`dilithium3_verify`); this helper targets
+/// XRPL's wire, not ours. The public-key length gate doubles as XRPL's scheme dispatch
+/// (a 1312-byte `SigningPubKey` selects the dilithium path post-amendment).
+pub fn mldsa44_verify(message: &[u8], signature: &[u8], public_key: &[u8]) -> Result<bool, RecordError> {
+    if public_key.len() != 1312 {
+        return Err(RecordError::Crypto(format!(
+            "invalid ML-DSA-44 public key length: {} (expected 1312)",
+            public_key.len()
+        )));
+    }
+    if signature.len() != 2420 {
+        return Err(RecordError::Crypto(format!(
+            "invalid ML-DSA-44 signature length: {} (expected 2420)",
+            signature.len()
+        )));
+    }
+    let sig = DilithiumSignature::from_slice(signature);
+    Ok(DilithiumKeyPair::verify(public_key, &sig, message, b"", DilithiumMode::Dilithium2))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -74,6 +99,35 @@ mod tests {
                 other => panic!("len {wrong}: expected Err(Crypto), got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn mldsa44_verify_rejects_wrong_lengths_with_exact_errors() {
+        // Both gates are wire contracts (XRPL dispatch is BY pubkey shape); pin
+        // the exact messages like the ML-DSA-65 gate above. Correctness against
+        // NIST truth lives in tests/acvp_mldsa44.rs.
+        let sig2420 = vec![0u8; 2420];
+        for wrong in [0usize, 1, 1311, 1313, 1952] {
+            match mldsa44_verify(b"msg", &sig2420, &vec![0u8; wrong]) {
+                Err(RecordError::Crypto(m)) => assert_eq!(
+                    m,
+                    format!("invalid ML-DSA-44 public key length: {wrong} (expected 1312)")
+                ),
+                other => panic!("pk len {wrong}: expected Err(Crypto), got {other:?}"),
+            }
+        }
+        let pk1312 = vec![0u8; 1312];
+        for wrong in [0usize, 1, 2419, 2421, 3309] {
+            match mldsa44_verify(b"msg", &vec![0u8; wrong], &pk1312) {
+                Err(RecordError::Crypto(m)) => assert_eq!(
+                    m,
+                    format!("invalid ML-DSA-44 signature length: {wrong} (expected 2420)")
+                ),
+                other => panic!("sig len {wrong}: expected Err(Crypto), got {other:?}"),
+            }
+        }
+        // Well-formed lengths with garbage bytes must resolve false, never panic.
+        assert!(!mldsa44_verify(b"msg", &sig2420, &pk1312).unwrap());
     }
 
     #[test]

@@ -257,7 +257,11 @@
   const mverifyBtn = $("mverify");
   const short = (h) => (h && h.length > 16 ? h.slice(0, 16) + "…" : h);
 
-  init().then(() => {
+  // Held so the WebMCP tool layer at the bottom can await the same load the
+  // buttons wait on — an agent may call a tool before the module finishes.
+  const wasmReady = init();
+
+  wasmReady.then(() => {
     verifyBtn.disabled = false;
     verifyBtn.textContent = "Verify";
     rverifyBtn.disabled = false;
@@ -336,17 +340,22 @@
   });
 
   // Flip ONE byte of the signed content_hash: the same record that verified now
-  // FAILS — the post-quantum signature catches the change. Tampering is done in
-  // plain sight (parse → mutate → re-stringify) so you can see there's no trick.
+  // FAILS — the post-quantum signature catches the change. The flip is textual
+  // surgery on the raw JSON, in plain sight: no parse → re-stringify, because
+  // records carry u64 fields above 2^53 that JavaScript numbers round, and a
+  // round-trip would corrupt bytes we never meant to touch.
+  const flipFirst = (text, re) => {
+    let hit = false;
+    const out = text.replace(re, (m, pre, n) => { hit = true; return pre + ((Number(n) + 1) % 256); });
+    return hit ? out : null;
+  };
   $("tampered").addEventListener("click", async () => {
     try {
-      const rec = JSON.parse(await loadSample());
-      if (Array.isArray(rec.content_hash) && rec.content_hash.length) {
-        rec.content_hash[0] = (rec.content_hash[0] + 1) % 256;
-      } else if (Array.isArray(rec.signature) && rec.signature.length) {
-        rec.signature[0] = (rec.signature[0] + 1) % 256;
-      }
-      $("input").value = JSON.stringify(rec, null, 2);
+      const raw = await loadSample();
+      const out = flipFirst(raw, /("content_hash"\s*:\s*\[\s*)(\d+)/) ||
+                  flipFirst(raw, /("signature"\s*:\s*\[\s*)(\d+)/);
+      if (out === null) throw new Error("no byte to flip");
+      $("input").value = out;
       resetVerdict();
     } catch (e) { $("input").value = loadErr; }
   });
@@ -510,13 +519,55 @@
   const mreset = () => { $("mverdict").style.display = "none"; for (const id of ["mfacts","mlineage","mcaveats","mchecks"]) $(id).innerHTML = ""; };
   const mLoadErr = "// could not load sample-mandate-bundles.json — serve this page over HTTP:\n// python3 -m http.server, then open localhost:8000";
 
-  let mbundles = null;
-  async function loadBundles() {
-    if (mbundles === null) mbundles = await (await fetch("./sample-mandate-bundles.json")).json();
-    return mbundles;
+  // The bundles file is fetched as RAW TEXT and single scenarios are sliced
+  // out of it textually — JSON.parse never touches this path. Act nonces are
+  // u64: above 2^53 a JavaScript number rounds them, corrupting the exact
+  // bytes the signatures commit to. That corruption (not a bad fixture) is
+  // what showed a signature failure on the Scoped-mandate button for six
+  // weeks — the other scenarios' nonces happen to be 0 and were immune.
+  let mbundlesText = null;
+  async function loadBundlesText() {
+    if (mbundlesText === null) mbundlesText = await (await fetch("./sample-mandate-bundles.json")).text();
+    return mbundlesText;
   }
+  // Raw text of one top-level value, found by walking strings and braces.
+  function rawTopLevelValue(all, key) {
+    const strEnd = (s) => {                       // index just past the string opened at s
+      for (let k = s + 1; k < all.length; k++) {
+        if (all[k] === "\\") k++;
+        else if (all[k] === '"') return k + 1;
+      }
+      throw new Error("unterminated string");
+    };
+    let depth = 0;
+    for (let k = 0; k < all.length; k++) {
+      const ch = all[k];
+      if (ch === '"') {
+        const end = strEnd(k);
+        const name = all.slice(k + 1, end - 1);
+        k = end - 1;
+        if (depth !== 1) continue;
+        let m = end;
+        while (m < all.length && /\s/.test(all[m])) m++;
+        if (all[m] !== ":" || name !== key) continue;
+        m++;
+        while (m < all.length && /\s/.test(all[m])) m++;
+        let d = 0;                                // scenario values are objects
+        for (let v = m; v < all.length; v++) {
+          if (all[v] === '"') { v = strEnd(v) - 1; continue; }
+          if (all[v] === "{") d++;
+          else if (all[v] === "}" && --d === 0) return all.slice(m, v + 1);
+        }
+        throw new Error("unbalanced value for " + key);
+      }
+      if (ch === "{") depth++;
+      else if (ch === "}") depth--;
+    }
+    throw new Error("scenario not found: " + key);
+  }
+  // end rawTopLevelValue (marker used by test-webmcp-tools.mjs to extract this exact source)
   async function loadScenario(key) {
-    try { const b = await loadBundles(); $("minput").value = JSON.stringify(b[key], null, 2); mreset(); }
+    try { $("minput").value = rawTopLevelValue(await loadBundlesText(), key); mreset(); }
     catch (e) { $("minput").value = mLoadErr; }
   }
   $("m-valid").addEventListener("click", () => loadScenario("valid"));
@@ -530,17 +581,17 @@
   });
   $("mclear").addEventListener("click", () => { $("minput").value = ""; mreset(); });
 
-  // Flip ONE byte of the act's signature: the same bundle that was CONSISTENT
-  // now FAILS — the post-quantum signature catches it. Done in plain sight.
+  // Flip ONE byte of the first signature in the bundle (the act's, in our
+  // samples): the bundle that was CONSISTENT now FAILS — the post-quantum
+  // signature catches it. Same textual surgery as the record tamper above:
+  // every byte we did not flip stays exactly as signed.
   $("m-tamper").addEventListener("click", async () => {
     try {
       let cur = $("minput").value.trim();
-      if (!cur) { const b = await loadBundles(); cur = JSON.stringify(b.valid); }
-      const bundle = JSON.parse(cur);
-      if (bundle.act && Array.isArray(bundle.act.signature) && bundle.act.signature.length) {
-        bundle.act.signature[0] = (bundle.act.signature[0] + 1) % 256;
-      }
-      $("minput").value = JSON.stringify(bundle, null, 2);
+      if (!cur) cur = rawTopLevelValue(await loadBundlesText(), "valid");
+      const out = flipFirst(cur, /("signature"\s*:\s*\[\s*)(\d+)/);
+      if (out === null) throw new Error("no signature to flip");
+      $("minput").value = out;
       mreset();
     } catch (e) { $("minput").value = mLoadErr; }
   });
@@ -606,6 +657,247 @@
     const files = [...e.target.files]; e.target.value = "";
     if (files.length) routeProofFiles(files);
   });
+
+  // ── WebMCP tool layer ────────────────────────────────────────────────────
+  // Exposes the SAME offline verifier the buttons above drive, as tools an
+  // agent can call in its own browser. Verification is only meaningful
+  // client-side: an agent that asks a server "is this evidence valid?" has
+  // moved its trust, not removed it. Here the WASM runs in the agent's own
+  // browser, from source it can rebuild and diff, with no network call after
+  // page load.
+  //
+  // Feature-detected: with no modelContext this block registers nothing and
+  // the human page is byte-for-byte unchanged in behaviour.
+  //
+  // PURE BY CONSTRUCTION — every tool is caller-supplied bytes in, verdict
+  // out. No writes, no storage, no keys, no network, no state surviving the
+  // call. There is deliberately NO tool that signs, issues, mints, revokes or
+  // stores: a signing tool on a public page would hand an arbitrary agent our
+  // identity. That is a one-way door and it is refused here by design, not
+  // omitted by oversight.
+  if (window.document?.modelContext?.registerTool) {
+    // Records and bundles must arrive as RAW JSON TEXT, never a parsed object.
+    // These formats carry u64 fields (record and act nonces) above 2^53, where
+    // JavaScript numbers round: an agent's own JSON.parse has already corrupted
+    // such values before this tool could see them, and a verdict computed on
+    // corrupted bytes would call genuine evidence forged. Rejecting loudly
+    // beats verifying silently wrong. (Verdict objects, by contrast, carry no
+    // u64s — explain_verdict may take text or object.)
+    const rejectParsed = (field, kind) => {
+      const v = {
+        verdict: "FAILED",
+        reason:
+          field + " must be the RAW JSON text, not a parsed object. This format carries " +
+          "u64 fields that exceed JavaScript's 2^53 number precision, so JSON.parse has " +
+          "already rounded them and any verdict would be computed on corrupted bytes. " +
+          "Re-read the file or response body as text and pass it unmodified.",
+        checks: [],
+      };
+      if (kind === "record") v.headline = "Input rejected — raw JSON text required";
+      else v.soundness_caveats = [];
+      return v;
+    };
+    // MCP-shaped result. The verdict object rides along structurally so an
+    // agent need not re-parse the text to branch on it.
+    const result = (obj) => ({
+      content: [{ type: "text", text: JSON.stringify(obj, null, 2) }],
+      structuredContent: obj,
+    });
+
+    document.modelContext.registerTool({
+      name: "verify_elara_record",
+      description:
+        "Verify one signed Elara validation record entirely offline, in this browser. " +
+        "Checks structure, identity binding (the embedded public key must SHA3-256 to the " +
+        "claimed identity) and the ML-DSA-65 (FIPS 204) post-quantum signature over the " +
+        "record's canonical bytes. Returns {verdict, headline, checks[], reason}; verdict is " +
+        "VERIFIED, PARTIAL or FAILED. HONEST SCOPE: VERIFIED means the bytes are intact and the " +
+        "signer is who the record claims — it does NOT mean the record was accepted, sealed or " +
+        "time-anchored by any network, and it is not a statement that anyone was authorized to " +
+        "create it. INPUT MUST BE RAW TEXT: pass the record exactly as read from disk or network, " +
+        "never JSON.parse'd first — records carry u64 fields above JavaScript's 2^53 integer " +
+        "precision, and a parse/re-stringify round-trip corrupts the exact bytes the signature " +
+        "commits to (parsed objects are rejected with FAILED). " +
+        "Never throws: malformed input returns FAILED with the parse reason.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          record_json: {
+            type: "string",
+            description:
+              "The validation record as RAW JSON text, exactly as read — never re-serialised " +
+              "from JSON.parse (u64 fields round above 2^53; see tool description).",
+          },
+        },
+        required: ["record_json"],
+      },
+      async execute({ record_json }) {
+        if (typeof record_json !== "string") return result(rejectParsed("record_json", "record"));
+        await wasmReady;
+        return result(verify_record_offline(record_json));
+      },
+    });
+
+    document.modelContext.registerTool({
+      name: "verify_mandate_bundle",
+      description:
+        "Check offline whether an agent was authorized to perform an act, under a scoped, " +
+        "revocable mandate. Input is a bundle {bundle_version, act, mandates[], revocations[]} " +
+        "of signed carrier records. Returns {verdict, authorized, principal, signer, lineage[], " +
+        "scope_deferred, soundness_caveats[], checks[], explanation, reason}. HONEST SCOPE: a " +
+        "CONSISTENT verdict proves the signatures and that authority held at the act's signed " +
+        "time GIVEN ONLY THE RECORDS IN THIS BUNDLE. It does NOT prove those records are sealed " +
+        "or time-anchored, and it CANNOT detect a revocation the bundle's author withheld — " +
+        "which is why the verdict is CONSISTENT and never AUTHORIZED. Read soundness_caveats " +
+        "before relying on it. INPUT MUST BE RAW TEXT: pass the bundle exactly as read, never " +
+        "JSON.parse'd first — act nonces are u64 and round above JavaScript's 2^53 integer " +
+        "precision, so a parse/re-stringify round-trip corrupts the signed bytes (parsed " +
+        "objects are rejected with FAILED). Never throws: malformed input returns FAILED.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          bundle_json: {
+            type: "string",
+            description:
+              "The mandate bundle envelope as RAW JSON text, exactly as read — never " +
+              "re-serialised from JSON.parse (u64 nonces round above 2^53; see tool description).",
+          },
+        },
+        required: ["bundle_json"],
+      },
+      async execute({ bundle_json }) {
+        if (typeof bundle_json !== "string") return result(rejectParsed("bundle_json", "bundle"));
+        await wasmReady;
+        return result(evaluate_mandate_bundle(bundle_json));
+      },
+    });
+
+    // Turns a verdict into the claim it does and does NOT make. Pure
+    // formatting over a verdict object already produced by the tools above —
+    // it re-verifies nothing, so it can never manufacture a stronger claim
+    // than the verdict it was handed.
+    function explainVerdict(v) {
+      if (!v || typeof v !== "object") {
+        return { error: "explain_verdict expects a verdict object from one of the verify tools." };
+      }
+      // Shape detection must survive a JSON round-trip. Optional verdict fields
+      // are `undefined` on input-error results, and JSON.stringify DELETES
+      // undefined keys — so `"soundness_caveats" in v` is true on the live
+      // object and false on the same verdict passed as text, which is exactly
+      // how an agent will pass it. Detect positively on a key that is always
+      // present, and when neither matches say so rather than guessing.
+      const RECORD_KEY = "headline";
+      const BUNDLE_KEYS = ["flag", "authorized", "attributes_to_principal", "network", "signer",
+        "principal", "act_timestamp_ms", "explanation", "lineage", "scope_note",
+        "scope_deferred", "soundness_caveats"];
+      const isRecord = RECORD_KEY in v;
+      const isBundle = !isRecord && BUNDLE_KEYS.some((k) => k in v);
+      const verdict = v.verdict || "UNKNOWN";
+      if (!isRecord && !isBundle) {
+        return {
+          verdict,
+          subject: "unrecognised verdict shape",
+          what_it_claims: [],
+          what_it_does_not_claim: [
+            "This input was not recognisable as a verdict from verify_elara_record or " +
+              "verify_mandate_bundle, so no claim is made about it at all.",
+          ],
+          failed_or_unproven_checks: [],
+          note: "Pass a verdict object exactly as returned by one of the verify tools.",
+        };
+      }
+      const claims = [];
+      const notClaims = [];
+
+      if (isBundle) {
+        if (verdict === "CONSISTENT") {
+          claims.push(
+            "Every carrier record in the bundle is correctly signed (ML-DSA-65, FIPS 204).",
+            "The authority chain from principal to signer held at the act's signed timestamp, " +
+              "given only the records present in this bundle.",
+          );
+        } else {
+          claims.push("Nothing was established: the bundle did not reach a CONSISTENT verdict.");
+        }
+        notClaims.push(
+          "It does NOT prove these records are sealed, on-chain, or time-anchored.",
+          "It CANNOT detect a revocation the bundle's author chose to withhold — an absent " +
+            "revocation is indistinguishable from one that was never issued.",
+          "This is why the verdict is CONSISTENT and never AUTHORIZED.",
+        );
+        if (v.scope_deferred === true || v.scope_deferred === false) {
+          notClaims.push(
+            "Scope enforcement is deferred in this bundle version: scope_deferred=" +
+              v.scope_deferred + " records whether the leaf mandate's scope was a wildcard, " +
+              "NOT that the scope was checked against the act.",
+          );
+        }
+        for (const c of v.soundness_caveats || []) notClaims.push("Caveat: " + c);
+      } else {
+        if (verdict === "VERIFIED") {
+          claims.push(
+            "The record parsed and its bytes are intact.",
+            "The embedded public key hashes to the identity the record claims, and the " +
+              "ML-DSA-65 (FIPS 204) signature over the canonical bytes is valid.",
+          );
+        } else if (verdict === "PARTIAL") {
+          claims.push("Some checks passed; read checks[] for exactly which — the rest were not established.");
+        } else {
+          claims.push("Nothing was verified.");
+        }
+        notClaims.push(
+          "It does NOT mean any network accepted, sealed or time-anchored this record.",
+          "It is NOT a statement that anyone was authorized to create it — authority is a " +
+            "separate question, answered by verify_mandate_bundle.",
+        );
+      }
+
+      notClaims.push(
+        "The underlying artifact is a signed, hash-linked evidence log in a published open " +
+          "format. It is not a blockchain, and no verdict here asserts consensus.",
+      );
+
+      const failed = (v.checks || []).filter((c) => c.status && c.status !== "pass");
+      return {
+        verdict,
+        subject: isBundle ? "mandate bundle (authority to act)" : "validation record (integrity + signer)",
+        what_it_claims: claims,
+        what_it_does_not_claim: notClaims,
+        failed_or_unproven_checks: failed.map((c) => ({ name: c.name, status: c.status, detail: c.detail })),
+        note: "Formatting only — this tool re-verifies nothing and cannot strengthen the verdict it was given.",
+      };
+    }
+
+    document.modelContext.registerTool({
+      name: "explain_verdict",
+      description:
+        "Translate a verdict from verify_elara_record or verify_mandate_bundle into the claim it " +
+        "does and does NOT support. Use this before repeating a verdict to a user: it names the " +
+        "limits explicitly (integrity and signer identity — never 'authorized on a chain'; a " +
+        "bundle cannot reveal a revocation its author withheld; the artifact is a signed " +
+        "hash-linked evidence log, not a blockchain). Pure formatting over the verdict object you " +
+        "pass in — it re-verifies nothing and cannot report anything stronger than it was given.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          verdict_json: {
+            type: "string",
+            description:
+              "A verdict object (or its JSON text) as returned by one of the verify tools.",
+          },
+        },
+        required: ["verdict_json"],
+      },
+      async execute({ verdict_json }) {
+        let v = verdict_json;
+        if (typeof v === "string") {
+          try { v = JSON.parse(v); }
+          catch (e) { return result({ error: "verdict_json: parse error: " + String(e) }); }
+        }
+        return result(explainVerdict(v));
+      },
+    });
+  }
 </script>
 </body>
 </html>

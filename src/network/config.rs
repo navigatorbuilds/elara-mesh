@@ -47,72 +47,14 @@ pub const PINNED_GENESIS_AUTHORITY_PUBKEYS: &[&str] = &[];
 /// Operators set `seed_peers` explicitly; see `docs/JOIN-DEVNET.md`.
 pub const TESTNET_SEED_PEERS: &[&str] = &[];
 
-/// §E re-genesis fence — compiled-in chain-identity anchors
-/// (internal design notes).
-///
-/// Entries are `(zone_path, epoch, seal_record_hash)`: at `(zone, epoch)` the
-/// canonical seal record's hash MUST equal the pinned value. The check is a
-/// positive point-assertion — a no-op for every other epoch — so honest
-/// lagging nodes (below the pinned epoch) and honest past-anchor nodes are
-/// untouched (non-forking by construction). It discriminates the post-2026-06-16
-/// re-genesis chain from the frozen pre-ceremony chain, whose genesis KEY was
-/// reused — which is why the trust root here is the RELEASE CHANNEL (this
-/// compiled constant), NOT an on-chain signature: a genesis signature proves
-/// WHO signed, never WHICH chain, and a hostile bootstrap peer simply never
-/// serves a chain-carried pin.
-///
-/// Enforcement sites (all mandatory, fail-closed):
-///   1. `EpochState::apply_canonical_seal` (epoch.rs) — the funnel for the
-///      ZONE-seal register family: live ingest, boot replay via
-///      `process_record`, F-10 recovery, orphan promotion — AND
-///      `EpochState::register_global_seal`, the second tip-mutation funnel
-///      (cross-zone escalation seals, also replayed by `process_record`).
-///   2. `apply_bootstrap_snapshot_full` pre-mutation check + the bounded
-///      `/headers/from/{E}` peer probe in `snapshot_bootstrap` (sync.rs) —
-///      the snapshot tip-install path structurally bypasses `register_seal`.
-///
-/// Plus a periodic completion guard (health.rs `health_check_loop`): a node
-/// whose epoch state is populated yet still below the pinned epoch after a
-/// debounce window ALARMS and keeps syncing — never bricks. That guard closes
-/// the vacuity gap: the old chain froze at epoch 35245 < 49986, so a node fed
-/// only frozen history parks below the pin and the point-assertion never
-/// fires. (An empty epoch state is "not yet replayed", never an alarm.)
-///
-/// MAINTENANCE:
-/// - Any future INTENTIONAL re-genesis that resets epoch numbering MUST update
-///   or clear these entries in the same release, or virgin re-joins self-brick
-///   on the stale pin.
-/// - The pinned VALUE was live-verified 4× (2026-08-25 21:20 / 23:47 / 01:36 /
-///   2026-08-26 08:15) against the authority seed, 45k+ epochs deep and
-///   chain-linked by epoch 49987's previous_seal_hash. Its DERIVATION must
-///   never enter the enforcement path — hard-coded const only.
-///
-/// STATED RESIDUALS (not closed by this fence): total eclipse (a node fed ONLY
-/// hostile data that never reaches an honest peer — a peer-diversity problem no
-/// checkpoint closes; mitigated by the empty default seed list forcing explicit
-/// trusted-seed config), and the genesis-mint poisoning follow-up (the old
-/// chain's REAL signed genesis mint passing the bootstrap signature gate —
-/// separate filed item, distinct code region in gossip.rs).
-pub const PINNED_CHAIN_ANCHORS_NETWORK_ID: &str = "testnet";
-
-/// See [`PINNED_CHAIN_ANCHORS_NETWORK_ID`] just above: the anchors below bind
-/// to THAT network only. `EpochState::scope_chain_anchors_to_network`
-/// (called at NodeState construction and after every wholesale epoch-state
-/// install) deactivates the table on any other `network_id`, so private
-/// devnets / fresh re-genesis networks are never fenced by the canonical
-/// chain's pin — without it, any young chain would alarm until epoch 49986
-/// and hard-wedge there when its natural seal hash differs. Deliberately a
-/// SEPARATE const from `DEFAULT_NETWORK_ID`: if the default ever changes,
-/// the anchor binding must not silently follow it.
-pub const PINNED_CHAIN_ANCHORS: &[(&str, u64, [u8; 32])] = &[(
-    "0",
-    49986,
-    [
-        0xc5, 0x83, 0x2a, 0xb4, 0xb9, 0x74, 0x0a, 0xb1, 0x8a, 0xd8, 0x2d, 0xd8, 0xf4, 0x54, 0x5b,
-        0xbb, 0x8e, 0xfa, 0x87, 0x8b, 0x5c, 0x56, 0x10, 0x53, 0xc3, 0x78, 0x0e, 0xf3, 0xe0, 0x77,
-        0x08, 0x79,
-    ],
-)];
+/// Chain-identity pins (epoch anchor + genesis-mint) — canonical definitions
+/// live in the feature-ungated `crate::pins` module (their enforcement spans
+/// `accounting`/`storage`, which compile without `node-core`). Re-exported
+/// here so the node stack's `config::PINNED_*` paths keep working.
+pub use crate::pins::{
+    PINNED_CHAIN_ANCHORS, PINNED_CHAIN_ANCHORS_NETWORK_ID, PINNED_GENESIS_MINT_ID,
+    PINNED_GENESIS_MINT_RECORD_HASH,
+};
 
 /// Node configuration. Loaded from TOML, overridable via `ELARA_*` env vars.
 #[derive(Debug, Clone, Deserialize)]

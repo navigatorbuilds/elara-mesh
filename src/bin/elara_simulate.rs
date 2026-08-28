@@ -541,8 +541,9 @@ async fn rebuild_and_commit_ledger(state: &Arc<NodeState>) -> Result<()> {
     let rocks = state.rocks.clone();
     let genesis = state.config.genesis_authority.clone();
     let gv = state.config.genesis_validators.clone();
+    let net = state.config.network_id.clone();
     let (mut new_ledger, _) = tokio::task::spawn_blocking(move || {
-        rocks.rebuild_ledger_streaming(&genesis, &gv)
+        rocks.rebuild_ledger_streaming(&genesis, &gv, &net)
     })
     .await
     .map_err(|e| ElaraError::Network(format!("rebuild join error: {e}")))??;

@@ -7753,6 +7753,8 @@ pub(crate) async fn metrics_body_tiered(
     let pin_boot_refusals = state.pinned_anchor_bootstrap_refusals_total.load(std::sync::atomic::Ordering::Relaxed);
     let pin_completion_alarms = state.pinned_anchor_completion_alarms_total.load(std::sync::atomic::Ordering::Relaxed);
     let pin_probe_inconclusive = state.pinned_anchor_probe_inconclusive_total.load(std::sync::atomic::Ordering::Relaxed);
+    let pin_mint_rejections = state.pinned_genesis_mint_rejections_total.load(std::sync::atomic::Ordering::Relaxed);
+    let pin_mint_absent = state.pinned_genesis_mint_absent_total.load(std::sync::atomic::Ordering::Relaxed);
     let arc_emit    = state.archive_snapshot_emit_total.load(std::sync::atomic::Ordering::Relaxed);
     let arc_prune   = state.archive_snapshot_prune_total.load(std::sync::atomic::Ordering::Relaxed);
     let arc_last_ep = state.archive_snapshot_last_epoch.load(std::sync::atomic::Ordering::Relaxed);
@@ -7806,6 +7808,12 @@ pub(crate) async fn metrics_body_tiered(
          # HELP elara_pinned_anchor_probe_inconclusive_total SEC-REGENESIS-FENCE: pinned-anchor header probes that were inconclusive — transport error, or the peer no longer serves the pinned epoch's seal record (GC-pruned; compute_epoch_headers skips pruned entries). These proceed rather than refuse: the probe's only decisive signal is an affirmative contradiction; the snapshot signer trust gate + completion guard carry this case. Sustained growth = peers have pruned the anchor epoch and the probe is aging out.\n\
          # TYPE elara_pinned_anchor_probe_inconclusive_total counter\n\
          elara_pinned_anchor_probe_inconclusive_total {pin_probe_inconclusive}\n\
+         # HELP elara_pinned_genesis_mint_rejections_total SEC-GENESIS-MINT-PIN: records refused for claiming a genesis:* mint on the anchored network without being the pinned ceremony mint (six ceremonies share the reused genesis key; only positive identification discriminates). Counted at the live ingest funnel and the bootstrap pre-store filter. Any non-zero value = a peer served wrong-ceremony genesis data. Harm model: silent consensus divergence, not supply inflation.\n\
+         # TYPE elara_pinned_genesis_mint_rejections_total counter\n\
+         elara_pinned_genesis_mint_rejections_total {pin_mint_rejections}\n\
+         # HELP elara_pinned_genesis_mint_absent_total SEC-GENESIS-MINT-PIN: virgin genesis-bootstrap cycles on the anchored network that completed without acquiring the pinned mint — ledger stays un-seeded and the cycle retries (alarm, never brick). Sustained growth = hostile/empty peer set, or a stale pin after an un-maintained re-genesis (see config.rs MAINTENANCE).\n\
+         # TYPE elara_pinned_genesis_mint_absent_total counter\n\
+         elara_pinned_genesis_mint_absent_total {pin_mint_absent}\n\
          # HELP elara_ledger_loaded_from_snapshot 1 if the current in-memory ledger was loaded from a peer snapshot this run; 0 if rebuilt locally\n\
          # TYPE elara_ledger_loaded_from_snapshot gauge\n\
          elara_ledger_loaded_from_snapshot {sb_ledger_flag}\n\

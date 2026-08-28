@@ -898,6 +898,19 @@ pub struct NodeState {
     /// exact per-zone tracking can come with a second anchor entry.
     /// In-memory only.
     pub pinned_anchor_deficit_tip_sum: AtomicU64,
+    /// Genesis-mint pin (SEC-GENESIS-MINT-PIN-VERDICT-2026-08-26): records
+    /// refused because they claimed a `genesis:*` mint on the anchored network
+    /// without being the pinned ceremony mint — counted at BOTH the live
+    /// ingest funnel and the bootstrap pre-store filter. Any non-zero value =
+    /// a peer served wrong-ceremony genesis data.
+    /// Surfaced as `elara_pinned_genesis_mint_rejections_total`.
+    pub pinned_genesis_mint_rejections_total: AtomicU64,
+    /// Genesis-mint pin: virgin genesis-bootstrap cycles on the anchored
+    /// network that completed WITHOUT acquiring the pinned mint (ledger stays
+    /// un-seeded; the cycle retries — alarm, never brick). Sustained growth =
+    /// hostile/empty peer set, or a stale pin after an un-maintained
+    /// re-genesis. Surfaced as `elara_pinned_genesis_mint_absent_total`.
+    pub pinned_genesis_mint_absent_total: AtomicU64,
     /// §E fence site 2b: pinned-anchor header probes that were INCONCLUSIVE —
     /// transport error, or the peer no longer holds the pinned epoch's seal
     /// record (GC-pruned; compute_epoch_headers skips pruned entries). These
@@ -4010,6 +4023,8 @@ impl NodeState {
             pinned_anchor_deficit_streak: AtomicU64::new(0),
             pinned_anchor_deficit_tip_sum: AtomicU64::new(0),
             pinned_anchor_probe_inconclusive_total: AtomicU64::new(0),
+            pinned_genesis_mint_rejections_total: AtomicU64::new(0),
+            pinned_genesis_mint_absent_total: AtomicU64::new(0),
             snapshot_bootstrap_root_mismatch_total: AtomicU64::new(0),
             snapshot_bootstrap_root_absent_total: AtomicU64::new(0),
             boot_sealed_root_verified_total: AtomicU64::new(0),

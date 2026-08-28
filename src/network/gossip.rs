@@ -1658,16 +1658,33 @@ pub async fn pull_loop(state: Arc<NodeState>, mut shutdown: watch::Receiver<()>,
                 }
             }
 
-            // Try each candidate URL until one returns records
+            // Try each candidate URL. Starvation fix (SEC-GENESIS-MINT-PIN-
+            // VERDICT-2026-08-26, Opus seat): the old `break` on the first
+            // n>0 let a hostile peer serving junk volume permanently pre-empt
+            // the honest seed (livelock: pool stays empty, same peer retried
+            // forever). On the anchored network, bootstrap success requires
+            // the PINNED GENESIS MINT, not just records — keep trying
+            // candidates until it lands; off-network keeps first-success.
+            let canonical_net = state.config.network_id
+                == crate::network::config::PINNED_CHAIN_ANCHORS_NETWORK_ID;
             let mut total_pulled = 0u64;
+            let mut mint_acquired = false;
             for url in &candidate_urls {
                 let bootstrap_url = url.as_str();
                 info!("genesis bootstrap: trying {bootstrap_url} ...");
                 match bootstrap_pull_from_zero(&state, bootstrap_url).await {
-                    Ok(n) if n > 0 => {
-                        info!("genesis bootstrap: pulled {n} records from {bootstrap_url}");
-                        total_pulled = n;
-                        break; // Got records, stop trying
+                    Ok((n, minted)) if n > 0 => {
+                        info!(
+                            "genesis bootstrap: pulled {n} records from {bootstrap_url} \
+                             (pinned mint acquired: {minted})"
+                        );
+                        total_pulled = total_pulled.max(n);
+                        if minted {
+                            mint_acquired = true;
+                        }
+                        if !canonical_net || minted {
+                            break; // bootstrap success for this cycle
+                        }
                     }
                     Ok(_) => {
                         debug!("genesis bootstrap: 0 records from {bootstrap_url}, trying next");
@@ -1680,12 +1697,28 @@ pub async fn pull_loop(state: Arc<NodeState>, mut shutdown: watch::Receiver<()>,
             if total_pulled == 0 {
                 warn!("genesis bootstrap: all {} candidates returned 0 records", candidate_urls.len());
             }
+            if canonical_net && !mint_acquired {
+                // Alarm, never brick: the ledger stays un-seeded, the outer
+                // pool_empty && supply_zero gate re-enters next cycle and the
+                // whole candidate list is retried. Sustained growth of this
+                // counter = every reachable peer is serving no/foreign
+                // ceremony data (hostile set, or the pin is stale after an
+                // un-maintained re-genesis — see config.rs MAINTENANCE).
+                state
+                    .pinned_genesis_mint_absent_total
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                tracing::error!(
+                    candidates = candidate_urls.len(),
+                    "genesis bootstrap cycle completed WITHOUT the pinned genesis mint — ledger \
+                     stays un-seeded, will retry next cycle (SEC-GENESIS-MINT-PIN)"
+                );
+            }
 
             // Always rebuild ledger when pool is empty — records may already be in
             // RocksDB from a previous pull that stored them but didn't rebuild.
             let genesis = state.config.genesis_authority.clone();
             info!("genesis bootstrap: rebuilding ledger from RocksDB (streaming)...");
-            if let Ok((mut new_ledger, applied)) = state.rocks.rebuild_ledger_streaming(&genesis, &state.config.genesis_validators) {
+            if let Ok((mut new_ledger, applied)) = state.rocks.rebuild_ledger_streaming(&genesis, &state.config.genesis_validators, &state.config.network_id) {
                 let pool = new_ledger.conservation_pool;
                 let accounts = new_ledger.accounts.len();
                 // Sync applied IDs to CF_APPLIED and clear in-memory set
@@ -2792,7 +2825,39 @@ fn bootstrap_record_signature_valid(record: &ValidationRecord) -> bool {
     }
 }
 
-async fn bootstrap_pull_from_zero(state: &Arc<NodeState>, base_url: &str) -> crate::errors::Result<u64> {
+/// Genesis-mint pin, bootstrap layer (SEC-GENESIS-MINT-PIN-VERDICT-2026-08-26):
+/// FULL positive identification — id AND record_hash AND creator — because this
+/// path deliberately bypasses ledger validation and must never even STORE a
+/// foreign-ceremony mint: `rebuild_ledger_streaming` re-applies whatever is on
+/// disk regardless of any in-memory flag, so "store but don't count it" is
+/// incoherent. `true` = admissible: not a genesis-reasoned mint at all, or off
+/// the anchored network (devnets are never fenced), or exactly the pinned
+/// ceremony record. Split out so the gate logic is unit-testable without a
+/// fake bootstrap peer (same discipline as the sig/ts gates below).
+fn bootstrap_genesis_mint_admissible(
+    record: &crate::record::ValidationRecord,
+    genesis_authority: &str,
+    network_id: &str,
+) -> bool {
+    let is_genesis_reasoned_mint =
+        record.metadata.get("beat_op").and_then(|v| v.as_str()) == Some("mint")
+            && record
+                .metadata
+                .get("beat_reason")
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| s.starts_with("genesis:"));
+    if !is_genesis_reasoned_mint {
+        return true;
+    }
+    if network_id != crate::network::config::PINNED_CHAIN_ANCHORS_NETWORK_ID {
+        return true;
+    }
+    record.id == crate::network::config::PINNED_GENESIS_MINT_ID
+        && record.record_hash() == crate::network::config::PINNED_GENESIS_MINT_RECORD_HASH
+        && crate::accounting::types::creator_identity_hash(record) == genesis_authority
+}
+
+async fn bootstrap_pull_from_zero(state: &Arc<NodeState>, base_url: &str) -> crate::errors::Result<(u64, bool)> {
     // Paginate: pull batches of 100 until peer returns <100 (exhausted)
     // Smaller pages avoid 10s client timeout on high-latency links (Tailscale relay)
     let mut all_records: Vec<Vec<u8>> = Vec::new();
@@ -2844,7 +2909,12 @@ async fn bootstrap_pull_from_zero(state: &Arc<NodeState>, base_url: &str) -> cra
     let mut total = 0u64;
     let mut skipped = 0u64;
     let mut genesis_mint_seen = false; // Track: at most one genesis mint in any bootstrap pull
+    // Verify finding D: "mint acquired" must mean STORED, not merely
+    // slot-claimed — a put_record failure after the slot claim would
+    // otherwise report success and suppress the absent-alarm for a cycle.
+    let mut pinned_mint_stored = false;
     for record in decoded {
+        let mut claimed_slot_this_record = false;
         let record_id = record.id.clone();
         let already_seen = state.seen.lock_recover().contains(&record_id);
         if already_seen {
@@ -2891,22 +2961,53 @@ async fn bootstrap_pull_from_zero(state: &Arc<NodeState>, base_url: &str) -> cra
             }
         }
 
-        // Duplicate genesis mint guard: only accept the first genesis mint
-        // record in a bootstrap pull. On a fresh boot after storage wipe,
-        // peers may serve records from both the old and new genesis boot,
-        // containing two different mint records. Only keep the first one
-        // (sorted earliest above) to prevent supply doubling.
+        // Genesis-mint admission + singleton slot (SEC-GENESIS-MINT-PIN-
+        // VERDICT-2026-08-26). Two layers:
+        // (1) On the anchored network, ONLY the pinned ceremony's mint is ever
+        //     stored — six ceremonies share the reused genesis key, so the
+        //     signature gate above admits every one of their mints; positive
+        //     identification is the only discriminator (a timestamp cutover
+        //     was rejected: 24m44s between the newest abandoned mint and the
+        //     live one leaves no safe margin).
+        // (2) The singleton slot is claimed ONLY by the total-allocation mint;
+        //     `genesis:bootstrap` faucet claims are ordinary records (the old
+        //     starts_with("genesis:") slot swallowed them on sub-MAX devnets →
+        //     rebuilt-ledger divergence).
         {
-            let is_genesis_mint = record.metadata.get("beat_op").and_then(|v| v.as_str()) == Some("mint")
-                && record.metadata.get("beat_reason").and_then(|v| v.as_str())
-                    .is_some_and(|s| s.starts_with("genesis:"));
-            if is_genesis_mint {
-                if genesis_mint_seen {
-                    info!("bootstrap: skipping duplicate genesis mint record {}", &record_id[..record_id.len().min(16)]);
+            let beat_reason = record
+                .metadata
+                .get("beat_reason")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let is_genesis_reasoned_mint =
+                record.metadata.get("beat_op").and_then(|v| v.as_str()) == Some("mint")
+                    && beat_reason.starts_with("genesis:");
+            if is_genesis_reasoned_mint {
+                if !bootstrap_genesis_mint_admissible(
+                    &record,
+                    genesis_auth,
+                    &state.config.network_id,
+                ) {
+                    state
+                        .pinned_genesis_mint_rejections_total
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    info!(
+                        "bootstrap: refusing foreign-ceremony genesis mint {} — not the pinned \
+                         ceremony record (SEC-GENESIS-MINT-PIN)",
+                        &record_id[..record_id.len().min(16)]
+                    );
                     skipped += 1;
                     continue;
                 }
-                genesis_mint_seen = true;
+                if beat_reason == "genesis:total_allocation" {
+                    if genesis_mint_seen {
+                        info!("bootstrap: skipping duplicate genesis mint record {}", &record_id[..record_id.len().min(16)]);
+                        skipped += 1;
+                        continue;
+                    }
+                    genesis_mint_seen = true;
+                    claimed_slot_this_record = true;
+                }
             }
         }
 
@@ -2934,6 +3035,9 @@ async fn bootstrap_pull_from_zero(state: &Arc<NodeState>, base_url: &str) -> cra
         if let Err(e) = state.rocks.put_record(&record_id, &record) {
             debug!("bootstrap store failed for {}: {e}", &record_id[..16.min(record_id.len())]);
             continue;
+        }
+        if claimed_slot_this_record {
+            pinned_mint_stored = true;
         }
 
         // Add to DAG index (tolerant — ignores missing parents)
@@ -2970,7 +3074,11 @@ async fn bootstrap_pull_from_zero(state: &Arc<NodeState>, base_url: &str) -> cra
     }
     info!("bootstrap_pull_from_zero: {total} stored (bypassed ledger validation for ledger rebuild)");
     state.gossip_pull_total.fetch_add(total, std::sync::atomic::Ordering::Relaxed);
-    Ok(total)
+    // Second element: whether THIS pull STORED the singleton genesis mint —
+    // the caller's candidate loop needs it (records-without-the-mint is not
+    // bootstrap success on the anchored network; see the starvation fix
+    // there). Post-store, not slot-claim (verify finding D).
+    Ok((total, pinned_mint_stored))
 }
 
 /// Timestamp-based pull: fetch records newer than our latest tip. Returns records inserted.
@@ -5801,6 +5909,88 @@ mod tests {
         assert_eq!(pull_jitter_cap_ms(Duration::from_secs(30)), 5000);
         assert_eq!(pull_jitter_cap_ms(Duration::from_secs(5)), 1250);
         assert_eq!(pull_jitter_cap_ms(Duration::from_millis(2)), 1);
+    }
+
+    /// SEC-GENESIS-MINT-PIN: the pinned ceremony values are load-bearing the
+    /// moment a release ships them — re-derive them IN RUST from the mint's
+    /// actual wire bytes (checked-in fixture, captured live from the authority
+    /// seed 2026-08-26) and lock id + record_hash + creator + shape against
+    /// the compiled consts. If this test fails, the consts are wrong — never
+    /// "fix" it by changing the assertions to match the consts.
+    #[test]
+    fn pinned_genesis_mint_fixture_locked() {
+        let hex_str = include_str!("../../tests/fixtures/genesis_mint_019f36c4.wire.hex");
+        let wire = hex::decode(hex_str.trim()).expect("fixture hex decodes");
+        let rec = crate::record::ValidationRecord::from_bytes(&wire).expect("fixture wire parses");
+        assert_eq!(rec.id, crate::network::config::PINNED_GENESIS_MINT_ID);
+        assert_eq!(
+            rec.record_hash(),
+            crate::network::config::PINNED_GENESIS_MINT_RECORD_HASH,
+            "record_hash re-derivation from wire bytes must equal the compiled pin"
+        );
+        let creator = crate::accounting::types::creator_identity_hash(&rec);
+        assert_eq!(
+            creator,
+            "ada8575c57e1da94057c1a43ea398d4b4be105ff6a0476259b34801f0e4e6c79",
+            "fixture creator must be the genesis authority"
+        );
+        assert_eq!(rec.metadata.get("beat_op").and_then(|v| v.as_str()), Some("mint"));
+        assert_eq!(
+            rec.metadata.get("beat_reason").and_then(|v| v.as_str()),
+            Some("genesis:total_allocation")
+        );
+        assert_eq!(rec.timestamp, 1783330262.683914);
+        assert!(
+            bootstrap_genesis_mint_admissible(
+                &rec,
+                &creator,
+                crate::network::config::PINNED_CHAIN_ANCHORS_NETWORK_ID
+            ),
+            "the pinned mint itself must pass full bootstrap admission on the anchored network"
+        );
+    }
+
+    /// SEC-GENESIS-MINT-PIN admissibility table: only the pinned ceremony's
+    /// mint passes on the anchored network; devnets are never fenced; non-mint
+    /// records are untouched; creator and id are both load-bearing.
+    #[test]
+    fn pinned_genesis_mint_bootstrap_admissibility_table() {
+        let authority = "ada8575c57e1da94057c1a43ea398d4b4be105ff6a0476259b34801f0e4e6c79";
+        let anchored = crate::network::config::PINNED_CHAIN_ANCHORS_NETWORK_ID;
+        let mk = |id: &str, op: &str, reason: &str| {
+            let mut r = crate::record::ValidationRecord::create(
+                b"mint-test",
+                vec![0xAA; 1952],
+                vec![],
+                crate::record::Classification::Public,
+                None,
+            );
+            r.id = id.to_string();
+            r.metadata.insert("beat_op".into(), serde_json::json!(op));
+            r.metadata.insert("beat_reason".into(), serde_json::json!(reason));
+            r
+        };
+        // Foreign-ceremony mint (real historical id of an abandoned chain's
+        // mint) on the anchored network → refused.
+        let foreign = mk("019f36ad-a77a-7a41-9482-1ac6cc1119ff", "mint", "genesis:total_allocation");
+        assert!(!bootstrap_genesis_mint_admissible(&foreign, authority, anchored));
+        // Same record on a devnet → admitted (devnets never fenced).
+        assert!(bootstrap_genesis_mint_admissible(&foreign, authority, "some-devnet"));
+        // Non-mint record with an old timestamp/shape → untouched on the
+        // anchored network (scope discipline: the live store really does
+        // serve a pre-ceremony super-seal as record #1 — must keep flowing).
+        let non_mint = mk("019f2c92-9f5d-7f02-852a-eb98414e3ee0", "attest", "unrelated");
+        assert!(bootstrap_genesis_mint_admissible(&non_mint, authority, anchored));
+        // genesis:bootstrap faucet-claim mint: NOT the pinned id → refused on
+        // the anchored network (no legitimate ones exist there — chain is
+        // fully pre-minted), admitted on devnets.
+        let claim = mk("019f9999-0000-7000-8000-000000000001", "mint", "genesis:bootstrap");
+        assert!(!bootstrap_genesis_mint_admissible(&claim, authority, anchored));
+        assert!(bootstrap_genesis_mint_admissible(&claim, authority, "some-devnet"));
+        // Pinned id but wrong hash/creator (attacker re-using the public id
+        // on their own record) → refused: id alone is not sufficient here.
+        let spoofed = mk(crate::network::config::PINNED_GENESIS_MINT_ID, "mint", "genesis:total_allocation");
+        assert!(!bootstrap_genesis_mint_admissible(&spoofed, authority, anchored));
     }
 
     /// I7 (delta-sync cursor audit C7): the bootstrap admission gate rejects

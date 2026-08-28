@@ -310,7 +310,7 @@ dependencies = [
 
 [[package]]
 name = "elara-light-client"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "hex",
  "serde",
@@ -342,7 +342,7 @@ dependencies = [
 
 [[package]]
 name = "elara-record"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "dilithium-rs",
  "hex",
@@ -358,7 +358,7 @@ dependencies = [
 
 [[package]]
 name = "elara-runtime"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "aes-gcm",
  "arc-swap",
@@ -395,7 +395,7 @@ dependencies = [
 
 [[package]]
 name = "elara-smt"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "serde",
  "sha3",
@@ -403,7 +403,7 @@ dependencies = [
 
 [[package]]
 name = "elara-verify"
-version = "0.1.0"
+version = "0.3.3"
 dependencies = [
  "base64",
  "drand-verify",

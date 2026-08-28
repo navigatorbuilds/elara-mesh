@@ -1864,9 +1864,23 @@ pub(crate) fn snapshot_anchor_precheck(
 /// the peer may have legitimately GC-pruned the 45k-deep seal record
 /// (`compute_epoch_headers` skips pruned entries), so refusing on absence
 /// would eventually refuse EVERY honest peer forever. The signer trust gate
-/// and the periodic completion guard carry the inconclusive case. Upgrading
-/// this to a real proof (fetch the seal record bytes at the pin, recompute
-/// record_hash, verify the signature) is a filed follow-up.
+/// and the periodic completion guard carry the inconclusive case.
+///
+/// "PROOF UPGRADE" REFUTED-AND-CLOSED (4-seat panel, SEC-FENCE-PROBE-PROOF-
+/// VERDICT-2026-08-26). The tempting upgrade — fetch the seal record bytes,
+/// recompute record_hash, verify the signature — closes NOTHING a rational
+/// attacker uses: the pin record is PUBLIC (one unauthenticated
+/// `GET /record/{id}/wire`, ~49 KB), so "prove possession of bytes hashing to
+/// H" raises the bar against nobody. Reaching this branch requires a snapshot
+/// tip>pin that ALREADY passed the signer-trust gate — the reused genesis key
+/// or a trusted snapshot-signer — and that attacker can serve the real public
+/// bytes AND has a free evasion (don't claim the pin → inconclusive-proceed).
+/// The only shape it would close (claim-pin + correct-hash + no backing bytes)
+/// is strictly dominated; a WRONG hash is already refused below. The genuine
+/// defense against a hostile trusted-snapshot-signer is snapshot DESCENT
+/// verification via the super-seal chain (filed P1, gated on
+/// trusted_snapshot_signers ever shipping non-empty). Do not re-derive this as
+/// an open follow-up.
 async fn verify_pinned_anchor_via_headers(
     state: &Arc<NodeState>,
     base_url: &str,

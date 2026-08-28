@@ -2040,6 +2040,669 @@ mod tests {
         assert!(touched.contains(&target));
     }
 
+    // ─── INVARIANT-W (WORKER-QUEUE-2026-08-17, B1′ follow-up #1) ───────────
+    //
+    // For EVERY ParsedLedgerOp variant plus the no-op and malformed-op cases:
+    //
+    //     record_touched_identities(r)  ⊆  smt_dirty marks from applying r
+    //
+    // with an EMPTY exception list — XZoneReject/XZoneAbort satisfy ⊆ because
+    // apply_op marks a SUPERSET of the pure scope (it adds the looked-up
+    // pending sender). The apply side is the real producer gate
+    // `apply_single_record` (the ledger.rs `extract_ledger_op(record)?` gate
+    // whose reachability B1′ mirrors), not a hand-rolled re-derivation.
+    //
+    // apply_op's dirty-marking block is only reached on a SUCCESSFUL apply; a
+    // rejected apply marks nothing, and an op-carrying-but-rejected record is
+    // the accepted RISK B residual (SEC6A-PHANTOM-BOUND-VERDICT-2026-08-25),
+    // NOT this invariant. So every fixture below is pre-funded and
+    // authority-signed such that its apply SUCCEEDS, and the helper
+    // hard-fails on fixture rot instead of passing vacuously.
+    //
+    // Pre-B1′ failure demonstration (queue AC): with d3116fde's let-else gate
+    // reverted to the unconditional creator push, the no-op + malformed cases
+    // in `invariant_w_no_op_and_malformed_records_have_empty_scope_and_marks`
+    // fail — touched = {creator} ⊄ marks = ∅. Verified at build time; the
+    // shipping commit message carries the observed failure.
+
+    /// Apply `record` through the real producer gate and assert INVARIANT-W:
+    /// every identity in the witness-flush scope was dirty-marked by the
+    /// apply. Clears `smt_dirty` first so the marks measured are exactly this
+    /// record's (a shared fixture ledger would otherwise pass on residue from
+    /// earlier applies).
+    fn assert_invariant_w(
+        ledger: &mut crate::accounting::ledger::LedgerState,
+        record: &ValidationRecord,
+        authority: &str,
+        case: &str,
+    ) {
+        ledger.smt_dirty.clear();
+        let applied = ledger.apply_single_record(record, authority).unwrap_or_else(|e| {
+            panic!("INVARIANT-W fixture rot [{case}]: apply must SUCCEED, got Err: {e}")
+        });
+        assert!(
+            applied,
+            "INVARIANT-W fixture rot [{case}]: record must carry a ledger op (apply returned Ok(false))"
+        );
+        let touched = record_touched_identities(record);
+        assert!(
+            touched.contains(&creator_identity_hash(record)),
+            "[{case}] op-carrying record must scope its own creator"
+        );
+        for t in &touched {
+            assert!(
+                ledger.smt_dirty.contains(t),
+                "INVARIANT-W VIOLATION [{case}]: '{t}' is in record_touched_identities \
+                 but apply_op never dirty-marked it — phantom-leaf mint site (§6a class)"
+            );
+        }
+    }
+
+    /// [`make_record_with_creator`] with a caller-chosen id + timestamp, so a
+    /// multi-record fixture ledger dodges apply_op's `applied_record_ids`
+    /// dedup (a deduped second apply marks nothing and would read as a
+    /// violation).
+    fn op_record(
+        id: &str,
+        pk: &[u8],
+        ts: f64,
+        meta: std::collections::BTreeMap<String, serde_json::Value>,
+    ) -> ValidationRecord {
+        let mut r = make_record_with_creator(pk.to_vec(), meta);
+        r.id = id.into();
+        r.content_hash = sha3_256(id.as_bytes()).to_vec();
+        r.timestamp = ts;
+        r
+    }
+
+    /// Compile-time exhaustiveness guard: adding a `ParsedLedgerOp` variant
+    /// breaks this match (no wildcard arm) and forces the author to add a
+    /// funded INVARIANT-W fixture for it in the named test. Coverage map only
+    /// — never called.
+    #[allow(dead_code)]
+    fn invariant_w_variant_coverage(op: &ParsedLedgerOp) -> &'static str {
+        match op {
+            ParsedLedgerOp::Mint { .. }
+            | ParsedLedgerOp::Transfer { .. }
+            | ParsedLedgerOp::Stake { .. }
+            | ParsedLedgerOp::Unstake { .. }
+            | ParsedLedgerOp::WitnessReward { .. }
+            | ParsedLedgerOp::Slash { .. }
+            | ParsedLedgerOp::Burn { .. }
+            | ParsedLedgerOp::PoolFund { .. }
+            | ParsedLedgerOp::Predict { .. }
+            | ParsedLedgerOp::WitnessRegister { .. } => {
+                "invariant_w_simple_and_authority_ops_scope_subset_of_marks"
+            }
+            ParsedLedgerOp::DormancyDeclare { .. }
+            | ParsedLedgerOp::DormancyHeartbeat
+            | ParsedLedgerOp::DormancyProofOfLife { .. }
+            | ParsedLedgerOp::DormancyReclaim { .. } => {
+                "invariant_w_dormancy_ops_scope_subset_of_marks"
+            }
+            ParsedLedgerOp::XZoneLock { .. }
+            | ParsedLedgerOp::XZoneClaim { .. }
+            | ParsedLedgerOp::XZoneCancel { .. }
+            | ParsedLedgerOp::XZoneReject { .. }
+            | ParsedLedgerOp::XZoneAbort { .. }
+            | ParsedLedgerOp::XZoneTimeoutRefund { .. }
+            | ParsedLedgerOp::XZoneStaleReap { .. } => {
+                "invariant_w_xzone_ops_scope_subset_of_marks"
+            }
+            ParsedLedgerOp::IdleDecay { .. } => {
+                "invariant_w_idle_decay_batch_scope_subset_of_marks"
+            }
+        }
+    }
+
+    #[test]
+    fn invariant_w_simple_and_authority_ops_scope_subset_of_marks() {
+        use crate::accounting::ledger::LedgerState;
+        use crate::accounting::types::{
+            self, StakePurpose, BASE_UNITS_PER_BEAT, DEFAULT_WITNESS_REWARD, UNSTAKE_COOLDOWN,
+            WITNESS_BOND_MIN,
+        };
+
+        let mut l = LedgerState::new();
+        let auth = id_of(b"genesis");
+        let alice = id_of(b"alice");
+        let bob = id_of(b"bob");
+        let witness = id_of(b"witness");
+        let challenger = id_of(b"challenger");
+        let jury = vec![id_of(b"juror-1"), id_of(b"juror-2")];
+
+        // Mint: authority funds alice (first mint into supply 0 → no vesting).
+        let r = op_record(
+            "w-mint-alice",
+            &creator_pk(b"genesis"),
+            1.0,
+            types::mint_metadata(1_000 * BASE_UNITS_PER_BEAT, &alice, "genesis"),
+        );
+        assert_invariant_w(&mut l, &r, &auth, "Mint");
+
+        // Second mint funds the authority itself (for pool_fund/burn below).
+        // Vests (supply now non-zero) — irrelevant: authority ops skip the
+        // vesting gate and burn/pool_fund read raw `available`.
+        let r = op_record(
+            "w-mint-genesis",
+            &creator_pk(b"genesis"),
+            2.0,
+            types::mint_metadata(1_000 * BASE_UNITS_PER_BEAT, &auth, "genesis"),
+        );
+        assert_invariant_w(&mut l, &r, &auth, "Mint(authority-self)");
+
+        // Transfer: alice → bob.
+        let r = op_record(
+            "w-transfer-1",
+            &creator_pk(b"alice"),
+            3.0,
+            types::transfer_metadata(100 * BASE_UNITS_PER_BEAT, &bob, None),
+        );
+        assert_invariant_w(&mut l, &r, &auth, "Transfer");
+
+        // Stake ×2: w-stake-1 is slashed below, w-stake-2 is unstaked below.
+        let r = op_record(
+            "w-stake-1",
+            &creator_pk(b"alice"),
+            4.0,
+            types::stake_metadata(200 * BASE_UNITS_PER_BEAT, &StakePurpose::Witness),
+        );
+        assert_invariant_w(&mut l, &r, &auth, "Stake");
+        let r = op_record(
+            "w-stake-2",
+            &creator_pk(b"alice"),
+            5.0,
+            types::stake_metadata(200 * BASE_UNITS_PER_BEAT, &StakePurpose::Governance),
+        );
+        assert_invariant_w(&mut l, &r, &auth, "Stake(second)");
+
+        // PoolFund: authority seeds the conservation pool (WitnessReward draws it).
+        let r = op_record(
+            "w-pool-1",
+            &creator_pk(b"genesis"),
+            6.0,
+            types::pool_fund_metadata(100 * BASE_UNITS_PER_BEAT),
+        );
+        assert_invariant_w(&mut l, &r, &auth, "PoolFund");
+
+        // WitnessReward: pool → witness, authority-emitted.
+        let r = op_record(
+            "w-reward-1",
+            &creator_pk(b"genesis"),
+            7.0,
+            types::witness_reward_metadata(DEFAULT_WITNESS_REWARD, &auth, &witness, "w-some-record"),
+        );
+        assert_invariant_w(&mut l, &r, &auth, "WitnessReward");
+
+        // Slash: authority slashes half of alice's stake-1; two jurors so the
+        // jury loop in both scope and marks is exercised with >1 member.
+        let r = op_record(
+            "w-slash-1",
+            &creator_pk(b"genesis"),
+            8.0,
+            types::slash_metadata(
+                100 * BASE_UNITS_PER_BEAT,
+                &alice,
+                &challenger,
+                &jury,
+                "w-stake-1",
+                "double signing",
+            ),
+        );
+        assert_invariant_w(&mut l, &r, &auth, "Slash");
+
+        // Burn: authority burns from its own account.
+        let r = op_record(
+            "w-burn-1",
+            &creator_pk(b"genesis"),
+            9.0,
+            types::burn_metadata(50 * BASE_UNITS_PER_BEAT, Some("invariant-w")),
+        );
+        assert_invariant_w(&mut l, &r, &auth, "Burn");
+
+        // Predict: alice stakes a prediction (above MIN_PREDICTION_STAKE).
+        let r = op_record(
+            "w-predict-1",
+            &creator_pk(b"alice"),
+            10.0,
+            types::predict_metadata(
+                100 * BASE_UNITS_PER_BEAT,
+                "test/zone",
+                5,
+                &types::PredictionClaim::Active,
+                1,
+            ),
+        );
+        assert_invariant_w(&mut l, &r, &auth, "Predict");
+
+        // WitnessRegister: alice bonds for zone 0.
+        let r = op_record(
+            "w-register-1",
+            &creator_pk(b"alice"),
+            11.0,
+            types::witness_register_metadata("0", WITNESS_BOND_MIN),
+        );
+        assert_invariant_w(&mut l, &r, &auth, "WitnessRegister");
+
+        // Unstake: alice releases stake-2 after the cooldown.
+        let r = op_record(
+            "w-unstake-1",
+            &creator_pk(b"alice"),
+            5.0 + UNSTAKE_COOLDOWN + 1.0,
+            types::unstake_metadata("w-stake-2"),
+        );
+        assert_invariant_w(&mut l, &r, &auth, "Unstake");
+    }
+
+    #[test]
+    fn invariant_w_dormancy_ops_scope_subset_of_marks() {
+        use crate::accounting::ledger::LedgerState;
+        use crate::accounting::types::{
+            self, BASE_UNITS_PER_BEAT, DORMANCY_THRESHOLD, DORMANCY_WAKEUP_WINDOW,
+        };
+
+        let auth = id_of(b"genesis");
+        let alice = id_of(b"alice");
+        let declare_time = 1.0 + DORMANCY_THRESHOLD + 1.0;
+
+        // Shared prologue: mint to alice at t=1.0, third party declares her
+        // dormant after the 5-year threshold.
+        let prologue = |l: &mut LedgerState, check_declare: bool| {
+            let r = op_record(
+                "w-dorm-mint",
+                &creator_pk(b"genesis"),
+                1.0,
+                types::mint_metadata(1_000 * BASE_UNITS_PER_BEAT, &alice, "genesis"),
+            );
+            assert_invariant_w(l, &r, &auth, "Mint(dormancy-prologue)");
+            let r = op_record(
+                "w-dorm-declare",
+                &creator_pk(b"bob"),
+                declare_time,
+                types::dormancy_declare_metadata(&alice, 1.0),
+            );
+            if check_declare {
+                assert_invariant_w(l, &r, &auth, "DormancyDeclare");
+            } else {
+                assert!(
+                    l.apply_single_record(&r, &auth).expect("declare applies"),
+                    "dormancy prologue declare must apply"
+                );
+            }
+        };
+
+        // Ledger A: declare (checked) → alice heartbeats awake in-window.
+        let mut a = LedgerState::new();
+        prologue(&mut a, true);
+        let r = op_record(
+            "w-dorm-heartbeat",
+            &creator_pk(b"alice"),
+            declare_time + 365.25 * 24.0 * 3600.0,
+            types::dormancy_heartbeat_metadata(),
+        );
+        assert_invariant_w(&mut a, &r, &auth, "DormancyHeartbeat");
+
+        // Ledger B: third party relays proof-of-life in-window.
+        let mut b = LedgerState::new();
+        prologue(&mut b, false);
+        let r = op_record(
+            "w-dorm-pol",
+            &creator_pk(b"bob"),
+            declare_time + 365.25 * 24.0 * 3600.0,
+            types::dormancy_proof_of_life_metadata(&alice, "opaque-sig"),
+        );
+        assert_invariant_w(&mut b, &r, &auth, "DormancyProofOfLife");
+
+        // Ledger C: wake-up window expires unanswered → authority reclaims.
+        let mut c = LedgerState::new();
+        prologue(&mut c, false);
+        let r = op_record(
+            "w-dorm-reclaim",
+            &creator_pk(b"genesis"),
+            declare_time + DORMANCY_WAKEUP_WINDOW + 1.0,
+            types::dormancy_reclaim_metadata(500 * BASE_UNITS_PER_BEAT, &alice, 1.0),
+        );
+        assert_invariant_w(&mut c, &r, &auth, "DormancyReclaim");
+    }
+
+    #[test]
+    fn invariant_w_xzone_ops_scope_subset_of_marks() {
+        use crate::accounting::cross_zone::{
+            build_committee_proofs, build_committee_proofs_for, xzone_abort_signable_bytes,
+            xzone_finality_signable_bytes, ProofSibling, SealFinalityWitness, CLAIM_TIMEOUT_SECS,
+            REAP_HORIZON_SECS,
+        };
+        use crate::accounting::ledger::LedgerState;
+        use crate::accounting::types::{self, BASE_UNITS_PER_BEAT};
+        use crate::ZoneId;
+
+        let auth = id_of(b"genesis");
+        let alice = id_of(b"alice");
+        let bob = id_of(b"bob");
+        let lock_ts = 100.0;
+
+        // Shared prologue: mint to alice, alice locks 100 beat toward bob in a
+        // zone-0 → zone-1 transfer whose id is the lock record's id.
+        let prologue = |l: &mut LedgerState, lock_id: &str, check: bool| -> ValidationRecord {
+            let r = op_record(
+                "w-xz-mint",
+                &creator_pk(b"genesis"),
+                1.0,
+                types::mint_metadata(1_000 * BASE_UNITS_PER_BEAT, &alice, "genesis"),
+            );
+            assert!(
+                l.apply_single_record(&r, &auth).expect("mint applies"),
+                "xzone prologue mint must apply"
+            );
+            let lock = op_record(
+                lock_id,
+                &creator_pk(b"alice"),
+                lock_ts,
+                types::xzone_lock_metadata(100 * BASE_UNITS_PER_BEAT, &bob, "0", "1"),
+            );
+            if check {
+                assert_invariant_w(l, &lock, &auth, "XZoneLock");
+            } else {
+                assert!(
+                    l.apply_single_record(&lock, &auth).expect("lock applies"),
+                    "xzone prologue lock must apply"
+                );
+            }
+            lock
+        };
+
+        // ── XZoneLock + XZoneClaim: seal the lock (proof + 1-of-1 finality
+        // witness, the shape production wires via the seal path), bob claims.
+        let mut l = LedgerState::new();
+        let lock_rec = prologue(&mut l, "w-lock-claim", true);
+        let merkle_root = {
+            let leaf = lock_rec.record_hash();
+            let sibling = sha3_256(b"sibling");
+            let mut combined = [0u8; 64];
+            combined[..32].copy_from_slice(&leaf);
+            combined[32..].copy_from_slice(&sibling);
+            let root = sha3_256(&combined);
+            let proof = vec![ProofSibling { hash: sibling, is_right: true }];
+            l.cross_zone
+                .set_proof("w-lock-claim", proof, root, 6)
+                .unwrap();
+            root
+        };
+        {
+            let zone_a = ZoneId::from_legacy(0);
+            let w = crate::identity::Identity::generate(
+                crate::identity::EntityType::Device,
+                crate::identity::CryptoProfile::ProfileB,
+            )
+            .unwrap();
+            let pks = vec![w.public_key.clone()];
+            let (committee_hash, c_proofs) = build_committee_proofs(&pks);
+            let msg = xzone_finality_signable_bytes(&zone_a, 1, &merkle_root, &committee_hash);
+            let sig = SealFinalityWitness {
+                witness_pk: w.public_key.clone(),
+                signature: w.sign(&msg).unwrap(),
+                committee_proof: c_proofs.get(&w.public_key).cloned().unwrap(),
+            };
+            l.cross_zone
+                .set_finality_witnesses("w-lock-claim", vec![sig], committee_hash, 1, 1)
+                .unwrap();
+        }
+        let r = op_record(
+            "w-claim-1",
+            &creator_pk(b"bob"),
+            200.0,
+            types::xzone_claim_metadata("w-lock-claim", 100 * BASE_UNITS_PER_BEAT, &bob),
+        );
+        assert_invariant_w(&mut l, &r, &auth, "XZoneClaim");
+
+        // ── XZoneCancel: sender cancels her own unsealed lock.
+        let mut l = LedgerState::new();
+        prologue(&mut l, "w-lock-cancel", false);
+        let r = op_record(
+            "w-cancel-1",
+            &creator_pk(b"alice"),
+            200.0,
+            types::xzone_cancel_metadata("w-lock-cancel"),
+        );
+        assert_invariant_w(&mut l, &r, &auth, "XZoneCancel");
+
+        // ── XZoneReject: recipient rejects the unsealed lock; apply credits
+        // the looked-up SENDER (a mark the pure scope cannot see — the ⊆
+        // direction is exactly why no exception is needed).
+        let mut l = LedgerState::new();
+        prologue(&mut l, "w-lock-reject", false);
+        let r = op_record(
+            "w-reject-1",
+            &creator_pk(b"bob"),
+            200.0,
+            types::xzone_reject_metadata("w-lock-reject"),
+        );
+        assert_invariant_w(&mut l, &r, &auth, "XZoneReject");
+
+        // ── XZoneAbort: sealed lock, dead destination — 2-of-3 B-committee
+        // quorum aborts it. Sealing shape mirrors the ledger.rs abort e2e:
+        // proof attach + finality-witness call (source_seal_epoch = 4) + the
+        // frozen dest-committee anchor the B2 fix gates on.
+        let mut l = LedgerState::new();
+        prologue(&mut l, "w-lock-abort", false);
+        // Seal wire version MUST match the version the committee proofs below
+        // are built for — verify_abort_quorum checks membership against the
+        // transfer's stored source_seal_wire_version.
+        l.cross_zone
+            .set_proof(
+                "w-lock-abort",
+                vec![ProofSibling { hash: sha3_256(b"s"), is_right: true }],
+                sha3_256(b"root"),
+                crate::wire::CURRENT_SIGNING_VERSION,
+            )
+            .unwrap();
+        l.cross_zone
+            .set_finality_witnesses("w-lock-abort", vec![], [0u8; 32], 4, 0)
+            .unwrap();
+        {
+            let mk = || {
+                crate::identity::Identity::generate(
+                    crate::identity::EntityType::Device,
+                    crate::identity::CryptoProfile::ProfileB,
+                )
+                .unwrap()
+            };
+            let (w1, w2, w3) = (mk(), mk(), mk());
+            let pks = vec![
+                w1.public_key.clone(),
+                w2.public_key.clone(),
+                w3.public_key.clone(),
+            ];
+            let (committee_hash, proofs) =
+                build_committee_proofs_for(crate::wire::CURRENT_SIGNING_VERSION, &pks);
+            let msg = xzone_abort_signable_bytes(
+                "w-lock-abort",
+                &ZoneId::from_legacy(1),
+                4,
+                &committee_hash,
+            );
+            let signers: Vec<SealFinalityWitness> = [&w1, &w2]
+                .iter()
+                .map(|w| SealFinalityWitness {
+                    witness_pk: w.public_key.clone(),
+                    signature: w.sign(&msg).unwrap(),
+                    committee_proof: proofs.get(&w.public_key).cloned().unwrap(),
+                })
+                .collect();
+            l.cross_zone
+                .pending
+                .get_mut("w-lock-abort")
+                .unwrap()
+                .dest_finality_committee = Some((committee_hash, 3));
+            let r = op_record(
+                "w-abort-1",
+                &creator_pk(b"bob"),
+                250.0,
+                types::xzone_abort_metadata("w-lock-abort", &committee_hash, 3, &signers),
+            );
+            assert_invariant_w(&mut l, &r, &auth, "XZoneAbort");
+        }
+
+        // ── XZoneTimeoutRefund: unsealed lock expires past the 24h claim
+        // window; authority freezes + applies the refund batch.
+        let mut l = LedgerState::new();
+        prologue(&mut l, "w-lock-refund", false);
+        let now = lock_ts + CLAIM_TIMEOUT_SECS + 1.0;
+        let batch = l
+            .cross_zone
+            .compute_expired_refund_batch(now, 5, "0")
+            .expect("expired unsealed lock must produce a refund batch");
+        assert_eq!(batch.refunds.len(), 1, "exactly one expired transfer");
+        let r = op_record(
+            "w-refund-1",
+            &creator_pk(b"genesis"),
+            now,
+            types::xzone_refund_batch_metadata(&batch),
+        );
+        assert_invariant_w(&mut l, &r, &auth, "XZoneTimeoutRefund");
+
+        // ── XZoneStaleReap: SEALED lock stuck 30d past expiry; authority
+        // freezes + applies the reap batch.
+        let mut l = LedgerState::new();
+        prologue(&mut l, "w-lock-reap", false);
+        l.cross_zone
+            .set_proof(
+                "w-lock-reap",
+                vec![ProofSibling { hash: sha3_256(b"s"), is_right: true }],
+                sha3_256(b"root"),
+                6,
+            )
+            .unwrap();
+        let now = lock_ts + CLAIM_TIMEOUT_SECS + REAP_HORIZON_SECS + 1.0;
+        let batch = l
+            .cross_zone
+            .compute_stale_reap_batch(now, 7, "0")
+            .expect("sealed lock past the 30d horizon must produce a reap batch");
+        assert_eq!(batch.refunds.len(), 1, "exactly one reap-eligible transfer");
+        let r = op_record(
+            "w-reap-1",
+            &creator_pk(b"genesis"),
+            now,
+            types::xzone_reap_batch_metadata(&batch),
+        );
+        assert_invariant_w(&mut l, &r, &auth, "XZoneStaleReap");
+    }
+
+    #[test]
+    fn invariant_w_idle_decay_batch_scope_subset_of_marks() {
+        use crate::accounting::ledger::{LedgerState, StakeEntry};
+        use crate::accounting::types::{self, BASE_UNITS_PER_BEAT, StakePurpose};
+
+        // Mirror of ledger.rs's compute_idle_decay_batch fixture: a confirmed
+        // exchange with tracked flows plus two stakers, so the computed batch
+        // carries BOTH a debit entry and multiple staker credits (the two
+        // batch loops in scope and marks are each exercised with real ids).
+        let mut l = LedgerState::new();
+        let auth = id_of(b"genesis");
+        let exchange = id_of(b"exchange");
+        let balance: u64 = 1_000_000_500;
+        l.accounts.entry(exchange.clone()).or_default().available = balance;
+        l.total_supply = balance + 10 * BASE_UNITS_PER_BEAT;
+        l.exchange_classifier
+            .confirmed_exchanges
+            .insert(exchange.clone());
+        let now = 1_000_000.0;
+        l.idle_decay.record_balance(&exchange, balance, now - 86400.0);
+        l.idle_decay.record_inflow(&exchange, 3_000_000_000, now - 43200.0);
+        l.idle_decay.record_outflow(&exchange, 1_000_000_000, now - 21600.0);
+        for (i, (who, amt)) in [
+            (id_of(b"staker-a"), 3 * BASE_UNITS_PER_BEAT),
+            (id_of(b"staker-b"), BASE_UNITS_PER_BEAT),
+        ]
+        .iter()
+        .enumerate()
+        {
+            let sid = format!("w-idle-stake-{i}");
+            l.stakes.insert(
+                sid.clone(),
+                StakeEntry {
+                    record_id: sid.clone(),
+                    staker: who.clone(),
+                    amount: *amt,
+                    purpose: StakePurpose::Witness,
+                    timestamp: now - 86400.0,
+                    active: true,
+                },
+            );
+            l.total_staked += *amt;
+            l.staker_index.entry(who.clone()).or_default().push(sid);
+        }
+        let batch = l
+            .compute_idle_decay_batch("0", 7, now, 86400.0)
+            .expect("tracked exchange must owe idle_decay");
+        assert!(!batch.debits.is_empty(), "batch must carry a debit");
+        assert!(
+            batch.staker_credits.len() >= 2,
+            "batch must carry both staker credits"
+        );
+        let r = op_record(
+            "w-idle-1",
+            &creator_pk(b"genesis"),
+            now,
+            types::idle_decay_batch_metadata(&batch),
+        );
+        assert_invariant_w(&mut l, &r, &auth, "IdleDecay");
+    }
+
+    #[test]
+    fn invariant_w_no_op_and_malformed_records_have_empty_scope_and_marks() {
+        use crate::accounting::ledger::LedgerState;
+
+        let auth = id_of(b"genesis");
+        let mut l = LedgerState::new();
+
+        // No-op (act-only) record: the producer gate returns Ok(false) without
+        // reaching apply_op — marks MUST be empty, and the scope must be ⊆ of
+        // that empty set. Pre-B1′ this is the §6a phantom mint: touched was
+        // {creator} against marks = ∅.
+        let r = op_record("w-noop-1", &creator_pk(b"alice"), 1.0, Default::default());
+        l.smt_dirty.clear();
+        let applied = l
+            .apply_single_record(&r, &auth)
+            .expect("op-less record must apply cleanly as a non-ledger record");
+        assert!(!applied, "op-less record must not report a ledger apply");
+        assert!(l.smt_dirty.is_empty(), "no-op apply must mark nothing");
+        let touched = record_touched_identities(&r);
+        for t in &touched {
+            assert!(
+                l.smt_dirty.contains(t),
+                "INVARIANT-W VIOLATION [no-op]: '{t}' is in record_touched_identities \
+                 but the producer never reaches apply_op for an op-less record \
+                 (pre-B1′ phantom-leaf mint site)"
+            );
+        }
+        assert!(touched.is_empty(), "op-less record must have an empty scope");
+
+        // Malformed op (valid op name, missing required field): extract errors
+        // before any mark — same empty-set requirement, distinct malformation
+        // from the unknown-op-string shape the existing Err-case pin covers.
+        let mut meta = std::collections::BTreeMap::new();
+        meta.insert("beat_op".to_string(), serde_json::json!("transfer"));
+        meta.insert("beat_to".to_string(), serde_json::json!(id_of(b"bob")));
+        let r = op_record("w-malformed-1", &creator_pk(b"alice"), 2.0, meta);
+        l.smt_dirty.clear();
+        assert!(
+            l.apply_single_record(&r, &auth).is_err(),
+            "transfer without beat_amount must error at extract"
+        );
+        assert!(l.smt_dirty.is_empty(), "failed extract must mark nothing");
+        let touched = record_touched_identities(&r);
+        for t in &touched {
+            assert!(
+                l.smt_dirty.contains(t),
+                "INVARIANT-W VIOLATION [malformed-op]: '{t}' is in record_touched_identities \
+                 but extract_ledger_op errors before the producer marks anything \
+                 (pre-B1′ phantom-leaf mint site)"
+            );
+        }
+        assert!(touched.is_empty(), "malformed-op record must have an empty scope");
+    }
+
     #[test]
     fn snapshot_scoped_drains_only_in_scope_identities() {
         use crate::accounting::ledger::{AccountState, LedgerState};

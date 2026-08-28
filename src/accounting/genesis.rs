@@ -419,8 +419,9 @@ pub async fn auto_genesis_mint(state: &Arc<NodeState>, config: &NodeConfig) -> R
             let rocks_ref = state.rocks.clone();
             let genesis = config.genesis_authority.clone();
             let gv_clone = config.genesis_validators.clone();
+            let net_clone = config.network_id.clone();
             if let Ok(Ok((mut new_ledger, _))) = tokio::task::spawn_blocking(move || {
-                rocks_ref.rebuild_ledger_streaming(&genesis, &gv_clone)
+                rocks_ref.rebuild_ledger_streaming(&genesis, &gv_clone, &net_clone)
             }).await {
                 state.rocks.bulk_mark_applied(&new_ledger.applied_record_ids);
                 new_ledger.applied_record_ids.clear();
@@ -476,8 +477,9 @@ pub async fn auto_genesis_mint(state: &Arc<NodeState>, config: &NodeConfig) -> R
         let rocks_ref = state.rocks.clone();
         let genesis = config.genesis_authority.clone();
         let gv_clone = config.genesis_validators.clone();
+        let net_clone = config.network_id.clone();
         if let Ok(Ok((mut new_ledger, _))) = tokio::task::spawn_blocking(move || {
-            rocks_ref.rebuild_ledger_streaming(&genesis, &gv_clone)
+            rocks_ref.rebuild_ledger_streaming(&genesis, &gv_clone, &net_clone)
         })
         .await
         {

@@ -181,6 +181,36 @@ pub async fn drain_and_commit_pending(state: &Arc<NodeState>) -> CommitStats {
             }
         };
 
+        // Genesis-mint pin (SEC-GENESIS-MINT-PIN-VERDICT-2026-08-26, verify
+        // finding C): pending rows are REHYDRATED FROM DISK AT BOOT, so a
+        // foreign-ceremony mint admitted by a PRE-PIN binary and persisted in
+        // CF_PENDING_DELTAS would otherwise commit here after an upgrade with
+        // none of the three admission gates running — the fourth funnel, same
+        // class as the fence's register_global_seal. Refuse + erase the row
+        // (mirrors the deterministic-invalid Err path below: resurrecting
+        // helps no one).
+        if let Ok(Some(op)) = crate::accounting::types::extract_ledger_op(&record) {
+            if !crate::accounting::validate::pinned_genesis_mint_admits(
+                &record,
+                &op,
+                &state.config.network_id,
+            ) {
+                state
+                    .pinned_genesis_mint_rejections_total
+                    .fetch_add(1, Ordering::Relaxed);
+                warn!(
+                    "drain_and_commit_pending: foreign-ceremony genesis mint {} refused by the \
+                     pin — dropping the pending row (SEC-GENESIS-MINT-PIN)",
+                    &rid[..rid.len().min(16)]
+                );
+                let _ = state
+                    .rocks
+                    .delete_cf_raw(CF_PENDING_DELTAS, rid.as_bytes());
+                stats.apply_failed += 1;
+                continue;
+            }
+        }
+
         // Apply + peripheral-state refresh under a single write lock so
         // the consensus zone-stakes refresh sees the fresh ledger.
         let apply_outcome: std::result::Result<(), crate::errors::ElaraError> = {

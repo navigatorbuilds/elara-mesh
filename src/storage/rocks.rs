@@ -6755,6 +6755,7 @@ impl StorageEngine {
         &self,
         genesis_authority: &str,
         genesis_validators: &[crate::accounting::types::GenesisValidator],
+        network_id: &str,
     ) -> Result<(crate::accounting::ledger::LedgerState, usize)> {
         use crate::accounting::ledger::{apply_op, apply_governance_op};
         use crate::accounting::types::{creator_identity_hash, extract_ledger_op, ParsedLedgerOp};
@@ -6776,6 +6777,7 @@ impl StorageEngine {
         // mainnet scale (this is the boot/sync/bootstrap recovery fallback).
         let mut state = crate::accounting::ledger::LedgerState::new();
         let mut failed_token: Vec<(ValidationRecord, ParsedLedgerOp)> = Vec::new();
+        let mut pinned_mint_skipped = 0usize;
         let mut gov_records: Vec<ValidationRecord> = Vec::new();
 
         let iter = self.db.iterator_cf(&ts_cf, rocksdb::IteratorMode::Start);
@@ -6797,6 +6799,15 @@ impl StorageEngine {
 
             if rec.classification != Classification::Public { continue; }
             if let Ok(Some(op)) = extract_ledger_op(&rec) {
+                // Genesis-mint pin (SEC-GENESIS-MINT-PIN-VERDICT-2026-08-26):
+                // the rebuild replays whatever is ON DISK — including a
+                // foreign-ceremony mint that slipped past an older binary's
+                // admission. Skip it here (never buffered for retry either);
+                // per-record skip, the rebuild always completes.
+                if !crate::accounting::validate::pinned_genesis_mint_admits(&rec, &op, network_id) {
+                    pinned_mint_skipped += 1;
+                    continue;
+                }
                 // Apply in iterator (= timestamp,id) order. Buffer first-pass
                 // failures for the retry below (e.g. an op whose dependency is a
                 // same-timestamp record that sorts after it).
@@ -6824,6 +6835,13 @@ impl StorageEngine {
             tracing::debug!(
                 "ledger rebuild: {} first-pass failures, {} recovered on retry, {} still skipped",
                 failed_token.len(), failed_token.len() - skipped, skipped
+            );
+        }
+        if pinned_mint_skipped > 0 {
+            tracing::error!(
+                pinned_mint_skipped,
+                "ledger rebuild: foreign-ceremony genesis mint record(s) ON DISK were refused by \
+                 the genesis-mint pin — this store contains wrong-chain data (SEC-GENESIS-MINT-PIN)"
             );
         }
 
@@ -6867,6 +6885,7 @@ impl StorageEngine {
         genesis_authority: &str,
         genesis_validators: &[crate::accounting::types::GenesisValidator],
         since_ts: f64,
+        network_id: &str,
     ) -> Result<(usize, usize)> {
         use crate::accounting::ledger::apply_op;
         use crate::accounting::types::extract_ledger_op;
@@ -6939,6 +6958,21 @@ impl StorageEngine {
 
             if rec.classification == Classification::Public {
                 if let Ok(Some(op)) = extract_ledger_op(&rec) {
+                    // Genesis-mint pin: same refusal as the full rebuild — a
+                    // foreign-ceremony mint on disk is skipped, never applied.
+                    // Deliberately NOT folded into `skipped` (that counter
+                    // means "apply failed"; this is a security signal —
+                    // verify finding F, mirroring rebuild_ledger_streaming's
+                    // separate pinned_mint_skipped).
+                    if !crate::accounting::validate::pinned_genesis_mint_admits(&rec, &op, network_id) {
+                        tracing::error!(
+                            record_id = %rec.id,
+                            "incremental ledger replay: foreign-ceremony genesis mint ON DISK \
+                             refused by the pin — this store contains wrong-chain data \
+                             (SEC-GENESIS-MINT-PIN)"
+                        );
+                        continue;
+                    }
                     // Apply in iterator (= timestamp,id) order — no sort needed.
                     if apply_op(state, &rec, &op, genesis_authority).is_ok() {
                         applied += 1;
@@ -11854,12 +11888,48 @@ mod tests {
         assert_eq!(engine.count_cf(CF_IDX_HASH), 1);
     }
 
+    /// SEC-GENESIS-MINT-PIN: the rebuild replays whatever is ON DISK — the
+    /// structural guard for any future bypass of the admission filters (the
+    /// same "second funnel" class the §E fence's adversarial verify caught).
+    /// A foreign-ceremony genesis mint sitting in RocksDB must NOT apply on
+    /// the anchored network, and must apply unchanged on a devnet.
+    #[test]
+    fn test_rebuild_refuses_foreign_ceremony_genesis_mint() {
+        let (engine, _dir) = test_engine();
+        let mut rec = test_record("019f36ad-a77a-7a41-9482-1ac6cc1119ff");
+        rec.metadata.insert("beat_op".into(), serde_json::json!("mint"));
+        rec.metadata.insert("beat_reason".into(), serde_json::json!("genesis:total_allocation"));
+        rec.metadata.insert("beat_amount".into(), serde_json::json!(1_000u64));
+        let creator = crate::accounting::types::creator_identity_hash(&rec);
+        rec.metadata.insert("beat_to".into(), serde_json::json!(creator.clone()));
+        engine
+            .put_record("019f36ad-a77a-7a41-9482-1ac6cc1119ff", &rec)
+            .unwrap();
+        // Anchored network: the pin refuses it pre-apply — supply stays 0.
+        let (state, _) = engine
+            .rebuild_ledger_streaming(
+                &creator,
+                &[],
+                crate::pins::PINNED_CHAIN_ANCHORS_NETWORK_ID,
+            )
+            .unwrap();
+        assert_eq!(
+            state.total_supply, 0,
+            "foreign-ceremony mint on disk must not apply on the anchored network"
+        );
+        // Devnet: unfenced — the same record applies.
+        let (state, _) = engine
+            .rebuild_ledger_streaming(&creator, &[], "unit-test-net")
+            .unwrap();
+        assert_eq!(state.total_supply, 1_000, "devnets keep pre-pin behavior");
+    }
+
     #[test]
     fn test_incremental_ledger_replay_empty() {
         // Incremental replay with no records since checkpoint should return (0, 0)
         let (engine, _dir) = test_engine();
         let mut ledger = crate::accounting::ledger::LedgerState::new();
-        let (applied, skipped) = engine.incremental_ledger_replay(&mut ledger, "genesis_auth", &[], 0.0).unwrap();
+        let (applied, skipped) = engine.incremental_ledger_replay(&mut ledger, "genesis_auth", &[], 0.0, "unit-test-net").unwrap();
         assert_eq!(applied, 0);
         assert_eq!(skipped, 0);
     }
@@ -11893,7 +11963,7 @@ mod tests {
         insert_mint(&engine, "mint-1", 1_700_000_001.0, "1000", alice);
         insert_mint(&engine, "mint-2", 1_700_000_002.0, "500", alice);
 
-        let (state, skipped) = engine.rebuild_ledger_streaming(&gen_hash, &[]).unwrap();
+        let (state, skipped) = engine.rebuild_ledger_streaming(&gen_hash, &[], "unit-test-net").unwrap();
         assert_eq!(skipped, 0, "both mints apply cleanly");
         assert_eq!(
             state.accounts.get(alice).map(|a| a.available).unwrap_or(0),
@@ -11941,7 +12011,7 @@ mod tests {
             propose_metadata(&ProposalCategory::Parameter, "title", "desc"));
 
         // Baseline: not tombstoned → the fold tallies the proposal.
-        let (base, _) = engine.rebuild_ledger_streaming(&gen_hash, &[]).unwrap();
+        let (base, _) = engine.rebuild_ledger_streaming(&gen_hash, &[], "unit-test-net").unwrap();
         assert!(
             base.governance.proposals.contains_key("propose-1"),
             "baseline: a non-tombstoned Propose IS tallied by the rebuild fold"
@@ -11951,7 +12021,7 @@ mod tests {
         engine
             .put_cf_raw(crate::storage::rocks::CF_METADATA, b"tombstone:propose-1", b"{\"t\":1}")
             .unwrap();
-        let (tombed, _) = engine.rebuild_ledger_streaming(&gen_hash, &[]).unwrap();
+        let (tombed, _) = engine.rebuild_ledger_streaming(&gen_hash, &[], "unit-test-net").unwrap();
         assert!(
             !tombed.governance.proposals.contains_key("propose-1"),
             "F2 R2: a TOMBSTONED Propose is EXCLUDED from the rebuild tally (governance skip)"
@@ -11997,7 +12067,7 @@ mod tests {
             )
             .unwrap();
 
-        let (state, skipped) = engine.rebuild_ledger_streaming(&gen_hash, &[]).unwrap();
+        let (state, skipped) = engine.rebuild_ledger_streaming(&gen_hash, &[], "unit-test-net").unwrap();
         assert_eq!(skipped, 0, "the mint applies cleanly (no dependency failure)");
         // THE BUG: the tombstoned op is revived — the live ingest path would have
         // left alice at 0 (op suppressed), so live vs. rebuilt ledgers DIVERGE.
@@ -12024,7 +12094,7 @@ mod tests {
 
         let mut ledger = crate::accounting::ledger::LedgerState::new();
         let (applied, skipped) = engine
-            .incremental_ledger_replay(&mut ledger, &gen_hash, &[], 0.0)
+            .incremental_ledger_replay(&mut ledger, &gen_hash, &[], 0.0, "unit-test-net")
             .unwrap();
         assert_eq!(applied, 1, "the unseen mint is applied");
         assert_eq!(skipped, 0);
@@ -12056,7 +12126,7 @@ mod tests {
 
         let mut ledger = crate::accounting::ledger::LedgerState::new();
         let (applied, _skipped) = engine
-            .incremental_ledger_replay(&mut ledger, &gen_hash, &[], 0.0)
+            .incremental_ledger_replay(&mut ledger, &gen_hash, &[], 0.0, "unit-test-net")
             .unwrap();
         // BUG: the tombstoned mint is applied (revived), diverging from the live path.
         assert_eq!(applied, 1, "F2: incremental replay applies the tombstoned mint (revived)");
@@ -12108,7 +12178,7 @@ mod tests {
 
         // genesis_authority = identity_hash of the test record's creator_public_key
         let creator_hash = crate::accounting::types::creator_identity_hash(&rec);
-        let (applied, skipped) = engine.incremental_ledger_replay(&mut ledger, &creator_hash, &[], 0.0).unwrap();
+        let (applied, skipped) = engine.incremental_ledger_replay(&mut ledger, &creator_hash, &[], 0.0, "unit-test-net").unwrap();
         // Should be skipped because already in applied_record_ids
         assert_eq!(applied, 0);
         assert_eq!(skipped, 0);
@@ -12131,7 +12201,7 @@ mod tests {
         //    (the live system marks every applied record in CF_APPLIED).
         insert_mint(&engine, "mint-pre", 1_000.0, "1000", "alice");
         let mut folded = crate::accounting::ledger::LedgerState::new();
-        engine.incremental_ledger_replay(&mut folded, &gen_hash, &[], 0.0).unwrap();
+        engine.incremental_ledger_replay(&mut folded, &gen_hash, &[], 0.0, "unit-test-net").unwrap();
         assert_eq!(folded.total_supply, 1000);
         assert_eq!(folded.last_applied_ts, 1_000.0);
         engine.mark_applied("mint-pre");
@@ -12149,7 +12219,7 @@ mod tests {
         // 4. Fast-path replay from the checkpoint's own last_applied_ts.
         let since = cp_ledger.last_applied_ts;
         let (applied, _skipped) = engine
-            .incremental_ledger_replay(&mut cp_ledger, &gen_hash, &[], since)
+            .incremental_ledger_replay(&mut cp_ledger, &gen_hash, &[], since, "unit-test-net")
             .unwrap();
 
         // 5. mint-post MUST fold despite being in CF_APPLIED; mint-pre (== boundary
@@ -12175,7 +12245,7 @@ mod tests {
         insert_mint(&engine, "mint-boundary", 5_000.0, "1000", "carol");
 
         let mut folded = crate::accounting::ledger::LedgerState::new();
-        engine.incremental_ledger_replay(&mut folded, &gen_hash, &[], 0.0).unwrap();
+        engine.incremental_ledger_replay(&mut folded, &gen_hash, &[], 0.0, "unit-test-net").unwrap();
         assert_eq!(folded.total_supply, 1000);
         // Persisted checkpoint clone (empties applied_record_ids).
         let mut cp_ledger = folded.clone();
@@ -12184,7 +12254,7 @@ mod tests {
         // Replay from the exact boundary ts. mint-boundary (ts == since_ts) must
         // NOT re-apply (it is below/at the exclusive floor).
         let (applied, _skipped) = engine
-            .incremental_ledger_replay(&mut cp_ledger, &gen_hash, &[], 5_000.0)
+            .incremental_ledger_replay(&mut cp_ledger, &gen_hash, &[], 5_000.0, "unit-test-net")
             .unwrap();
         assert_eq!(applied, 0, "boundary record at ts==since_ts must not re-apply");
         assert_eq!(cp_ledger.total_supply, 1000, "no double-apply at the seek boundary");

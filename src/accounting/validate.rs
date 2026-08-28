@@ -69,6 +69,39 @@ pub fn validate_mint(
     ValidationResult::ok()
 }
 
+/// Genesis-mint pin (SEC-GENESIS-MINT-PIN-VERDICT-2026-08-26): on the anchored
+/// network, ONLY the pinned ceremony's mint record may carry a
+/// `genesis:*`-reasoned mint. `true` = admissible (not a genesis-reasoned
+/// mint, or off the anchored network, or exactly the pinned record).
+///
+/// Why id-only here: every caller sits BEHIND signature admission (live
+/// ingest verifies before applying; the rebuild loops replay records that
+/// were admitted when stored), and the record id is inside `signable_bytes` —
+/// a forged id cannot carry a valid signature, and the reused-key foreign
+/// ceremonies' mints all have DIFFERENT ids. The bootstrap pre-store filter
+/// in gossip.rs additionally checks record_hash + creator because that path
+/// bypasses ledger validation entirely.
+///
+/// This closes cross-ceremony mint replay at the live funnel and the rebuild
+/// replay; it does NOT close the wholesale snapshot-ledger carry (filed
+/// separately) and cannot repair an already-poisoned node.
+pub fn pinned_genesis_mint_admits(
+    record: &crate::record::ValidationRecord,
+    op: &crate::accounting::types::ParsedLedgerOp,
+    network_id: &str,
+) -> bool {
+    let crate::accounting::types::ParsedLedgerOp::Mint { reason, .. } = op else {
+        return true;
+    };
+    if !reason.starts_with("genesis:") {
+        return true;
+    }
+    if network_id != crate::pins::PINNED_CHAIN_ANCHORS_NETWORK_ID {
+        return true;
+    }
+    record.id == crate::pins::PINNED_GENESIS_MINT_ID
+}
+
 /// Validate a transfer operation.
 pub fn validate_transfer(
     state: &LedgerState,
@@ -1570,6 +1603,55 @@ mod tests {
 
     /// The flag must thread through the validate_op dispatcher (not only
     /// validate_transfer directly) — pins the ingest.rs call boundary.
+    #[test]
+    fn pinned_genesis_mint_admits_decision_table() {
+        use crate::accounting::types::ParsedLedgerOp;
+        let anchored = crate::pins::PINNED_CHAIN_ANCHORS_NETWORK_ID;
+        let mk_rec = |id: &str| {
+            let mut r = crate::record::ValidationRecord::create(
+                b"pin-test",
+                vec![0xAA; 1952],
+                vec![],
+                crate::record::Classification::Public,
+                None,
+            );
+            r.id = id.to_string();
+            r
+        };
+        let genesis_mint = ParsedLedgerOp::Mint {
+            amount: 1_000,
+            to: "someone".into(),
+            reason: "genesis:total_allocation".into(),
+        };
+        let bootstrap_mint = ParsedLedgerOp::Mint {
+            amount: 10,
+            to: "someone".into(),
+            reason: "genesis:bootstrap".into(),
+        };
+        let plain_mint = ParsedLedgerOp::Mint {
+            amount: 10,
+            to: "someone".into(),
+            reason: "reward".into(),
+        };
+        // The pinned id passes on the anchored network; any other id fails.
+        let pinned = mk_rec(crate::pins::PINNED_GENESIS_MINT_ID);
+        let foreign = mk_rec("019f36ad-a77a-7a41-9482-1ac6cc1119ff");
+        assert!(pinned_genesis_mint_admits(&pinned, &genesis_mint, anchored));
+        assert!(!pinned_genesis_mint_admits(&foreign, &genesis_mint, anchored));
+        assert!(!pinned_genesis_mint_admits(&foreign, &bootstrap_mint, anchored));
+        // Off-network (devnets): never fenced.
+        assert!(pinned_genesis_mint_admits(&foreign, &genesis_mint, "some-devnet"));
+        assert!(pinned_genesis_mint_admits(&foreign, &bootstrap_mint, "some-devnet"));
+        // Non-genesis-reasoned mints and non-mint ops: untouched everywhere.
+        assert!(pinned_genesis_mint_admits(&foreign, &plain_mint, anchored));
+        let transfer = ParsedLedgerOp::Transfer {
+            amount: 5,
+            to: "someone".into(),
+            memo: None,
+        };
+        assert!(pinned_genesis_mint_admits(&foreign, &transfer, anchored));
+    }
+
     #[test]
     fn validate_op_threads_enforce_rate_limits_to_transfer() {
         let alice = alice_hash();

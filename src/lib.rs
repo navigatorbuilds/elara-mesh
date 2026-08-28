@@ -71,6 +71,12 @@ mod build_invariants;
 #[cfg(test)]
 mod decoder_fuzz;
 
+/// Compiled-in chain-identity pins (epoch anchor + genesis-mint) — always
+/// compiled: consumed by feature-ungated layers (accounting, storage) as well
+/// as the node-gated network stack, which re-exports them via
+/// `network::config`.
+pub mod pins;
+
 #[cfg(feature = "node-core")]
 pub mod network;
 

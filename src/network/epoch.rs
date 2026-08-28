@@ -1740,12 +1740,20 @@ impl EpochState {
     /// Idempotent on `(stuck_zone, stuck_epoch)`: a later call with the same
     /// or lower `stuck_epoch` is a no-op, matching `register_seal` semantics
     /// — first global seal for that height wins.
+    ///
+    /// Returns `true` when the seal is ADMITTED by the §E chain-anchor fence —
+    /// whether it advanced the tip or was a stale idempotent no-op, both are
+    /// canonical-chain records — and `false` when the fence REFUSED it as
+    /// chain-foreign. Callers that tag the record for downstream consumers
+    /// (ingest → `consensus.register_global_seal` stuck-zone settlement tag)
+    /// MUST gate on this (fence follow-up N4): the pre-N4 unconditional tag
+    /// let consensus route settlement for a record epoch state had refused.
     pub fn register_global_seal(
         &mut self,
         seal: &ParsedGlobalQuorumSeal,
         record_id: &str,
         record_hash: [u8; 32],
-    ) {
+    ) -> bool {
         // §E re-genesis fence: this is the SECOND tip-mutation funnel besides
         // `apply_canonical_seal` (found by the build's adversarial verify) —
         // it writes `latest_seal_hash[stuck_zone]` with `>=`, so an unfenced
@@ -1754,7 +1762,7 @@ impl EpochState {
         // Same positive point-assertion, same counter.
         if !self.chain_anchor_admits(&seal.stuck_zone, seal.stuck_epoch, &record_hash) {
             self.note_anchor_rejection(&seal.stuck_zone, seal.stuck_epoch, &record_hash);
-            return;
+            return false;
         }
         let current = self.latest_epoch.get(&seal.stuck_zone).copied().unwrap_or(0);
         if seal.stuck_epoch >= current {
@@ -1780,6 +1788,7 @@ impl EpochState {
                 .unwrap_or(0.0);
             self.epoch_start_ts.insert(seal.stuck_zone.clone(), now);
         }
+        true
     }
 
     /// Process a single record during streaming rebuild. Extracts and registers
@@ -9287,17 +9296,28 @@ mod tests {
         };
         let mut ep = EpochState::new();
         ep.chain_anchor_override = fence_test_table();
-        // Below the pin: global seal registers normally.
-        ep.register_global_seal(&mk_gseal(3), "g_3", fence_hash(0x77, 3));
+        // Below the pin: global seal registers normally. N4: fence-admitted
+        // → returns true (the ingest consensus-tag gate keys on this).
+        assert!(
+            ep.register_global_seal(&mk_gseal(3), "g_3", fence_hash(0x77, 3)),
+            "below-pin global seal must report fence-admitted"
+        );
         assert_eq!(ep.latest_epoch.get(&z0).copied(), Some(3));
         // AT the pin with a foreign hash (the >= overwrite shape): refused,
-        // tip and hash untouched, counter bumps.
-        ep.register_global_seal(&mk_gseal(FENCE_TEST_PIN_EPOCH), "g_hostile", fence_hash(0xEE, 5));
+        // tip and hash untouched, counter bumps. N4: returns false so the
+        // ingest path withholds the consensus stuck-zone settlement tag.
+        assert!(
+            !ep.register_global_seal(&mk_gseal(FENCE_TEST_PIN_EPOCH), "g_hostile", fence_hash(0xEE, 5)),
+            "fence-refused global seal must report NOT admitted (N4 tag gate)"
+        );
         assert_eq!(ep.latest_epoch.get(&z0).copied(), Some(3), "hostile global seal refused");
         assert_eq!(ep.latest_seal_hash.get(&z0).copied(), Some(fence_hash(0x77, 3)));
         assert_eq!(ep.pinned_anchor_seal_rejections_total, 1);
         // AT the pin with the pinned hash: admitted.
-        ep.register_global_seal(&mk_gseal(FENCE_TEST_PIN_EPOCH), "g_true", FENCE_TEST_PIN_HASH);
+        assert!(
+            ep.register_global_seal(&mk_gseal(FENCE_TEST_PIN_EPOCH), "g_true", FENCE_TEST_PIN_HASH),
+            "pinned-hash global seal must report fence-admitted"
+        );
         assert_eq!(ep.latest_epoch.get(&z0).copied(), Some(FENCE_TEST_PIN_EPOCH));
         assert_eq!(ep.latest_seal_hash.get(&z0).copied(), Some(FENCE_TEST_PIN_HASH));
         assert_eq!(ep.pinned_anchor_seal_rejections_total, 1);
@@ -12900,17 +12920,25 @@ mod tests {
         .unwrap();
 
         let mut state = EpochState::new();
-        state.register_global_seal(&parsed_hi, &rec_hi.id, rec_hi.record_hash());
+        assert!(
+            state.register_global_seal(&parsed_hi, &rec_hi.id, rec_hi.record_hash()),
+            "advancing global seal is fence-admitted (N4 return)"
+        );
         assert_eq!(state.latest_epoch.get(&stuck_zone).copied(), Some(10));
 
         // Idempotent: same-or-lower epoch must not downgrade latest_epoch or
-        // overwrite the winning seal id.
+        // overwrite the winning seal id. N4: a stale-but-canonical seal is
+        // still fence-ADMITTED (returns true) — only a chain-foreign fence
+        // rejection withholds the ingest consensus tag; staleness does not.
         let (rec_lo, parsed_lo) = create_global_quorum_seal(
             &identity, &vrf_sk, stuck_zone.clone(), emitter_zone, 9,
             prev, STUCK_BASE_MS, STUCK_ELAPSED_MS, vec![], 2,
         )
         .unwrap();
-        state.register_global_seal(&parsed_lo, &rec_lo.id, rec_lo.record_hash());
+        assert!(
+            state.register_global_seal(&parsed_lo, &rec_lo.id, rec_lo.record_hash()),
+            "stale idempotent no-op is still fence-admitted (N4 return)"
+        );
         assert_eq!(state.latest_epoch.get(&stuck_zone).copied(), Some(10));
         assert_eq!(state.latest_seal_id.get(&stuck_zone).cloned(), Some(rec_hi.id.clone()));
     }

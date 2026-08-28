@@ -948,6 +948,7 @@ async fn run() -> Result<()> {
         // below doesn't consume config.genesis_validators (still needed by
         // the conservation-rebuild + later paths outside this closure).
         let genesis_validators_boot = config.genesis_validators.clone();
+        let network_id_boot = config.network_id.clone();
         let snap_path = snapshot_path.clone();
 
         let (dag, ledger_result, restored_snapshot, genesis_rebuilt) = tokio::task::spawn_blocking(move || {
@@ -1145,7 +1146,7 @@ async fn run() -> Result<()> {
                     cp_ts
                 };
                 let start = std::time::Instant::now();
-                match rocks.incremental_ledger_replay(&mut cp_ledger, &genesis, &genesis_validators_boot, since_ts) {
+                match rocks.incremental_ledger_replay(&mut cp_ledger, &genesis, &genesis_validators_boot, since_ts, &network_id_boot) {
                     Ok((applied, skipped)) => {
                         let elapsed = start.elapsed();
                         cp_ledger.rebuild_staker_index();
@@ -1180,7 +1181,7 @@ async fn run() -> Result<()> {
                             );
                             let records_in_storage = rocks.approximate_record_count();
                             info!("ledger streaming replay from storage (~{records_in_storage} records)");
-                            let (full_ledger, full_skipped) = rocks.rebuild_ledger_streaming(&genesis, &genesis_validators_boot)?;
+                            let (full_ledger, full_skipped) = rocks.rebuild_ledger_streaming(&genesis, &genesis_validators_boot, &network_id_boot)?;
                             if full_skipped > 0 {
                                 warn!("ledger streaming replay: {full_skipped} records skipped (tolerant mode)");
                             }
@@ -1193,7 +1194,7 @@ async fn run() -> Result<()> {
                         warn!("checkpoint incremental replay failed: {e} — falling back to full rebuild");
                         let records_in_storage = rocks.approximate_record_count();
                         info!("ledger streaming replay from storage (~{records_in_storage} records)");
-                        let (full_ledger, full_skipped) = rocks.rebuild_ledger_streaming(&genesis, &genesis_validators_boot)?;
+                        let (full_ledger, full_skipped) = rocks.rebuild_ledger_streaming(&genesis, &genesis_validators_boot, &network_id_boot)?;
                         if full_skipped > 0 {
                             warn!("ledger streaming replay: {full_skipped} records skipped (tolerant mode)");
                         }
@@ -1204,7 +1205,7 @@ async fn run() -> Result<()> {
                 // SLOW PATH: full streaming rebuild (no checkpoint or checkpoint invalid)
                 let records_in_storage = rocks.approximate_record_count();
                 info!("ledger streaming replay from storage (~{records_in_storage} records)");
-                let (full_ledger, skipped) = rocks.rebuild_ledger_streaming(&genesis, &genesis_validators_boot)?;
+                let (full_ledger, skipped) = rocks.rebuild_ledger_streaming(&genesis, &genesis_validators_boot, &network_id_boot)?;
                 if skipped > 0 {
                     warn!("ledger streaming replay: {skipped} records skipped (tolerant mode)");
                 }
@@ -1346,8 +1347,9 @@ async fn run() -> Result<()> {
             let rocks_ref = node_state.rocks.clone();
             let genesis_clone = config.genesis_authority.clone();
             let gv_clone = config.genesis_validators.clone();
+            let net_clone = config.network_id.clone();
             match tokio::task::spawn_blocking(move || {
-                rocks_ref.rebuild_ledger_streaming(&genesis_clone, &gv_clone)
+                rocks_ref.rebuild_ledger_streaming(&genesis_clone, &gv_clone, &net_clone)
             }).await {
                 Ok(Ok((mut rebuilt, applied))) => {
                     info!("conservation fix: ledger rebuilt from storage — {applied} ops, supply={}", rebuilt.total_supply);
@@ -2150,9 +2152,10 @@ async fn run() -> Result<()> {
                     let rocks_ref = sync_state.rocks.clone();
                     let genesis = sync_genesis.clone();
                     let gv_clone = sync_state.config.genesis_validators.clone();
+                    let net_clone = sync_state.config.network_id.clone();
                     let mut ledger_clone = sync_state.ledger.read().await.clone();
                     match tokio::task::spawn_blocking(move || {
-                        rocks_ref.incremental_ledger_replay(&mut ledger_clone, &genesis, &gv_clone, since_ts)
+                        rocks_ref.incremental_ledger_replay(&mut ledger_clone, &genesis, &gv_clone, since_ts, &net_clone)
                             .map(|(applied, skipped)| (ledger_clone, applied, skipped))
                     })
                     .await
@@ -2183,8 +2186,9 @@ async fn run() -> Result<()> {
                             let rocks_ref2 = sync_state.rocks.clone();
                             let genesis2 = sync_genesis.clone();
                             let gv_clone2 = sync_state.config.genesis_validators.clone();
+                            let net_clone2 = sync_state.config.network_id.clone();
                             if let Ok(Ok((mut new_ledger, _))) = tokio::task::spawn_blocking(move || {
-                                rocks_ref2.rebuild_ledger_streaming(&genesis2, &gv_clone2)
+                                rocks_ref2.rebuild_ledger_streaming(&genesis2, &gv_clone2, &net_clone2)
                             }).await {
                                 new_ledger.rebuild_staker_index();
                                 if !new_ledger.applied_record_ids.is_empty() {

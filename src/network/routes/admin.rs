@@ -870,7 +870,7 @@ pub async fn admin_reindex_dag(
         // ~80 GB heap and OOMs the box; the lightweight path is O(records ×
         // 200 B) and matches what the boot path already uses.
         let dag = state2.rocks.rebuild_dag_lightweight()?;
-        let (ledger, rp) = state2.rocks.rebuild_ledger_streaming(&genesis, &state2.config.genesis_validators)?;
+        let (ledger, rp) = state2.rocks.rebuild_ledger_streaming(&genesis, &state2.config.genesis_validators, &state2.config.network_id)?;
         Ok::<_, ElaraError>((dag, ledger, rp))
     })
     .await

@@ -2156,6 +2156,30 @@ async fn insert_record_inner(state: &Arc<NodeState>, mut record: ValidationRecor
         // reintroduce the fork on the gossip path). apply_op still enforces the
         // deterministic validity rules on every path.
         if let Some(ref parsed_op) = parsed_ledger_op {
+            // Genesis-mint pin (SEC-GENESIS-MINT-PIN-VERDICT-2026-08-26): this
+            // is the LIVE funnel — HTTP submit, PQ push, and every pull path
+            // land here — and `validate_mint` below is ceremony-blind (it
+            // checks WHO signed and supply arithmetic, never WHICH ceremony;
+            // under genesis-key reuse a foreign ceremony's really-signed mint
+            // passes it cleanly on a virgin ledger, supply 0 < MAX). Positive
+            // identification, network-scoped; runs on every source uniformly
+            // (deterministic validity, not a node-local rate-limiter — the
+            // skip_timestamp_defense split above does not apply).
+            if !crate::accounting::validate::pinned_genesis_mint_admits(
+                &record,
+                parsed_op,
+                &state.config.network_id,
+            ) {
+                state
+                    .pinned_genesis_mint_rejections_total
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return Err(ElaraError::Ledger(format!(
+                    "genesis-mint pin: record {} claims a genesis mint on the anchored network \
+                     but is not the pinned ceremony mint — wrong-chain/foreign-ceremony record \
+                     refused (SEC-GENESIS-MINT-PIN)",
+                    record.id
+                )));
+            }
             let result = validate_op(&ledger, &creator_hash, &state.config.genesis_authority, parsed_op, record.timestamp, !skip_timestamp_defense);
             if !result.valid {
                 return Err(ElaraError::Ledger(
@@ -3753,23 +3777,40 @@ async fn insert_record_inner(state: &Arc<NodeState>, mut record: ValidationRecor
     // chain) and tags it for cross-zone settlement in consensus.
     if record.metadata.contains_key(EPOCH_OP_KEY) {
         if let Ok(Some(gseal)) = epoch::extract_global_quorum_seal(&record) {
-            if let Ok(mut epoch_state) = state.epoch.write() {
-                epoch_state.register_global_seal(
+            // N4 (§E fence follow-up): the consensus stuck-zone settlement tag
+            // is gated on the fence verdict — a chain-foreign global seal the
+            // epoch state refused must not be routed to the cross-zone
+            // settlement denominator, or the two subsystems disagree about the
+            // same record. A poisoned epoch lock counts as not-admitted
+            // (fail-closed), preserving the old skip-on-poison behavior for
+            // the tip while no longer tagging blind.
+            let fence_admitted = match state.epoch.write() {
+                Ok(mut epoch_state) => epoch_state.register_global_seal(
                     &gseal,
                     &record.id,
                     record.record_hash(),
+                ),
+                Err(_) => false,
+            };
+            if fence_admitted {
+                {
+                    let mut consensus = state.consensus.lock_recover();
+                    consensus.register_global_seal(&record.id, gseal.stuck_zone.clone());
+                }
+                info!(
+                    "global_seal registered: stuck_zone={} stuck_epoch={} seal_id={}",
+                    gseal.stuck_zone,
+                    gseal.stuck_epoch,
+                    &record.id[..record.id.len().min(16)],
+                );
+            } else {
+                info!(
+                    "global_seal NOT tagged for settlement (§E chain-anchor fence refused or epoch lock poisoned): stuck_zone={} stuck_epoch={} seal_id={}",
+                    gseal.stuck_zone,
+                    gseal.stuck_epoch,
+                    &record.id[..record.id.len().min(16)],
                 );
             }
-            {
-                let mut consensus = state.consensus.lock_recover();
-                consensus.register_global_seal(&record.id, gseal.stuck_zone.clone());
-            }
-            info!(
-                "global_seal registered: stuck_zone={} stuck_epoch={} seal_id={}",
-                gseal.stuck_zone,
-                gseal.stuck_epoch,
-                &record.id[..record.id.len().min(16)],
-            );
         }
     }
 
