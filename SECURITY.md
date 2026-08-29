@@ -135,7 +135,7 @@ achieve:
 
 ## Security Design
 
-- **Post-quantum cryptography:** Dilithium3 / ML-DSA-65 + SPHINCS+-SHA2-192f / SLH-DSA (dual signing; Profile A uses both, Profile B is Dilithium3-only), ML-KEM-768 / FIPS 203 (key encapsulation, formerly Kyber768)
+- **Post-quantum cryptography:** ML-DSA-65 (FIPS 204, "Dilithium3") + SLH-DSA-SHA2-192f ("SPHINCS+") dual signing — Profile A uses both, Profile B is ML-DSA-65-only; ML-KEM-768 (FIPS 203) key encapsulation, from the CRYSTALS-Kyber family (the FIPS parameter sets are not wire-compatible with the round-3 submissions)
 - **Admin authentication:** post-quantum-signed `X-PQ-Admin` header (Dilithium3, bound to the exact method + path) on all admin endpoints — bearer-token auth was removed in PQ-R7; the legacy `admin_token` survives only on the proxied `/rpc/*` path, compared constant-time
 - **Admin brute-force protection:** IPs locked out after 5 failed attempts in 5 minutes
 - **Rate limiting:** per-IP token bucket with deny list

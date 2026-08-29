@@ -222,6 +222,21 @@ impl ContinuityState {
             .filter(|t| t.compute_score(now) < threshold)
             .collect()
     }
+
+    /// Retention prune (2026-08-29 contention-polarity verdict, F1): drop
+    /// trackers idle past the retention horizon so the map — and therefore the
+    /// snapshot loop's clone-under-lock hold time — is O(recently-active
+    /// identities), not O(identities ever seen). Boundary semantics are honest
+    /// and direction-safe: a 90-day-idle tracker's score sits at the MIN_SCORE
+    /// floor (0.05), and a pruned identity reads 0.0 (unknown) — strictly MORE
+    /// conservative, so pruning can only lower trust, never grant it.
+    pub fn cleanup(&mut self, now: f64) -> usize {
+        const RETENTION_DAYS: f64 = 90.0;
+        let horizon = now - RETENTION_DAYS * SECS_PER_DAY;
+        let before = self.trackers.len();
+        self.trackers.retain(|_, t| t.last_seen >= horizon);
+        before - self.trackers.len()
+    }
 }
 
 #[cfg(test)]
@@ -703,5 +718,28 @@ mod tests {
         t2.record_activity(SECS_PER_DAY + 30.001 * SECS_PER_DAY);
         assert_eq!(t2.consecutive_days, 1,
             "gap > MAX_GAP_DAYS (30.001 d) must take major-gap branch and RESET consecutive to 1");
+    }
+}
+
+#[cfg(test)]
+mod retention_2026_08_29_tests {
+    use super::*;
+
+    #[test]
+    fn cleanup_drops_only_past_horizon_and_score_reads_zero() {
+        let mut cs = ContinuityState::new();
+        let day = SECS_PER_DAY;
+        let now = 200.0 * day;
+        cs.record_activity("ancient", 10.0 * day);   // idle ~190d
+        cs.record_activity("active", now - day);     // idle 1d
+        assert_eq!(cs.identity_count(), 2);
+        let freed = cs.cleanup(now);
+        assert_eq!(freed, 1);
+        assert_eq!(cs.identity_count(), 1);
+        assert!(cs.tracker("active").is_some());
+        // Pruned identity reads the no-information value — exactly what the
+        // admission gate now uses on contention; pruning never grants trust.
+        assert_eq!(cs.score("ancient", now), 0.0);
+        assert!(cs.score("active", now) > 0.0);
     }
 }

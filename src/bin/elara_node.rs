@@ -4869,6 +4869,17 @@ async fn memory_prune_loop(state: Arc<NodeState>, hb: Arc<elara_runtime::network
             }
         }
 
+        // 3c. Continuity retention prune (2026-08-29 verdict F1): the snapshot
+        // loop clones this map under its lock every snapshot tick, so bounding
+        // the map bounds the gate's contention window. 90-day retention — a
+        // pruned tracker reads 0.0, the same as its gap-crushed score.
+        {
+            let freed = state.continuity.lock_recover().cleanup(now);
+            if freed > 0 {
+                info!("memory prune: freed {freed} stale continuity trackers");
+            }
+        }
+
         // 4. Prune resolved disputes from memory
         {
             let pruned = state.disputes.write_recover().prune_resolved();
@@ -6169,8 +6180,10 @@ async fn snapshot_loop(
                 // T61: ESSENTIAL tier deliberately — these two are anti-spam state,
                 // and the ≥4GB `full_snapshots` gate below would leave small nodes
                 // (exactly the ones a spammer would run) resetting their own caps
-                // every restart. Both maps are O(active identities) and bounded by
-                // the same prune loop that already cleans them.
+                // every restart. Both maps are bounded: daily_caps by its 24h-window
+                // cleanup, continuity by the 90-day retention prune (both wired in
+                // the memory-prune loop — the continuity half since 2026-08-29;
+                // before that this comment claimed a prune that did not exist).
                 essential.push(("continuity", rocks.save_snapshot("continuity", &continuity_snap)));
                 essential.push(("daily_caps", rocks.save_snapshot("daily_caps", &daily_caps_snap)));
                 for (name, result) in essential {

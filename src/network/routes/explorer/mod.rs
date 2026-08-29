@@ -4839,12 +4839,20 @@ pub fn compute_activity(state: &Arc<NodeState>, identity: &str) -> serde_json::V
         None
     };
 
-    let continuity_score = if let Ok(cont) = state.continuity.try_lock() {
-        let s = cont.score(identity, now);
-        if s > 0.0 { found = true; }
-        Some((s * 10000.0).round() / 10000.0)
-    } else {
-        None
+    // Poisoned → recover (2026-08-29 verdict: a panic under this lock must not
+    // permanently blank the display field); WouldBlock → None, unchanged.
+    let continuity_score = match state.continuity.try_lock() {
+        Ok(cont) => {
+            let s = cont.score(identity, now);
+            if s > 0.0 { found = true; }
+            Some((s * 10000.0).round() / 10000.0)
+        }
+        Err(std::sync::TryLockError::Poisoned(e)) => {
+            let s = e.into_inner().score(identity, now);
+            if s > 0.0 { found = true; }
+            Some((s * 10000.0).round() / 10000.0)
+        }
+        Err(std::sync::TryLockError::WouldBlock) => None,
     };
 
     let reputation_score = if let Ok(rep) = state.reputation.try_lock() {

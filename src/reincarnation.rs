@@ -204,6 +204,13 @@ pub struct ReincarnationState {
     fingerprints: HashMap<String, BehavioralFingerprint>,
     /// Detected reincarnation candidates.
     candidates: Vec<ReincarnationCandidate>,
+    /// Index of abandoned identities (2026-08-29 verdict: `check_reincarnation`
+    /// iterates THIS, making the "O(abandoned_count) per check" contract at its
+    /// call site true — the old loop walked every fingerprint on the node).
+    /// Not persisted anywhere today; `#[serde(default)]` keeps any old blob
+    /// readable if that ever changes.
+    #[serde(default)]
+    abandoned_ids: std::collections::HashSet<String>,
 }
 
 impl ReincarnationState {
@@ -243,9 +250,11 @@ impl ReincarnationState {
     /// Mark an identity as abandoned (slashed, reputation destroyed).
     pub fn mark_abandoned(&mut self, identity: &str) {
         self.fingerprint_mut(identity).abandoned = true;
+        self.abandoned_ids.insert(identity.to_string());
     }
 
-    /// Check a new identity against all abandoned fingerprints.
+    /// Check a new identity against the abandoned fingerprints — genuinely
+    /// O(abandoned_count), via the `abandoned_ids` index.
     pub fn check_reincarnation(
         &mut self,
         new_identity: &str,
@@ -258,8 +267,9 @@ impl ReincarnationState {
 
         let mut candidates = Vec::new();
 
-        for (old_id, old_fp) in &self.fingerprints {
-            if !old_fp.abandoned || old_id == new_identity || !old_fp.is_mature() {
+        for old_id in &self.abandoned_ids {
+            let Some(old_fp) = self.fingerprints.get(old_id) else { continue };
+            if old_id == new_identity || !old_fp.is_mature() {
                 continue;
             }
 
@@ -291,8 +301,25 @@ impl ReincarnationState {
             }
         }
 
-        self.candidates.extend(candidates.clone());
+        // Dedup on (new, old): the every-10th-observation cadence used to
+        // re-append identical pairs forever (unbounded Vec growth, and the
+        // suspects set republished with no change). Only genuinely new pairs land.
+        for c in &candidates {
+            let dup = self.candidates.iter().any(|e| {
+                e.new_identity == c.new_identity && e.old_identity == c.old_identity
+            });
+            if !dup {
+                self.candidates.push(c.clone());
+            }
+        }
         candidates
+    }
+
+    /// The current suspect set (identities with ≥1 candidate entry) — the
+    /// read-mostly snapshot the admission gate consumes lock-free via
+    /// `NodeState::reincarnation_suspects` (2026-08-29 verdict, design D).
+    pub fn suspects(&self) -> std::collections::HashSet<String> {
+        self.candidates.iter().map(|c| c.new_identity.clone()).collect()
     }
 
     /// Trust penalty multiplier for an identity.
@@ -758,5 +785,60 @@ mod tests {
         assert!((parsed.similarity - candidate.similarity).abs() < f64::EPSILON);
         assert_eq!(parsed.signals, candidate.signals);
         assert!((parsed.detected_at - candidate.detected_at).abs() < f64::EPSILON);
+    }
+}
+
+#[cfg(test)]
+mod verdict_2026_08_29_tests {
+    use super::*;
+
+    fn matured(state: &mut ReincarnationState, id: &str) {
+        for _ in 0..20 {
+            state.observe(id, 14, 500, 5);
+        }
+        state.set_network_origin(id, "net-X");
+    }
+
+    #[test]
+    fn check_scans_abandoned_index_only() {
+        let mut state = ReincarnationState::new();
+        // A mature, similar, NON-abandoned sibling must never produce a candidate —
+        // the scan walks abandoned_ids, not every fingerprint on the node.
+        matured(&mut state, "honest-sibling");
+        matured(&mut state, "old-slashed");
+        state.mark_abandoned("old-slashed");
+        matured(&mut state, "newcomer");
+        let candidates = state.check_reincarnation("newcomer", 1000.0);
+        assert_eq!(candidates.len(), 1, "exactly the abandoned match, got {candidates:?}");
+        assert_eq!(candidates[0].old_identity, "old-slashed");
+    }
+
+    #[test]
+    fn repeat_checks_do_not_regrow_candidates() {
+        let mut state = ReincarnationState::new();
+        matured(&mut state, "old");
+        state.mark_abandoned("old");
+        matured(&mut state, "new");
+        state.check_reincarnation("new", 1000.0);
+        let after_first = state.suspects().len();
+        assert_eq!(after_first, 1);
+        // The every-10th-observation cadence used to re-append the same pair
+        // forever; the dedup keeps the ledger bounded.
+        state.check_reincarnation("new", 2000.0);
+        state.check_reincarnation("new", 3000.0);
+        assert_eq!(state.suspects().len(), 1);
+        assert!(state.trust_multiplier("new") < 1.0);
+    }
+
+    #[test]
+    fn suspects_snapshot_matches_candidates() {
+        let mut state = ReincarnationState::new();
+        matured(&mut state, "old");
+        state.mark_abandoned("old");
+        matured(&mut state, "reborn");
+        state.check_reincarnation("reborn", 1000.0);
+        let s = state.suspects();
+        assert!(s.contains("reborn"));
+        assert!(!s.contains("old"));
     }
 }

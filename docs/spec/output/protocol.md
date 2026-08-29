@@ -4136,6 +4136,16 @@ The following companion documents will be published separately during Phase 1 de
 
 ---
 
+**ML-DSA-65 / "Dilithium3":** Elara's primary signature scheme is **ML-DSA-65 (FIPS 204,
+security category 3; 3309-byte signatures)**. "Dilithium3" is the pre-standardization
+CRYSTALS-Dilithium name for the same parameter set and remains the academic-literature search
+term; the FIPS 204 wire format is **not** compatible with round-3 Dilithium3 (this implementation
+hard-rejects legacy 3293-byte signatures), so the older name is lineage, never a synonym to purge.
+Code identifiers (`dilithium3_*`, `DilithiumMode::Dilithium3`) and the `Dilithium3-VRF`
+construction name are frozen labels over FIPS 204 code.
+
+**SLH-DSA-SHA2-192f / "SPHINCS+":** the secondary (Profile A) signature scheme, FIPS 205;
+"SPHINCS+" is its pre-standardization name, same lineage rule as above.
 ## Appendix F: Cryptographic Verification
 
 This document is cryptographically signed using two independent timestamping systems:

@@ -22,7 +22,7 @@ cargo test --features node --test record_relay_v1 --test relay_by_hash \
 
 ```
 src/
-├── crypto/           # Post-quantum signature & key-exchange primitives (Dilithium3, SPHINCS+, ML-KEM-768)
+├── crypto/           # Post-quantum primitives — ML-DSA-65 (FIPS 204, "Dilithium3"), SLH-DSA ("SPHINCS+"), ML-KEM-768
 ├── accounting/       # beat ledger — custodial accounting (24 modules)
 ├── network/          # Node daemon (HTTP, WebSocket, gossip, consensus)
 ├── content_safety.rs # 6-layer content safety
@@ -44,6 +44,7 @@ tests/                # Integration tests (multi-node)
 - **Security first:** read `SECURITY.md` and `docs/CONTENT-POSTURE.md` before touching security-related code
 - **Scale rule:** every change must be designed for the target scale (1M zones, 10T records/day, 10K+ nodes — design targets, not current demonstrated capacity). No O(all_records) scans, no full rebuilds in hot paths, no loading all data into memory.
 - **Historical references:** comments citing "internal design notes §N" or dated internal audits point at the project's private engineering ledger, kept for provenance — those documents are not part of this repository.
+- **PQ signature naming:** in public-facing prose and new user-visible strings, the primary signature algorithm is **ML-DSA-65**, paired once per document at first use as `ML-DSA-65 (FIPS 204, "Dilithium3")` — and never described as a rename or former name of the round-3 scheme (FIPS 204 is a wire-incompatible successor to round-3 Dilithium3, not a rename; this codebase hard-rejects legacy 3293-byte signatures). Implementation-internal prose and Elara's own construction names (`Dilithium3-VRF`) may lead with the concrete name; glossaries, bibliographies, and Primitive|Standard tables keep both by design. `dilithium*` identifiers in code, wire tags, serialized values, published crate APIs, and dated historical records are frozen and out of scope. Full rationale: the 2026-08-29 naming verdict in the private engineering ledger.
 
 ## What to Work On
 

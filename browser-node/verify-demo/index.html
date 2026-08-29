@@ -72,6 +72,7 @@
     border: 1px dashed var(--border); color: var(--fg); font-size: .92rem;
   }
   textarea.pins { min-height: 72px; margin-top: .6rem; }
+  .rawnote { color: var(--muted); font-size: .82rem; margin: 0 0 .4rem; max-width: 70ch; }
   /* whole-page drop target: overlay is visible only while a file is over the page */
   #drop-overlay {
     display: none; position: fixed; inset: 0; z-index: 50;
@@ -113,6 +114,8 @@
     <code>--anchor</code>; external anchor proofs are CLI-only).
   </p>
 
+  <p class="rawnote">Paste the raw JSON text exactly as read — don't re-serialize it from
+  JSON.parse (u64 fields exceed JavaScript's 2^53 precision and round silently).</p>
   <textarea id="input" spellcheck="false" placeholder='Paste a ValidationRecord JSON here…'></textarea>
   <div class="row">
     <button id="verify" disabled>Loading verifier…</button>
@@ -202,6 +205,8 @@
     exonerates them).
   </p>
 
+  <p class="rawnote">Paste the raw JSON text exactly as read — don't re-serialize it from
+  JSON.parse (u64 fields exceed JavaScript's 2^53 precision and round silently).</p>
   <textarea id="minput" spellcheck="false" placeholder='Paste a mandate bundle JSON here…'></textarea>
   <div class="row">
     <button id="mverify" disabled>Loading verifier…</button>

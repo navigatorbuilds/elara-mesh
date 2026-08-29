@@ -785,6 +785,32 @@ impl DailyCapCounter {
     }
 }
 
+/// Sole definition of the §11.35 admission limit from RESOLVED inputs — the
+/// prod gate and its tests share this one function (the gossip.rs
+/// `is_stale_epoch_seal` precedent: tests that re-implement a gate inline can't
+/// catch drift in the real one). Lock-polarity RESOLUTION stays at the call
+/// site (counters + poison recovery); this is the arithmetic it feeds.
+/// `trust_limit = None` means the trust lock was unreadable → strictest tier.
+/// `stake_ratio` must already be the effective ratio (caller substitutes
+/// BASE_UNITS_PER_DAILY_RECORD for 0).
+pub(crate) fn effective_daily_limit(
+    staked_micro: u64,
+    stake_ratio: u64,
+    trust_limit: Option<u32>,
+    reinc_flagged: bool,
+) -> u32 {
+    let base = if staked_micro > 0 {
+        ((staked_micro / stake_ratio.max(1)) as u32).max(crate::accounting::trust::TIER_0_DAILY)
+    } else {
+        trust_limit.unwrap_or(crate::accounting::trust::TIER_0_DAILY)
+    };
+    if reinc_flagged {
+        base.min(crate::accounting::trust::TIER_0_DAILY)
+    } else {
+        base
+    }
+}
+
 /// Info collected under sync lock for async fisherman slash execution.
 struct PendingSlash {
     accused: String,
@@ -1269,7 +1295,15 @@ async fn apply_ledger_op_phase4(
             // fingerprint will be flagged as a suspected reincarnation.
             if op_str == "slash" {
                 if let Some(offender) = record.metadata.get("beat_offender").and_then(|v| v.as_str()) {
-                    if let Ok(mut reinc) = state.reincarnation.try_lock() {
+                    // Poisoned → recover: a panic under this mutex must not turn
+                    // every future slash's mark_abandoned into a silent permanent
+                    // no-op (reviewer find, same class as the 2026-08-29 verdict).
+                    let reinc_guard = match state.reincarnation.try_lock() {
+                        Ok(g) => Some(g),
+                        Err(std::sync::TryLockError::Poisoned(e)) => Some(e.into_inner()),
+                        Err(std::sync::TryLockError::WouldBlock) => None,
+                    };
+                    if let Some(mut reinc) = reinc_guard {
                         reinc.mark_abandoned(offender);
                         info!("reincarnation: marked {} as abandoned (slashed)", offender.chars().take(16).collect::<String>());
                     }
@@ -2294,28 +2328,61 @@ async fn insert_record_inner(state: &Arc<NodeState>, mut record: ValidationRecor
     // derive their limit from ledger-captured stake (no trust lock), so a flood can't
     // falsely cap them.
     if !skip_timestamp_defense && effective_identity != state.config.genesis_authority {
-        let cont_score = state.continuity.try_lock()
-            .map(|c| c.score(effective_identity, now_ts))
-            .unwrap_or(1.0);
-        let mut limit = if staked_micro > 0 {
+        use std::sync::atomic::Ordering::Relaxed;
+        use std::sync::TryLockError;
+        // 2026-08-29 contention-polarity verdict (fusion-audited, see
+        // internal design notes):
+        // every lock fallback in this gate FAILS CLOSED, poisoning is recovered
+        // (a panic under a lock must not disable §11.35 for process lifetime),
+        // and the §6.4 clamp is deterministic via a lock-free suspects snapshot.
+        let mut degraded = false;
+        // Reincarnation penalty flag (Protocol §6.4): deterministic and
+        // lock-free — reads the ArcSwap snapshot the write side publishes, so
+        // the clamp never varies with lock timing and applies to staked
+        // identities too (stake never launders a suspected reset).
+        let reinc_flagged = state.reincarnation_suspects.load().contains(effective_identity);
+        let limit = if staked_micro > 0 {
             let er = if stake_ratio > 0 { stake_ratio } else { crate::accounting::trust::BASE_UNITS_PER_DAILY_RECORD };
-            ((staked_micro / er) as u32).max(crate::accounting::trust::TIER_0_DAILY)
+            effective_daily_limit(staked_micro, er, None, reinc_flagged)
         } else {
-            match state.trust.try_read() {
-                Ok(t) => t.daily_limit_for(effective_identity, now_ts, cont_score),
-                Err(_) => crate::accounting::trust::TIER_0_DAILY, // contended → strictest, fail closed
-            }
+            // Continuity read lives HERE (unstaked only) — the staked path never
+            // consumes it, so it no longer acquires the lock at all.
+            // WouldBlock → 0.0: the score fn's own no-information value
+            // (an unknown identity reads 0.0 uncontended), and provably the
+            // limit floor — tier_with_continuity uses cont only in >= gates.
+            let cont_score = match state.continuity.try_lock() {
+                Ok(c) => c.score(effective_identity, now_ts),
+                Err(TryLockError::Poisoned(e)) => {
+                    state.daily_cap_continuity_poisoned_total.fetch_add(1, Relaxed);
+                    e.into_inner().score(effective_identity, now_ts)
+                }
+                Err(TryLockError::WouldBlock) => {
+                    state.daily_cap_continuity_contended_total.fetch_add(1, Relaxed);
+                    degraded = true;
+                    0.0
+                }
+            };
+            let trust_limit = match state.trust.try_read() {
+                Ok(t) => Some(t.daily_limit_for(effective_identity, now_ts, cont_score)),
+                Err(_) => {
+                    state.daily_cap_trust_contended_total.fetch_add(1, Relaxed);
+                    degraded = true;
+                    None // contended → strictest, fail closed
+                }
+            };
+            effective_daily_limit(0, 0, trust_limit, reinc_flagged)
         };
-        // Reincarnation penalty (Protocol §6.4): suspected reset → clamp to Tier 0.
-        if let Ok(reinc) = state.reincarnation.try_lock() {
-            if reinc.trust_multiplier(effective_identity) < 1.0 {
-                limit = limit.min(crate::accounting::trust::TIER_0_DAILY);
-            }
+        if degraded {
+            state.daily_limit_degraded_total.fetch_add(1, Relaxed);
         }
         // ONE atomic check-and-increment — see DailyCapCounter (never split the two).
         if !state.daily_caps.lock_recover().check_and_increment(effective_identity, now_ts, limit) {
+            // ".contains" classification in gossip keys on the leading substring,
+            // so the degraded suffix is append-safe (verifier C7/C11).
             return Err(ElaraError::Ledger(format!(
-                "daily record limit exceeded: identity limited to {}/day", limit
+                "daily record limit exceeded: identity limited to {}/day{}",
+                limit,
+                if degraded { " (degraded: a trust lock was contended; limit floored for this attempt — retry is safe)" } else { "" }
             )));
         }
     }
@@ -3141,18 +3208,32 @@ async fn insert_record_inner(state: &Arc<NodeState>, mut record: ValidationRecor
         let record_size = wire_size as usize;
         let metadata_keys = record.metadata.len();
 
-        // Continuity: record activity for this identity
-        if let Ok(mut cont) = state.continuity.try_lock() {
-            cont.record_activity(&creator_hash, record.timestamp);
+        // Continuity: record activity for this identity. Poisoned → recover
+        // (a panic under this lock must not silently freeze profile writes for
+        // process lifetime — 2026-08-29 verdict F4); WouldBlock → skip, the
+        // next accepted record catches up (best-effort write, unchanged).
+        match state.continuity.try_lock() {
+            Ok(mut cont) => cont.record_activity(&creator_hash, record.timestamp),
+            Err(std::sync::TryLockError::Poisoned(e)) => {
+                e.into_inner().record_activity(&creator_hash, record.timestamp);
+            }
+            Err(std::sync::TryLockError::WouldBlock) => {}
         }
 
         // Reincarnation: observe behavioral fingerprint + periodic detection check
-        if let Ok(mut reinc) = state.reincarnation.try_lock() {
+        let reinc_guard = match state.reincarnation.try_lock() {
+            Ok(g) => Some(g),
+            Err(std::sync::TryLockError::Poisoned(e)) => Some(e.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => None,
+        };
+        if let Some(mut reinc) = reinc_guard {
             reinc.observe(&creator_hash, hour as usize, record_size, metadata_keys);
             reinc.set_network_origin(&creator_hash, &format!("{:016x}", origin_hash));
 
-            // Check for reincarnation every 10th observation (fingerprint needs 10+ to mature).
-            // O(abandoned_count) per check, amortized O(1) per record.
+            // Check for reincarnation every 10th observation (fingerprint needs
+            // 10+ to mature). O(abandoned_count) per check via the abandoned_ids
+            // index — genuinely, since the 2026-08-29 pass; the old loop walked
+            // every fingerprint on the node.
             if let Some(rfp) = reinc.fingerprints().get(&creator_hash) {
                 if rfp.observation_count % 10 == 0 && rfp.is_mature() {
                     let candidates = reinc.check_reincarnation(&creator_hash, record.timestamp);
@@ -3163,6 +3244,13 @@ async fn insert_record_inner(state: &Arc<NodeState>, mut record: ValidationRecor
                             &c.old_identity[..c.old_identity.len().min(16)],
                             c.similarity, c.signals,
                         );
+                    }
+                    if !candidates.is_empty() {
+                        // Publish the suspects snapshot the admission gate reads
+                        // lock-free. MUST happen inside this guard: the mutex
+                        // serializes publishes, so a concurrent detection can't
+                        // clone-and-overwrite a sibling's update (verifier (a)).
+                        state.reincarnation_suspects.store(std::sync::Arc::new(reinc.suspects()));
                     }
                 }
             }
@@ -8825,5 +8913,46 @@ mod tests {
         let r2 = validate_rotation_parent_grounding(&e2, &child, node_now);
         assert_eq!(r1.is_ok(), r2.is_ok(), "identical durable state ⇒ identical decision");
         assert!(r1.is_ok(), "the grounded child admits on both nodes");
+    }
+}
+
+#[cfg(test)]
+mod effective_daily_limit_verdict_tests {
+    use super::effective_daily_limit;
+    use crate::accounting::trust::TIER_0_DAILY;
+
+    #[test]
+    fn staked_path_ignores_trust_and_floors_at_tier0() {
+        // Trust lock state is irrelevant to staked identities (they never read it).
+        assert_eq!(effective_daily_limit(1_000_000, 100, None, false), 10_000.max(TIER_0_DAILY));
+        assert_eq!(effective_daily_limit(1_000_000, 100, Some(1), false), 10_000.max(TIER_0_DAILY));
+        // Tiny stake still floors at Tier-0 (mirrors trust.rs:570,653).
+        assert_eq!(effective_daily_limit(1, 1_000_000, None, false), TIER_0_DAILY);
+    }
+
+    #[test]
+    fn unstaked_unreadable_trust_is_strictest() {
+        // None = the trust lock was contended → fail closed to Tier-0.
+        assert_eq!(effective_daily_limit(0, 0, None, false), TIER_0_DAILY);
+        assert_eq!(effective_daily_limit(0, 0, Some(200), false), 200);
+    }
+
+    #[test]
+    fn reincarnation_flag_clamps_staked_and_unstaked_alike() {
+        // The §6.4 clamp overrides stake — the exploit the 2026-08-29 verdict
+        // closed: a slashed identity re-staking cannot buy back throughput.
+        assert!(effective_daily_limit(10_000_000_000, 100, None, false) > TIER_0_DAILY);
+        assert_eq!(effective_daily_limit(10_000_000_000, 100, None, true), TIER_0_DAILY);
+        assert_eq!(effective_daily_limit(0, 0, Some(200), true), TIER_0_DAILY);
+        // Unflagged leaves limits untouched.
+        assert_eq!(effective_daily_limit(0, 0, Some(200), false), 200);
+    }
+
+    #[test]
+    fn worst_case_is_a_floor_never_a_halt() {
+        // Every lock unreadable + flagged: the limit is Tier-0, never zero —
+        // degraded mode still admits records (TIER_0_DAILY is a nonzero const;
+        // the eq below is the floor-not-halt pin).
+        assert_eq!(effective_daily_limit(0, 0, None, true), TIER_0_DAILY);
     }
 }

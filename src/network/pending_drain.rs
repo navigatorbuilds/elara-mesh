@@ -824,10 +824,16 @@ fn fire_peripheral_updates_at_commit(
 
     // Protocol §6.4: mark a slashed identity's fingerprint as abandoned
     // so a later suspected reincarnation can be flagged. mark_abandoned
-    // uses try_lock — if the reincarnation mutex is contended we
-    // silently skip, matching the direct-apply branch's behavior.
+    // uses try_lock — contended → skip (matches the direct-apply branch);
+    // Poisoned → recover, so a panic under the mutex can never permanently
+    // silence abandonment marking (2026-08-29 verdict class).
     if let PendingOp::Slash { offender, .. } = &delta.op {
-        if let Ok(mut reinc) = state.reincarnation.try_lock() {
+        let reinc_guard = match state.reincarnation.try_lock() {
+            Ok(g) => Some(g),
+            Err(std::sync::TryLockError::Poisoned(e)) => Some(e.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => None,
+        };
+        if let Some(mut reinc) = reinc_guard {
             reinc.mark_abandoned(offender);
             info!(
                 "reincarnation: marked {} as abandoned (slashed via commit)",

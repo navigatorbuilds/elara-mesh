@@ -1973,6 +1973,21 @@ pub struct NodeState {
     /// (`CrossZoneState::state_digest`), refreshed at each applied seal.
     /// Fleet divergence detector; 0 = not computed since boot.
     pub xzone_state_digest: AtomicU64,
+    /// §11.35 admission-gate degraded-mode observability (2026-08-29
+    /// contention-polarity verdict). `*_contended_total`: the gate computed a
+    /// limit with that lock unreadable (fail-closed floor applied — healthy is
+    /// low and bursty, correlated with the snapshot clone window).
+    /// `*_poisoned_total`: a poisoned mutex was recovered via `into_inner()`
+    /// (should be 0 forever; non-zero = a panic occurred under that lock —
+    /// investigate). `reincarnation` contended should be structurally 0 after
+    /// the de-lock (regression canary). /metrics-only — never on /status.
+    pub daily_cap_continuity_contended_total: AtomicU64,
+    pub daily_cap_continuity_poisoned_total: AtomicU64,
+    pub daily_cap_trust_contended_total: AtomicU64,
+    pub daily_cap_reincarnation_contended_total: AtomicU64,
+    /// Any submission whose limit was reduced by ANY fallback branch — the
+    /// single operator-facing "how often is §11.35 running degraded" signal.
+    pub daily_limit_degraded_total: AtomicU64,
     /// Epoch at which `xzone_state_digest` was last refreshed. Compare
     /// digests only between nodes reporting the same value here.
     pub xzone_state_digest_epoch: AtomicU64,
@@ -3321,6 +3336,12 @@ pub struct NodeState {
     pub continuity: std::sync::Mutex<crate::continuity::ContinuityState>,
     /// Reincarnation detection — behavioral fingerprinting for Sybil identity resets (Protocol §6.4).
     pub reincarnation: std::sync::Mutex<crate::reincarnation::ReincarnationState>,
+    /// Read-mostly snapshot of the §6.4 suspect set (2026-08-29 verdict,
+    /// design D): the admission gate reads THIS lock-free, so the clamp is
+    /// deterministic under every load condition; the mutex above stays the
+    /// write-side truth. Published ONLY inside the ingest write-guard that
+    /// runs `check_reincarnation` (publish-after-drop would lose updates).
+    pub reincarnation_suspects: arc_swap::ArcSwap<std::collections::HashSet<String>>,
     /// Monotonic slot-nonce counter for records created by THIS node's identity
     /// (MESH-BFT Phase 3 Stage 1C — slot mutual exclusion).
     ///
@@ -4199,6 +4220,11 @@ impl NodeState {
             xzone_abort_witness_push_peer_reject_total: AtomicU64::new(0),
             xzone_attach_finality_lock_contended_total: AtomicU64::new(0),
             xzone_state_digest: AtomicU64::new(0),
+            daily_cap_continuity_contended_total: AtomicU64::new(0),
+            daily_cap_continuity_poisoned_total: AtomicU64::new(0),
+            daily_cap_trust_contended_total: AtomicU64::new(0),
+            daily_cap_reincarnation_contended_total: AtomicU64::new(0),
+            daily_limit_degraded_total: AtomicU64::new(0),
             xzone_state_digest_epoch: AtomicU64::new(0),
             xzone_abort_witness_push_net_fail_total: AtomicU64::new(0),
             xzone_abort_aggregated_seen: std::sync::Mutex::new(SeenSet::new(5_000)),
@@ -4498,6 +4524,7 @@ impl NodeState {
             )),
             continuity: std::sync::Mutex::new(crate::continuity::ContinuityState::new()),
             reincarnation: std::sync::Mutex::new(crate::reincarnation::ReincarnationState::new()),
+            reincarnation_suspects: arc_swap::ArcSwap::from_pointee(std::collections::HashSet::new()),
             slot_nonce_self: AtomicU64::new(1),
             // Ceiling 0 → the first `next_slot_nonce` reserves a durable block
             // (unless `bootstrap_slot_nonce` seeds it first from the persisted

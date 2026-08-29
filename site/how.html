@@ -185,14 +185,14 @@
   <div class="stage-rows">
     <div class="stage-row"><span class="step-n">1</span><div>
       <h3>Record — on any device, online or not</h3>
-      <p>The work is hashed (SHA3-256), signed with post-quantum keys (Dilithium3, with
+      <p>The work is hashed (SHA3-256), signed with post-quantum keys (ML-DSA-65 — FIPS 204, "Dilithium3" — with
       SPHINCS+ available for high-assurance profiles), and stamped with an interval tree
       clock — causal time that needs no synchronized clocks and no connection.</p>
     </div></div>
     <div class="stage-row"><span class="step-n">2</span><div>
       <h3>Gossip — the mesh moves it</h3>
       <p>Records travel a peer-to-peer mesh over ElaraPQ, a post-quantum transport
-      (ML-KEM-768 key exchange, Dilithium3 authentication). Content-routed DHT delivery
+      (ML-KEM-768 key exchange, ML-DSA-65 authentication). Content-routed DHT delivery
       keeps it efficient as the network grows; flood-gossip covers small networks.</p>
     </div></div>
     <div class="stage-row"><span class="step-n">3</span><div>

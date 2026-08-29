@@ -6,6 +6,10 @@
 (or what) did what, on whose authority, and when*. Don't trust us: check it
 yourself — one command, no server, no network, and it never fakes a green.
 
+Young, and honest about it: the live network today is a 3-machine testnet (first
+external-machine join July 2026). Every claim in this README separates
+**tested-at** from **designed-for** — the status table below holds that line.
+
 ## Check it yourself — ~60 seconds, offline
 
 Don't trust this README. Clone the repo, build the standalone verifier, and check
@@ -93,7 +97,7 @@ This project distinguishes **designed-for** from **tested-at**, everywhere:
 | **Designed for** | 1M zones × 10T records/day × 10K+ nodes — these are *design targets that shaped the architecture*, *not demonstrated capacity* |
 | **Hardening status** | explicit-panic phase done — **0** `unwrap()`/`expect()`/`panic!` across the node and published protocol crates (`src/` + `crates/*/src/`, `#[cfg(test)]` excluded), CI-gated and re-runnable yourself: `python3 scripts/scan-prod-panics.py --check`. Active lane: hot-path bounds/arithmetic hardening against attacker-controlled bytes (a Byzantine peer must never be able to crash a node). |
 | **Public network** | none yet — this is a runtime you can build and run yourself today |
-| **Beats** | the internal unit (the **beat**) is **protocol plumbing** (staking, sybil resistance, resource accounting). It is **not a cryptocurrency offering**: there is no token sale, no exchange listing, no airdrop, and none is planned. |
+| **Beats** | the internal unit (the **beat**) is **protocol plumbing** (staking, sybil resistance, resource accounting). It is **not a cryptocurrency offering**: there is no token sale, no exchange listing, no airdrop, and none is planned. Structurally enforced, not just asserted: beats have **no bridge, no market, and no transfer surface outside the mesh** — the only operations are stake, reward, and storage delegation inside the protocol, and the coin-era work lanes are closed WONTFIX in-repo. |
 
 This codebase was built by a solo developer (Nenad Vasic) working with [Claude](https://claude.com) as an engineering collaborator — the AI helps write and adversarially audit the code under human direction. Since July 9, 2026 that role is also on-chain: the AI maintainer operates under a public, revocable mandate issued on the mesh it maintains (`605d8e66…`), covering its human-facing acts (outreach, thread replies, council verdicts). Since August 20, 2026 its build bookkeeping is delegated one hop further: commits and deploys are emitted as signed acts by a disclosed build-agent identity under its own narrower mandate (`2f1bf75c…`, ops `commit,deploy`) from the same human principal — one principal, two checkable mandate chains, every row [checkable in your browser](https://navigatorbuilds.github.io/elara-mesh/receipts.html) (best-effort emission — the feed shows what it shows; it cannot prove completeness; mandate scope strings are recorded on-chain but not yet enforced in the verdict path).
 
@@ -172,7 +176,10 @@ authority, and when*.
 
 That gap is turning concrete in EU law. Five regulations enacted in 2023–2024 lean
 on the same missing piece — durable, tamper-evident, verifiable records of what
-agents, machines, and products did — without specifying who provides it:
+agents, machines, and products did — without specifying who provides it. Before
+the list, the frame: Elara **enables** this class of record-keeping as an open
+commons; it is not a compliance product, and "compliant with X" is a claim we
+never make:
 
 - **AI Act** ((EU) 2024/1689, Art. 12) — automatic event logging for **high-risk**
   AI systems (obligations phase in on the Act's staged timeline through 2027).
@@ -190,9 +197,8 @@ agents, machines, and products did — without specifying who provides it:
 
 None of them specify the record infrastructure, and the default answer will be
 closed, per-vendor silos. Elara is **designed to support** the record-keeping these
-regulations require — as an open, post-quantum commons, not a compliance product.
-(We enable these workflows; we do not certify compliance, and "AI Act compliant" is
-a claim we never make.)
+regulations require — as an open, post-quantum commons, on the terms stated above
+the list.
 
 ## Where this is going (design stage — see docs)
 

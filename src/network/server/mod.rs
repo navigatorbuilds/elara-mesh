@@ -7736,6 +7736,33 @@ pub(crate) async fn metrics_body_tiered(
          elara_xzone_state_digest_epoch {xz_state_digest_epoch}\n\
     ");
 
+    // §11.35 admission-gate degraded-mode counters (2026-08-29 contention-
+    // polarity verdict). Healthy = low and bursty, correlated with the snapshot
+    // clone window; poisoned = 0 forever (non-zero means a panic occurred under
+    // that lock); reincarnation contended = structurally 0 after the de-lock.
+    let dc_cont = state.daily_cap_continuity_contended_total.load(std::sync::atomic::Ordering::Relaxed);
+    let dc_cont_poi = state.daily_cap_continuity_poisoned_total.load(std::sync::atomic::Ordering::Relaxed);
+    let dc_trust = state.daily_cap_trust_contended_total.load(std::sync::atomic::Ordering::Relaxed);
+    let dc_reinc = state.daily_cap_reincarnation_contended_total.load(std::sync::atomic::Ordering::Relaxed);
+    let dl_degraded = state.daily_limit_degraded_total.load(std::sync::atomic::Ordering::Relaxed);
+    let body = format!("{body}\
+         # HELP elara_daily_cap_continuity_contended_total Admission-gate limit computations that found the continuity mutex contended and floored the continuity score to 0.0 (fail closed). Healthy = low/bursty, correlated with the periodic snapshot clone; sustained growth = bound the continuity map or lengthen the snapshot interval.\n\
+         # TYPE elara_daily_cap_continuity_contended_total counter\n\
+         elara_daily_cap_continuity_contended_total {dc_cont}\n\
+         # HELP elara_daily_cap_continuity_poisoned_total Poisoned continuity mutex recoveries in the admission gate (into_inner). Should be 0 forever — non-zero means a panic occurred while holding the continuity lock; investigate that panic, the gate itself kept working.\n\
+         # TYPE elara_daily_cap_continuity_poisoned_total counter\n\
+         elara_daily_cap_continuity_poisoned_total {dc_cont_poi}\n\
+         # HELP elara_daily_cap_trust_contended_total Admission-gate limit computations that found the trust RwLock contended and used the strictest tier cap (fail closed — this branch shipped 2026-07 with no observability; counter added 2026-08-29).\n\
+         # TYPE elara_daily_cap_trust_contended_total counter\n\
+         elara_daily_cap_trust_contended_total {dc_trust}\n\
+         # HELP elara_daily_cap_reincarnation_contended_total Regression canary: the admission gate no longer takes the reincarnation lock (deterministic ArcSwap suspects snapshot since 2026-08-29), so this must stay 0. Non-zero = a lock-taking read crept back into the gate.\n\
+         # TYPE elara_daily_cap_reincarnation_contended_total counter\n\
+         elara_daily_cap_reincarnation_contended_total {dc_reinc}\n\
+         # HELP elara_daily_limit_degraded_total Submissions whose daily limit was reduced by ANY lock-fallback branch — the single operator signal for how often the admission gate runs degraded. The refusal message carries a degraded marker on these.\n\
+         # TYPE elara_daily_limit_degraded_total counter\n\
+         elara_daily_limit_degraded_total {dl_degraded}\n\
+    ");
+
     // Gap 7: epoch-indexed archive snapshot observability. Archive nodes emit a
     // signed snapshot every `archive_snapshot_every_n_epochs`; new nodes prefer
     // the deterministic archive path over the live `/snapshot` route.
