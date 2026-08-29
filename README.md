@@ -31,7 +31,7 @@ Expected output:
 
   ✓ structure         ValidationRecord v5 id=019f4e4f-22a8-74b2-82c4-69350e210fe9 (0 parents)
   ✓ identity binding  creator identity derived from embedded key: ada8575c57e1da94 (record carries no separate identity claim to cross-check)
-  ✓ signature         Dilithium3 (ML-DSA-65) valid over canonical record bytes
+  ✓ signature         ML-DSA-65 (FIPS 204, "Dilithium3") valid over canonical record bytes
   ✓ profile           Profile A (dual signature) — SPHINCS+ (SLH-DSA) also valid
 
 VERDICT: VERIFIED
@@ -85,7 +85,7 @@ credible — an open-source, post-quantum, zone-partitioned **validation mesh**,
 written in Rust. Records work fully offline at creation; when connectivity exists,
 a peer-to-peer DAG weaves them into shared, witness-attested history.
 
-~350,000 lines of Rust · 5,700+ tests · post-quantum signatures (Dilithium3 in the consensus hot path; optional SPHINCS+ dual-signing for anchor/identity/governance records) · offline-first by design.
+~350,000 lines of Rust · 5,700+ tests · post-quantum signatures (ML-DSA-65 in the consensus hot path; optional SPHINCS+ dual-signing for anchor/identity/governance records) · offline-first by design.
 
 ## Project status — read this first
 
@@ -103,7 +103,7 @@ This codebase was built by a solo developer (Nenad Vasic) working with [Claude](
 
 ## What it does
 
-- **Post-quantum cryptography** — Dilithium3 + SPHINCS+-SHA2-192f + ML-KEM-768 (key encapsulation; FIPS 203, formerly Kyber)
+- **Post-quantum cryptography** — ML-DSA-65 + SLH-DSA-SHA2-192f ("SPHINCS+") + ML-KEM-768 (FIPS 203 key encapsulation, CRYSTALS-Kyber family)
 - **Directed Acyclic Mesh** — zone-partitioned DAG with BFS traversal, tips, roots, ancestors, fork detection
 - **Interval Tree Clocks** — causal ordering without timestamps, zone-aware clock management
 - **Binary wire format** — compact ELRA encode/decode with LEB128 varints

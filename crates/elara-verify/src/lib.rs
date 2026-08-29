@@ -774,9 +774,9 @@ pub fn verify_record(
                 name: "signature",
                 status: st(pass),
                 detail: if pass {
-                    "Dilithium3 (ML-DSA-65) valid over canonical record bytes".into()
+                    "ML-DSA-65 (FIPS 204, \"Dilithium3\") valid over canonical record bytes".into()
                 } else {
-                    "Dilithium3 signature DOES NOT VERIFY over the record's canonical bytes".into()
+                    "ML-DSA-65 signature DOES NOT VERIFY over the record's canonical bytes".into()
                 },
             });
         }
@@ -914,7 +914,7 @@ pub fn verify_seal(
             name: "seal anchor",
             status: Status::Pass,
             detail: format!(
-                "seal {}… is signed by a pinned anchor (Dilithium3 valid); record_hash matches the header you pinned",
+                "seal {}… is signed by a pinned anchor (ML-DSA-65 valid); record_hash matches the header you pinned",
                 &hex::encode(own_hash)[..16],
             ),
         }),
@@ -928,7 +928,7 @@ pub fn verify_seal(
             name: "seal anchor",
             status: Status::Partial,
             detail: format!(
-                "seal {}… UNPROVEN identity: the Dilithium3 signature is valid for a pinned anchor, \
+                "seal {}… UNPROVEN identity: the ML-DSA-65 signature is valid for a pinned anchor, \
                  but that alone proves only that SOME anchor signed SOME seal — not which epoch/seal \
                  this is. Without --expected-hash an attacker could substitute a different \
                  anchor-signed seal and this check would still pass. Supply --expected-hash to bind \
