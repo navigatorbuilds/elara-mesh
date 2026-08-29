@@ -26,7 +26,7 @@ Three realms (discovery profiles):
 | Realm | Who | Discovery behavior |
 |-------|-----|--------------------|
 | **OPEN** | public mesh, anyone | full self-assembly: mDNS + seeds + DHT + PEX |
-| **FEDERATED** | consortiums (companies, hospitals, registries) | self-assembly *within* a credentialed membership; admission = Dilithium3-signed membership cert chained to the federation root key |
+| **FEDERATED** | consortiums (companies, hospitals, registries) | self-assembly *within* a credentialed membership; admission = ML-DSA-65 (FIPS 204, "Dilithium3")-signed membership cert chained to the federation root key |
 | **SOVEREIGN** | gov / military / agencies | never dials out, never beacons, denies unknown peers (inbound-rejection is design-stage — see *To build*); own root of trust, own genesis; optional one-way public anchoring (below) |
 
 ## Already built (the Terminator half)

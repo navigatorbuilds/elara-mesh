@@ -8,7 +8,7 @@ This section provides concrete estimates based on the cryptographic primitives s
 
 | Record Type                               | Approximate Size | Breakdown                                                                                |
 |-------------------------------------------|------------------|------------------------------------------------------------------------------------------|
-| PUBLIC validation record                  | ~4-5 KB          | Content hash (32 B) + Dilithium3 signature (~3.3 KB) + metadata/causal anchors (~500 B)  |
+| PUBLIC validation record                  | ~4-5 KB          | Content hash (32 B) + ML-DSA-65 (FIPS 204, "Dilithium3") signature (~3.3 KB) + metadata/causal anchors (~500 B)  |
 | PRIVATE validation (Phase 1: SHA3 commitment) | ~4-5 KB      | SHA3-256 commitment proof + PQC signature (~3.3 KB) + commitment (32 B) + metadata (~500 B). The Groth16 zk-SNARK (288 B proof) is the design-stage target (§5.3). |
 | PRIVATE validation (Phase 2, hybrid ZKP)  | ~55 KB           | Hybrid lattice+classical proof (~50 KB) + PQC signature (~3.3 KB) + metadata (~500 B)    |
 | SOVEREIGN validation (target: zk-STARK)   | ~100-200 KB      | STARK proof (variable, typically 50-200 KB) + PQC signature (~3.3 KB) + metadata. Planned; current runtime ships SHA3-256 commitments (`src/crypto/commitment.rs`) in this slot. |

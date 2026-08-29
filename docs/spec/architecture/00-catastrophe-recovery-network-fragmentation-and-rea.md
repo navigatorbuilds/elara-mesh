@@ -4,7 +4,7 @@ Global disaster. Network shatters. Surviving fragments run independently.
 
 **Reconnection protocol:**
 
-1. **Identity verification** — Dilithium3 signatures are self-verifiable. No network needed.
+1. **Identity verification** — ML-DSA-65 (FIPS 204, "Dilithium3") signatures are self-verifiable. No network needed.
 2. **Genesis chain verification** — each fragment traces epoch seal chain back to genesis. Same genesis_authority → same network → safe to merge.
 3. **DAM merge** — the DAM is a MESH. Fragments merge by connecting DAG tips:
 ```

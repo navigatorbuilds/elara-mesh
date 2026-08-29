@@ -1,7 +1,7 @@
 ### Layer 1: Immediate Validation (per-record, sub-second)
 
 When a record arrives, local witnesses perform quick checks:
-- Dilithium3 signature valid?
+- ML-DSA-65 (FIPS 204, "Dilithium3") signature valid?
 - Wire format correct?
 - Balance sufficient? (for transfers)
 - Not a duplicate?

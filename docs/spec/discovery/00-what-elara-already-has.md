@@ -5,7 +5,7 @@
 - PeerTable with ban/backoff, PoW verification, reputation — `network/peer.rs`
 - Seed peer bootstrap + DHT lookup + PEX + seed reconnect — `network/discovery.rs`
 - DHT persistence (JSON snapshots across restarts)
-- Dilithium3 signed identities (post-quantum)
+- ML-DSA-65 (FIPS 204, "Dilithium3") signed identities (post-quantum)
 - Genesis authority hash as trust anchor
 - 6 node types (Leaf/Relay/Witness/Archive/Anchor/Gateway)
 

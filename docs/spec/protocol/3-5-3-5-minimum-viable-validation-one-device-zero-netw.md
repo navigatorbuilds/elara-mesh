@@ -18,7 +18,7 @@ Step 2: The device produces data — a sensor reading, a firmware hash,
 
 Step 3: The device validates.
         → Computes SHA3-256 hash of the data
-        → Signs the hash with its private key (CRYSTALS-Dilithium)
+        → Signs the hash with its private key (ML-DSA (FIPS 204, formerly CRYSTALS-Dilithium))
         → Creates a ValidationRecord with timestamp and device public key
         → Appends to local DAG
         → Done. Sub-second on commodity hardware.

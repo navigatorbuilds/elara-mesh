@@ -2,7 +2,7 @@
 
 The **data layer** of the [Elara Protocol](https://github.com/navigatorbuilds/elara-mesh):
 `ValidationRecord`, the byte-exact post-quantum wire codec, receipt types, the hierarchical
-`ZoneId`, `uuid7`, and the verify-side crypto primitives (Dilithium3 / SPHINCS+ *verify*, SHA3).
+`ZoneId`, `uuid7`, and the verify-side crypto primitives (ML-DSA-65 (FIPS 204, "Dilithium3") / SPHINCS+ *verify*, SHA3).
 
 It is the **single source of truth** shared by the AGPL Elara node and the permissive
 `elara-verify` receipt verifier (its sibling crate) — so a receipt

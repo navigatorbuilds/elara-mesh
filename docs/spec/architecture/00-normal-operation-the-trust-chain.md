@@ -4,7 +4,7 @@ A phone from Montenegro (zone medical/eu/south/montenegro) enters a hospital
 in Brazil (zone medical/sa/brazil). Zones have never communicated directly.
 
 The phone carries:
-- Its identity (Dilithium3 signed + PoW proof)
+- Its identity (ML-DSA-65 (FIPS 204, "Dilithium3") signed + PoW proof)
 - Its records
 - Merkle proof for each record (from home zone's epoch seal)
 - The epoch seal itself (signed by home zone witnesses)

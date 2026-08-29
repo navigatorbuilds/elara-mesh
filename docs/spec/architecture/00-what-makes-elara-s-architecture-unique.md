@@ -1,6 +1,6 @@
 ## What Makes Elara's Architecture Unique
 
-1. **Post-quantum from discovery layer up** — Dilithium3 signed peer records, epoch seals, bootstrap lists. As of this writing, to our knowledge no major P2P network has publicly documented PQ signatures in its discovery protocol (an unsourced survey claim — corrections welcome).
+1. **Post-quantum from discovery layer up** — ML-DSA-65 (FIPS 204, "Dilithium3") signed peer records, epoch seals, bootstrap lists. As of this writing, to our knowledge no major P2P network has publicly documented PQ signatures in its discovery protocol (an unsourced survey claim — corrections welcome).
 2. **The DAM as its own bootstrap** — peer advertisements as DAM records. Any copy of the DAM is a bootstrap source.
 3. **Zone-native from genesis** — semantic hierarchical zones, not bolted-on sharding.
 4. **Hardware-tier-aware discovery** — DHT routes requests to appropriate tier.

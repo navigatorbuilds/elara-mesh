@@ -11,7 +11,7 @@ When a creator produces work, the node:
 
 1. Computes a cryptographic hash of the content (SHA3-256)
 2. Creates a validation record containing: content hash, creator's public key, timestamp, causal references to prior work, and classification level (public/private/restricted/sovereign)
-3. Signs the validation record with the creator's private key (CRYSTALS-Dilithium)
+3. Signs the validation record with the creator's private key (ML-DSA (FIPS 204, formerly CRYSTALS-Dilithium))
 4. Appends the signed record to the local DAG
 5. Optionally wraps the content hash in a privacy commitment for private/restricted work (Phase 1: SHA3-256 commitment; a genuine zero-knowledge proof is design-stage — see §5.3)
 

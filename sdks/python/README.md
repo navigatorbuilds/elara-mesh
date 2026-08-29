@@ -28,7 +28,7 @@ agent.record({
 
 The record must already be signed. Pair this SDK with one of:
 
-- `elara-cli` for CLI-based Dilithium3 signing
+- `elara-cli` for CLI-based ML-DSA-65 (FIPS 204, "Dilithium3") signing
 - `@elara/mcp-server`'s `elara_sign` tool (canonicalization + your own key)
 - The Rust `pq_client_sdk::WalletClient` (heavyweight, native)
 

@@ -6,7 +6,7 @@ A `cognitive_checkpoint` ValidationRecord contains a `CognitiveDigest` in its me
 cognitive_checkpoint ValidationRecord {
     id:             UUID v7
     content_hash:   SHA3-256(canonical_json(CognitiveDigest))
-    creator:        node identity (Dilithium3 public key)
+    creator:        node identity (ML-DSA-65 (FIPS 204, "Dilithium3") public key)
     timestamp:      ISO-8601 + vector clock
     parents:        [previous_checkpoint_id, latest_dag_record_id]
     classification: PUBLIC (default) or PRIVATE

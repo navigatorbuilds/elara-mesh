@@ -5,7 +5,7 @@
 **Solution: Self-Verifiable Records with Merkle Proofs**
 
 A record is self-verifiable when it carries:
-1. The record itself (signed with Dilithium3/SPHINCS+)
+1. The record itself (signed with ML-DSA-65 (FIPS 204, "Dilithium3")/SPHINCS+)
 2. A Merkle proof: the sibling hashes from the record's leaf to the zone's Merkle root
 3. The epoch seal containing the Merkle root (signed by the zone's anchor, attested by witnesses)
 4. The epoch seal chain: `previous_seal_hash` links back to genesis

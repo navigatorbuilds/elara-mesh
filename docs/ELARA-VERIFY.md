@@ -30,7 +30,7 @@ elara-verify <record.json> --content file  # also bind an artifact to the record
 ```
 
 Checks: the record parses; the embedded public key hashes (SHA3-256) to the
-identity it claims; the **Dilithium3** signature is valid over the canonical
+identity it claims; the **ML-DSA-65 (FIPS 204, "Dilithium3")** signature is valid over the canonical
 bytes; for Profile A, the **SPHINCS+** second signature too; and (with
 `--content`) that your artifact hashes to exactly the record's content hash.
 

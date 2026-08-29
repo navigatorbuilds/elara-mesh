@@ -2,7 +2,7 @@
 
 ```
 ElaraIdentity {
-    public_key:     CRYSTALS-Dilithium public key
+    public_key:     ML-DSA (FIPS 204, formerly CRYSTALS-Dilithium) public key
     identity_hash:  SHA3-256(public_key)  // short identifier
     created:        timestamp
     entity_type:    HUMAN | AI | DEVICE | ORGANIZATION | COMPOSITE

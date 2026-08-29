@@ -44,7 +44,7 @@ metadata budget). Layered answer:
    single ceiling for every record kind — 64 entries × 8 KB values, bounded
    above by the 64 KiB whole-record cap (`MAX_RECORD_BYTES`), which binds
    first, so the practical channel is <64 KiB/record. Protocol records (epoch
-   seals with Dilithium3-signed sortition proofs — SHA3-based, not a full
+   seals with ML-DSA-65 (FIPS 204, "Dilithium3")-signed sortition proofs — SHA3-based, not a full
    RFC-9381 VRF — ~3.3 KB each) need the headroom; differential per-kind caps
    were considered and rejected — they add a wire-validation surface
    (kind-claim gaming; two ceilings to keep consistent with the Dilithium3-VRF

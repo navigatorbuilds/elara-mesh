@@ -155,7 +155,7 @@ the key lands in the *default* dir, not yours):
 ./target/release/elara-node --config elara-node.toml
 ```
 
-Your identity (Profile A: Dilithium3 + SPHINCS+ dual-signature) lands in
+Your identity (Profile A: ML-DSA-65 (FIPS 204, "Dilithium3") + SPHINCS+ dual-signature) lands in
 `data/identity.json` — **back it up; it is your node.** For a node you intend
 to keep, set `ELARA_IDENTITY_PASSPHRASE` before both commands to encrypt the
 key at rest (AES-256-GCM + Argon2id); without it the key is stored in plaintext

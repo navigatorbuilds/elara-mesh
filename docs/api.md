@@ -261,7 +261,7 @@ curl -X POST http://localhost:9473/records \
 {"accepted": true, "id": "01234567-..."}
 ```
 
-The record must be signed with Dilithium3. The node verifies the signature before accepting.
+The record must be signed with ML-DSA-65 (FIPS 204, "Dilithium3"). The node verifies the signature before accepting.
 
 ### `GET /records`
 

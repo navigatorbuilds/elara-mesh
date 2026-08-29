@@ -154,7 +154,7 @@ authorization-aware access model (loopback-only or principal-authenticated).
 differentiator made runnable, with **zero infrastructure and no feature flags**
 — `cargo run --example mandate_demo` builds against the core verifier alone
 (`crate::mandate`), so it runs from a clean clone in seconds. It uses three real
-Dilithium3 identities (principal / agent / impostor), really signs and verifies
+ML-DSA-65 (FIPS 204, "Dilithium3") identities (principal / agent / impostor), really signs and verifies
 every carrier record, and judges five acts through `evaluate_mandate_v0` — the
 *same* pure function `GET /mandate/status/{record_id}` calls (only the storage
 backend is swapped for an in-memory `MandateResolver`, which is exactly what the

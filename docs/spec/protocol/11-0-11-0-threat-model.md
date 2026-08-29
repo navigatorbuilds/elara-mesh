@@ -14,7 +14,7 @@ Before analyzing specific attacks, we define the adversary model:
 **Assumptions:**
 
 - **Honest majority:** At least 2/3 of staked weight in any zone is held by honest nodes (standard BFT assumption)
-- **Cryptographic hardness:** NIST PQC primitives (Dilithium, Kyber, SPHINCS+) remain computationally infeasible to break for the claimed security levels
+- **Cryptographic hardness:** NIST PQC primitives (ML-DSA (FIPS 204, "Dilithium"), Kyber, SPHINCS+) remain computationally infeasible to break for the claimed security levels
 - **Network model:** Asynchronous with eventual delivery — messages may be delayed arbitrarily but are eventually delivered to honest nodes
 - **No trusted hardware:** The protocol does not assume TEEs, secure enclaves, or tamper-proof devices. Security derives from cryptography and economics, not hardware trust.
 - **Rational actors:** Witness nodes are economically rational — they will not spend resources on actions that reduce their expected returns

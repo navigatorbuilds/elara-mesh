@@ -33,7 +33,7 @@ echo "agent: $AG"
 ```
 
 (`--entity ai` is a first-class identity type. `--profile A` adds SPHINCS+
-dual-signing if you want both PQ families; B is Dilithium3-only and faster.)
+dual-signing if you want both PQ families; B is ML-DSA-65 (FIPS 204, "Dilithium3")-only and faster.)
 Both files are written mode 0600 and contain secret keys — back them up.
 
 ## 2. Boot your chain

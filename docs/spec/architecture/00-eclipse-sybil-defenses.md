@@ -4,5 +4,5 @@
 - S/Kademlia disjoint parallel lookups (d=4 → 99% success with 20% adversaries)
 - Outbound peer preference
 - PoW on identity (existing)
-- Dilithium3 signed peer records (post-quantum — unique to Elara)
+- ML-DSA-65 (FIPS 204, "Dilithium3") signed peer records (post-quantum — unique to Elara)
 

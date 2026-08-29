@@ -23,7 +23,7 @@ behind the `cli` feature; JsValue conversion only behind `wasm`.
 
 ## Usage
 
-Verify an epoch seal offline — against a Dilithium3 anchor you pin, with no
+Verify an epoch seal offline — against a ML-DSA-65 (FIPS 204, "Dilithium3") anchor you pin, with no
 network, no node, and no private keys:
 
 ```rust

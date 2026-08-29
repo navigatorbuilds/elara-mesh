@@ -5,7 +5,7 @@ ValidationRecord {
     id:            UUID v7 (time-ordered)
     version:       protocol version
     content_hash:  SHA3-256(content)
-    creator:       public key (CRYSTALS-Dilithium)
+    creator:       public key (ML-DSA (FIPS 204, formerly CRYSTALS-Dilithium))
     timestamp:     local ISO-8601 + vector clock position
     parents:       [record_id, ...] (DAG references)
     classification: PUBLIC | PRIVATE | RESTRICTED | SOVEREIGN

@@ -16,7 +16,7 @@ public testnet node, or your own).
 | `elara_sign`     | local | builds the canonical to-sign bytes for transfer / stake / unstake / burn / witness |
 
 The split between `elara_sign` (build) and `elara_record` / `elara_witness`
-(submit) keeps Dilithium3 private keys out of the MCP server process — the
+(submit) keeps ML-DSA-65 (FIPS 204, "Dilithium3") private keys out of the MCP server process — the
 agent's wallet (browser, hardware, or `elara-cli`) signs the bytes and hands
 the signature back. This is the right default for "AI agent has cryptographic
 identity": the tool runner handles canonicalization, the wallet handles keys.

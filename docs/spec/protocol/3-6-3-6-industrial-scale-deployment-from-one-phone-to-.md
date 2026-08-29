@@ -11,7 +11,7 @@ A single fabrication facility operates 10,000 sensors — vibration monitors on 
 ```
 10,000 sensors × 1 reading/second × 86,400 seconds/day = 864,000,000 readings/day
 
-Without batch signing (individual Dilithium3 signatures):
+Without batch signing (individual ML-DSA-65 (FIPS 204, "Dilithium3") signatures):
   864M readings × 3,309 bytes per signature = 2.86 TB/day in signatures alone
 
 With Profile C batch signing (1,000 readings per batch):

@@ -211,7 +211,7 @@ cd /opt/elara && sudo systemctl enable --now elara-node
 - **Witnesses** records created by other nodes (earns beats)
 - **Stores** the full DAG (contributes to network resilience)
 - **Gossips** records to peers (keeps the network connected)
-- **Validates** signatures using post-quantum cryptography (Dilithium3)
+- **Validates** signatures using post-quantum cryptography (ML-DSA-65 (FIPS 204, "Dilithium3"))
 
 ## Need Help?
 

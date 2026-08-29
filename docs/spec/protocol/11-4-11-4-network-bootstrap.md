@@ -42,7 +42,7 @@ A snapshot is authoritative state, not a replay hint. It includes:
 - The set of record IDs whose beat ops have already been applied to that ledger (`applied_record_ids`). This set is what lets a bootstrapping node seed its `CF_APPLIED` dedup column family, so any pre-snapshot record re-delivered via delta sync or gossip is recognized as already-accounted-for and skipped at the ledger-apply gate — no double-apply, regardless of gossip redelivery order.
 - The finalized-record set, last-seal metadata per zone, genesis state, and bootstrap phase.
 - A snapshot timestamp (`snapshot_timestamp`), which is the cursor the subsequent delta-sync loop resumes from.
-- A Dilithium3 signature over the canonical serialization, signed by the emitting archive node's identity key. The signer's public key is embedded so verifiers need no out-of-band trust.
+- A ML-DSA-65 (FIPS 204, "Dilithium3") signature over the canonical serialization, signed by the emitting archive node's identity key. The signer's public key is embedded so verifiers need no out-of-band trust.
 
 **Bootstrap algorithm.** A joining node:
 

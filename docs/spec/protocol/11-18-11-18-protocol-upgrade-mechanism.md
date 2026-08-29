@@ -41,7 +41,7 @@ If a cryptographic algorithm is broken or a critical vulnerability is discovered
 3. If approved: 30-day transition (vs. normal 180 days)
 4. Anchor nodes enforce the new version; other nodes have 30 days to upgrade
 
-The emergency mechanism is intentionally rare and high-threshold. It exists for true existential threats (e.g., quantum computing breaks Dilithium earlier than expected), not for feature additions.
+The emergency mechanism is intentionally rare and high-threshold. It exists for true existential threats (e.g., quantum computing breaks ML-DSA (FIPS 204, "Dilithium") earlier than expected), not for feature additions.
 
 **Algorithm deprecation lifecycle:**
 

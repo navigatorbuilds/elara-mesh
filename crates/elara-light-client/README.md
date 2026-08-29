@@ -46,7 +46,7 @@ a caller can feed a raw endpoint payload straight in.
 
 This crate covers the storage-free, **signature-free** half of the trust chain —
 the part a phone or browser must run locally. Verifying a fetched seal record's
-Dilithium3 signature against an anchor set stays in the Elara Protocol node,
+ML-DSA-65 (FIPS 204, "Dilithium3") signature against an anchor set stays in the Elara Protocol node,
 which owns the `ValidationRecord` wire type. The hashing is pinned to SHA3-256 at
 the same `sha3` minor the node resolves, so a proof the node produces folds
 byte-identically here. `#![forbid(unsafe_code)]`.

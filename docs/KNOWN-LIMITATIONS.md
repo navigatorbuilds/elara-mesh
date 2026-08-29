@@ -49,7 +49,7 @@ gap). Three prerequisites, then one call:
    `admin_listen_addr` only if you changed or disabled the data plane and
    want a dedicated admin port.
 2. **Admin keypair (one-time).** `elara-cli pq-admin-keygen` produces a
-   Dilithium3 keypair JSON; authorize its public key on the node via the
+   ML-DSA-65 (FIPS 204, "Dilithium3") keypair JSON; authorize its public key on the node via the
    `ELARA_ADMIN_PUBKEYS` environment variable (e.g. a systemd drop-in).
    Bearer-token auth was removed (PQ-R7) — admin calls are PQ-signed.
 3. **Per-call header.** `admin-sign` binds the exact method + request target —

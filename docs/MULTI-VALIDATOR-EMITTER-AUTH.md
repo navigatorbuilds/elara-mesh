@@ -112,7 +112,7 @@ deterministic design:
 - **Inline detached signatures, not a quorum-certificate record.** The privileged record
   carries `Vec<(signer_identity, dilithium3_sig[, sphincs_sig])>`. Verify each over the
   *same canonical payload bytes*; accept iff **≥M distinct members of the consensus-pinned
-  set** signed. (BLS aggregation is unavailable — Dilithium3/SPHINCS+ don't aggregate; N
+  set** signed. (BLS aggregation is unavailable — ML-DSA-65 (FIPS 204, "Dilithium3")/SPHINCS+ don't aggregate; N
   individual verifications are required, acceptable because privileged ops are low-frequency.)
   - *Rejected: quorum-certificate-as-separate-record* — it puts an "is the cert finalized?"
     read into the privileged-op apply path. That is a node-local **mutable finality-state**

@@ -14,5 +14,5 @@ Every validation record carries a classification level that determines what the 
 
 **RESTRICTED** — Key-group access. The content hash is encrypted to a set of public keys. Only designated parties can verify the content. The network validates the structural integrity of the record without accessing the encrypted payload.
 
-**SOVEREIGN** — Maximum privacy. Multi-key authorization required for any access. Time-locked release optional. Validator nodes process the proof without any visibility into the content or the classification metadata. (SOVEREIGN additionally *specifies* wrapping the creator's identity in a ZKP — design-stage; in Phase 1 identity is bound by the record's Dilithium3 signature. See §5.3.)
+**SOVEREIGN** — Maximum privacy. Multi-key authorization required for any access. Time-locked release optional. Validator nodes process the proof without any visibility into the content or the classification metadata. (SOVEREIGN additionally *specifies* wrapping the creator's identity in a ZKP — design-stage; in Phase 1 identity is bound by the record's ML-DSA-65 (FIPS 204, "Dilithium3") signature. See §5.3.)
 

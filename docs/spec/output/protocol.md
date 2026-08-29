@@ -230,7 +230,7 @@ When a creator produces work, the node:
 
 1. Computes a cryptographic hash of the content (SHA3-256)
 2. Creates a validation record containing: content hash, creator's public key, timestamp, causal references to prior work, and classification level (public/private/restricted/sovereign)
-3. Signs the validation record with the creator's private key (CRYSTALS-Dilithium)
+3. Signs the validation record with the creator's private key (ML-DSA (FIPS 204, formerly CRYSTALS-Dilithium))
 4. Appends the signed record to the local DAG
 5. Optionally wraps the content hash in a privacy commitment for private/restricted work (Phase 1: SHA3-256 commitment; a genuine zero-knowledge proof is design-stage — see §5.3)
 
@@ -401,7 +401,7 @@ ValidationRecord {
     id:            UUID v7 (time-ordered)
     version:       protocol version
     content_hash:  SHA3-256(content)
-    creator:       public key (CRYSTALS-Dilithium)
+    creator:       public key (ML-DSA (FIPS 204, formerly CRYSTALS-Dilithium))
     timestamp:     local ISO-8601 + vector clock position
     parents:       [record_id, ...] (DAG references)
     classification: PUBLIC | PRIVATE | RESTRICTED | SOVEREIGN
@@ -497,7 +497,7 @@ Step 2: The device produces data — a sensor reading, a firmware hash,
 
 Step 3: The device validates.
         → Computes SHA3-256 hash of the data
-        → Signs the hash with its private key (CRYSTALS-Dilithium)
+        → Signs the hash with its private key (ML-DSA (FIPS 204, formerly CRYSTALS-Dilithium))
         → Creates a ValidationRecord with timestamp and device public key
         → Appends to local DAG
         → Done. Sub-second on commodity hardware.
@@ -544,7 +544,7 @@ A single fabrication facility operates 10,000 sensors — vibration monitors on 
 ```
 10,000 sensors × 1 reading/second × 86,400 seconds/day = 864,000,000 readings/day
 
-Without batch signing (individual Dilithium3 signatures):
+Without batch signing (individual ML-DSA-65 (FIPS 204, "Dilithium3") signatures):
   864M readings × 3,309 bytes per signature = 2.86 TB/day in signatures alone
 
 With Profile C batch signing (1,000 readings per batch):
@@ -763,7 +763,7 @@ The protocol is PQ across signatures, KEM, VRF, hashes, AEAD, and KDFs. The sess
 
 Critical validation records (anchor attestations, identity registrations, governance votes) carry dual signatures:
 
-1. **Primary:** CRYSTALS-Dilithium (fast, compact)
+1. **Primary:** ML-DSA (FIPS 204, formerly CRYSTALS-Dilithium) (fast, compact)
 2. **Secondary:** SPHINCS+ (conservative, hash-based)
 
 This provides defense-in-depth against cryptographic breakthroughs. Dilithium (lattice-based) and SPHINCS+ (hash-based) rely on fundamentally different mathematical assumptions — lattice problems and hash function preimage resistance, respectively. Breaking one does not weaken the other. If lattice-based cryptography falls to an unforeseen advance, the hash-based signature remains valid; if hash functions are weakened, the lattice signature still holds. Both must be broken simultaneously to forge a dual-signed record. The protocol's trust model degrades gracefully rather than failing catastrophically.
@@ -791,7 +791,7 @@ This agility is a core survival mechanism. A protocol that hardcodes today's bes
 | Smart contract platforms | ECDSA (secp256k1)                               | No           | Research phase   |
 | High-throughput ledgers  | Ed25519                                         | No           | Not started      |
 | DAG-based systems        | Ed25519 / hash-based OTS                        | Partial      | In progress      |
-| Elara Protocol           | Dilithium (all profiles) + SPHINCS+ (Profile A) | **Yes**      | **Native**       |
+| Elara Protocol           | ML-DSA (FIPS 204, "Dilithium") (all profiles) + SPHINCS+ (Profile A) | **Yes**      | **Native**       |
 
 The Elara Protocol's signature layer is post-quantum from genesis — there is no legacy migration burden. However, algorithm agility (Section 4.4) ensures the protocol can adopt future PQC standards as the field evolves; "quantum-safe at launch" is not the same as "cryptographically final." (The ZKP layer uses classical elliptic curves in Phase 1 — see Section 11.26 for the quantum migration path.)
 
@@ -897,7 +897,7 @@ session_key       = HKDF-SHA256(salt = transcript_hash,
                                 len  = 32)
 ```
 
-The session key feeds ChaCha20-Poly1305 AEAD for all subsequent frames. The transcript signature binds both peers to the full handshake under their long-term Dilithium3 identity keys, preventing transcript-substitution attacks. The hybrid construction means a successful attack must break both X25519 (classical, trivially broken by Shor's algorithm) **and** ML-KEM-768 (post-quantum, lattice-based, currently no known attack) — the protocol fails open only if both substrates fall.
+The session key feeds ChaCha20-Poly1305 AEAD for all subsequent frames. The transcript signature binds both peers to the full handshake under their long-term ML-DSA-65 (FIPS 204, "Dilithium3") identity keys, preventing transcript-substitution attacks. The hybrid construction means a successful attack must break both X25519 (classical, trivially broken by Shor's algorithm) **and** ML-KEM-768 (post-quantum, lattice-based, currently no known attack) — the protocol fails open only if both substrates fall.
 
 Constants are normative:
 
@@ -976,7 +976,7 @@ Every validation record carries a classification level that determines what the 
 
 **RESTRICTED** — Key-group access. The content hash is encrypted to a set of public keys. Only designated parties can verify the content. The network validates the structural integrity of the record without accessing the encrypted payload.
 
-**SOVEREIGN** — Maximum privacy. Multi-key authorization required for any access. Time-locked release optional. Validator nodes process the proof without any visibility into the content or the classification metadata. (SOVEREIGN additionally *specifies* wrapping the creator's identity in a ZKP — design-stage; in Phase 1 identity is bound by the record's Dilithium3 signature. See §5.3.)
+**SOVEREIGN** — Maximum privacy. Multi-key authorization required for any access. Time-locked release optional. Validator nodes process the proof without any visibility into the content or the classification metadata. (SOVEREIGN additionally *specifies* wrapping the creator's identity in a ZKP — design-stage; in Phase 1 identity is bound by the record's ML-DSA-65 (FIPS 204, "Dilithium3") signature. See §5.3.)
 
 ### 5.3 ZKP Construction
 
@@ -1044,7 +1044,7 @@ ZK proofs and post-quantum signatures serve orthogonal purposes and compose natu
 - **ZK proof = privacy** — hides content while proving properties about it
 - **PQC signature = authenticity** — proves the record was created by a specific identity
 
-Dilithium3 signature verification inside R1CS is infeasible: lattice operations produce millions of constraints, making proof generation take minutes and CRS generation hours. The pragmatic split keeps both properties without combining them inside a single circuit. A PRIVATE record carries both: a privacy proof (Phase 1: a SHA3-256 commitment; design-stage: a ZK proof — verifiable without learning the content) and a PQC signature (anyone can verify who created it).
+ML-DSA-65 (FIPS 204, "Dilithium3") signature verification inside R1CS is infeasible: lattice operations produce millions of constraints, making proof generation take minutes and CRS generation hours. The pragmatic split keeps both properties without combining them inside a single circuit. A PRIVATE record carries both: a privacy proof (Phase 1: a SHA3-256 commitment; design-stage: a ZK proof — verifiable without learning the content) and a PQC signature (anyone can verify who created it).
 
 #### 5.3.4 Trusted Setup
 
@@ -1097,7 +1097,7 @@ An Elara identity requires only entropy and computation — available on any dev
 
 ```
 ElaraIdentity {
-    public_key:     CRYSTALS-Dilithium public key
+    public_key:     ML-DSA (FIPS 204, formerly CRYSTALS-Dilithium) public key
     identity_hash:  SHA3-256(public_key)  // short identifier
     created:        timestamp
     entity_type:    HUMAN | AI | DEVICE | ORGANIZATION | COMPOSITE
@@ -1242,7 +1242,7 @@ Interplanetary communication is expensive. The Deep Space Network allocates band
 
 **Bloom filters** — probabilistic data structures (~10 bytes per element) that answer "does this record exist in your zone?" with a small false-positive rate. Bloom filter exchange enables efficient detection of missing records before full synchronization begins.
 
-**Compression** — validation records use a compact binary encoding (not JSON or XML) with protocol-buffer-style varint encoding. A typical PUBLIC validation record is approximately 4–5 KB, dominated by the Dilithium3 signature (~3.3 KB).
+**Compression** — validation records use a compact binary encoding (not JSON or XML) with protocol-buffer-style varint encoding. A typical PUBLIC validation record is approximately 4–5 KB, dominated by the ML-DSA-65 (FIPS 204, "Dilithium3") signature (~3.3 KB).
 
 ### 7.5 Zone Architecture
 
@@ -1286,7 +1286,7 @@ A TransitionSeal is a record of kind `zone_transition` carrying:
 - `boundary_function` — the invariant that defines how account identities route to child zones. The canonical form is `account_belongs_to_child(account_hash, child_zone) = SHA3(account_hash || parent_zone) ∈ child_range(child_zone)`, where each child_zone is allocated a contiguous range over the 2^256 hash space. This is deterministic, stateless, and verifiable by any light client given the TransitionSeal.
 - `effective_epoch` — the epoch at which the transition takes effect. All records with timestamp `< effective_epoch × epoch_interval` route under the old mapping; records at or after route under the new mapping.
 - `proposer` — the anchor node proposing the transition.
-- `anchor_signatures` — an M-of-N Dilithium3 multi-signature over the canonical bytes, where M = 2/3 of the anchor pool at proposal time, and N is the pool size. Under 2^128 quantum attack models, M-of-N over Dilithium3 is the same security level as a single Dilithium3 signature (per §4.2), so the multi-sig is for trust distribution, not additional cryptographic strength.
+- `anchor_signatures` — an M-of-N ML-DSA-65 (FIPS 204, "Dilithium3") multi-signature over the canonical bytes, where M = 2/3 of the anchor pool at proposal time, and N is the pool size. Under 2^128 quantum attack models, M-of-N over Dilithium3 is the same security level as a single Dilithium3 signature (per §4.2), so the multi-sig is for trust distribution, not additional cryptographic strength.
 
 **Invariants.** A TransitionSeal is valid iff:
 
@@ -1629,7 +1629,7 @@ Before analyzing specific attacks, we define the adversary model:
 **Assumptions:**
 
 - **Honest majority:** At least 2/3 of staked weight in any zone is held by honest nodes (standard BFT assumption)
-- **Cryptographic hardness:** NIST PQC primitives (Dilithium, Kyber, SPHINCS+) remain computationally infeasible to break for the claimed security levels
+- **Cryptographic hardness:** NIST PQC primitives (ML-DSA (FIPS 204, "Dilithium"), Kyber, SPHINCS+) remain computationally infeasible to break for the claimed security levels
 - **Network model:** Asynchronous with eventual delivery — messages may be delayed arbitrarily but are eventually delivered to honest nodes
 - **No trusted hardware:** The protocol does not assume TEEs, secure enclaves, or tamper-proof devices. Security derives from cryptography and economics, not hardware trust.
 - **Rational actors:** Witness nodes are economically rational — they will not spend resources on actions that reduce their expected returns
@@ -1826,7 +1826,7 @@ A snapshot is authoritative state, not a replay hint. It includes:
 - The set of record IDs whose beat ops have already been applied to that ledger (`applied_record_ids`). This set is what lets a bootstrapping node seed its `CF_APPLIED` dedup column family, so any pre-snapshot record re-delivered via delta sync or gossip is recognized as already-accounted-for and skipped at the ledger-apply gate — no double-apply, regardless of gossip redelivery order.
 - The finalized-record set, last-seal metadata per zone, genesis state, and bootstrap phase.
 - A snapshot timestamp (`snapshot_timestamp`), which is the cursor the subsequent delta-sync loop resumes from.
-- A Dilithium3 signature over the canonical serialization, signed by the emitting archive node's identity key. The signer's public key is embedded so verifiers need no out-of-band trust.
+- A ML-DSA-65 (FIPS 204, "Dilithium3") signature over the canonical serialization, signed by the emitting archive node's identity key. The signer's public key is embedded so verifiers need no out-of-band trust.
 
 **Bootstrap algorithm.** A joining node:
 
@@ -2526,7 +2526,7 @@ If a cryptographic algorithm is broken or a critical vulnerability is discovered
 3. If approved: 30-day transition (vs. normal 180 days)
 4. Anchor nodes enforce the new version; other nodes have 30 days to upgrade
 
-The emergency mechanism is intentionally rare and high-threshold. It exists for true existential threats (e.g., quantum computing breaks Dilithium earlier than expected), not for feature additions.
+The emergency mechanism is intentionally rare and high-threshold. It exists for true existential threats (e.g., quantum computing breaks ML-DSA (FIPS 204, "Dilithium") earlier than expected), not for feature additions.
 
 **Algorithm deprecation lifecycle:**
 
@@ -2666,7 +2666,7 @@ This allows global trust calculations to discount zones with low participation o
 **Solution: Self-Verifiable Records with Merkle Proofs**
 
 A record is self-verifiable when it carries:
-1. The record itself (signed with Dilithium3/SPHINCS+)
+1. The record itself (signed with ML-DSA-65 (FIPS 204, "Dilithium3")/SPHINCS+)
 2. A Merkle proof: the sibling hashes from the record's leaf to the zone's Merkle root
 3. The epoch seal containing the Merkle root (signed by the zone's anchor, attested by witnesses)
 4. The epoch seal chain: `previous_seal_hash` links back to genesis
@@ -2994,7 +2994,7 @@ The Elara Protocol chooses structural hostility to content distribution over eit
 
 > **Implementation status — DESIGN-STAGE.** This chapter analyses the quantum exposure of the *specified* zk-SNARK construction (§5.3). The Phase-1 runtime implements SHA3-256 commitments (hash-based, already PQ-acceptable), **not** elliptic-curve zk-SNARKs — so the BN254/pairing exposure described here is a property of the design-stage target, not of deployed code.
 
-**The gap:** The protocol's signatures are post-quantum (Dilithium, SPHINCS+). But the zero-knowledge proofs *specified* for PRIVATE and RESTRICTED classifications (Section 5.3) would rely on zk-SNARKs — which typically use elliptic curve pairings (BN254, BLS12-381). These pairings are **not quantum-safe.** Shor's algorithm breaks them.
+**The gap:** The protocol's signatures are post-quantum (ML-DSA (FIPS 204, "Dilithium"), SPHINCS+). But the zero-knowledge proofs *specified* for PRIVATE and RESTRICTED classifications (Section 5.3) would rely on zk-SNARKs — which typically use elliptic curve pairings (BN254, BLS12-381). These pairings are **not quantum-safe.** Shor's algorithm breaks them.
 
 This means: a quantum adversary could forge zero-knowledge proofs, creating fake PRIVATE validations that appear genuine. The signature is quantum-safe, but the proof is not. This is a real gap.
 
@@ -3245,7 +3245,7 @@ This section provides concrete estimates based on the cryptographic primitives s
 
 | Record Type                               | Approximate Size | Breakdown                                                                                |
 |-------------------------------------------|------------------|------------------------------------------------------------------------------------------|
-| PUBLIC validation record                  | ~4-5 KB          | Content hash (32 B) + Dilithium3 signature (~3.3 KB) + metadata/causal anchors (~500 B)  |
+| PUBLIC validation record                  | ~4-5 KB          | Content hash (32 B) + ML-DSA-65 (FIPS 204, "Dilithium3") signature (~3.3 KB) + metadata/causal anchors (~500 B)  |
 | PRIVATE validation (Phase 1: SHA3 commitment) | ~4-5 KB      | SHA3-256 commitment proof + PQC signature (~3.3 KB) + commitment (32 B) + metadata (~500 B). The Groth16 zk-SNARK (288 B proof) is the design-stage target (§5.3). |
 | PRIVATE validation (Phase 2, hybrid ZKP)  | ~55 KB           | Hybrid lattice+classical proof (~50 KB) + PQC signature (~3.3 KB) + metadata (~500 B)    |
 | SOVEREIGN validation (target: zk-STARK)   | ~100-200 KB      | STARK proof (variable, typically 50-200 KB) + PQC signature (~3.3 KB) + metadata. Planned; current runtime ships SHA3-256 commitments (`src/crypto/commitment.rs`) in this slot. |
@@ -3596,7 +3596,7 @@ A `cognitive_checkpoint` ValidationRecord contains a `CognitiveDigest` in its me
 cognitive_checkpoint ValidationRecord {
     id:             UUID v7
     content_hash:   SHA3-256(canonical_json(CognitiveDigest))
-    creator:        node identity (Dilithium3 public key)
+    creator:        node identity (ML-DSA-65 (FIPS 204, "Dilithium3") public key)
     timestamp:      ISO-8601 + vector clock
     parents:        [previous_checkpoint_id, latest_dag_record_id]
     classification: PUBLIC (default) or PRIVATE

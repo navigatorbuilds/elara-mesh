@@ -14,5 +14,5 @@ Interplanetary communication is expensive. The Deep Space Network allocates band
 
 **Bloom filters** — probabilistic data structures (~10 bytes per element) that answer "does this record exist in your zone?" with a small false-positive rate. Bloom filter exchange enables efficient detection of missing records before full synchronization begins.
 
-**Compression** — validation records use a compact binary encoding (not JSON or XML) with protocol-buffer-style varint encoding. A typical PUBLIC validation record is approximately 4–5 KB, dominated by the Dilithium3 signature (~3.3 KB).
+**Compression** — validation records use a compact binary encoding (not JSON or XML) with protocol-buffer-style varint encoding. A typical PUBLIC validation record is approximately 4–5 KB, dominated by the ML-DSA-65 (FIPS 204, "Dilithium3") signature (~3.3 KB).
 

@@ -38,7 +38,7 @@ A TransitionSeal is a record of kind `zone_transition` carrying:
 - `boundary_function` — the invariant that defines how account identities route to child zones. The canonical form is `account_belongs_to_child(account_hash, child_zone) = SHA3(account_hash || parent_zone) ∈ child_range(child_zone)`, where each child_zone is allocated a contiguous range over the 2^256 hash space. This is deterministic, stateless, and verifiable by any light client given the TransitionSeal.
 - `effective_epoch` — the epoch at which the transition takes effect. All records with timestamp `< effective_epoch × epoch_interval` route under the old mapping; records at or after route under the new mapping.
 - `proposer` — the anchor node proposing the transition.
-- `anchor_signatures` — an M-of-N Dilithium3 multi-signature over the canonical bytes, where M = 2/3 of the anchor pool at proposal time, and N is the pool size. Under 2^128 quantum attack models, M-of-N over Dilithium3 is the same security level as a single Dilithium3 signature (per §4.2), so the multi-sig is for trust distribution, not additional cryptographic strength.
+- `anchor_signatures` — an M-of-N ML-DSA-65 (FIPS 204, "Dilithium3") multi-signature over the canonical bytes, where M = 2/3 of the anchor pool at proposal time, and N is the pool size. Under 2^128 quantum attack models, M-of-N over Dilithium3 is the same security level as a single Dilithium3 signature (per §4.2), so the multi-sig is for trust distribution, not additional cryptographic strength.
 
 **Invariants.** A TransitionSeal is valid iff:
 

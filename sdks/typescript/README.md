@@ -22,7 +22,7 @@ const proof   = await agent.prove();      // Merkle proof against latest seal
 
 The SDK is read-and-submit only — signing happens in your wallet (browser,
 hardware, `elara-cli`, or `@elara/mcp-server`'s `elara_sign` tool). Records
-arrive at `agent.record()` already carrying a Dilithium3 signature:
+arrive at `agent.record()` already carrying a ML-DSA-65 (FIPS 204, "Dilithium3") signature:
 
 ```ts
 await agent.record({
