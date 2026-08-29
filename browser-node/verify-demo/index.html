@@ -659,6 +659,18 @@
   });
 
   // ── WebMCP tool layer ────────────────────────────────────────────────────
+  // ── Load-time warm-up ────────────────────────────────────────────────────
+  // Fetch every same-site demo asset once at load, so that AFTER load the page
+  // needs no further network — the airplane-mode demo depends on this, and the
+  // submission text promises it. Failures stay silent here: every click path
+  // still handles a cold cache with its own error message.
+  Promise.allSettled([
+    loadSample(),
+    loadBundlesText(),
+    (async () => { if (receiptCache === null) receiptCache = await (await fetch("./sample-receipt.json")).text(); })(),
+    (async () => { if (receiptPinsCache === null) receiptPinsCache = await (await fetch("./sample-receipt-pins.json")).text(); })(),
+  ]);
+
   // Exposes the SAME offline verifier the buttons above drive, as tools an
   // agent can call in its own browser. Verification is only meaningful
   // client-side: an agent that asks a server "is this evidence valid?" has
