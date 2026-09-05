@@ -2466,11 +2466,14 @@ async fn insert_record_inner(state: &Arc<NodeState>, mut record: ValidationRecor
         // Stakers and per-zone RTT must be snapshotted BEFORE taking the
         // epoch_state read lock to avoid holding multiple locks across awaits.
         //
-        // LIVENESS-1 (2026-05-11): staker view is filtered to VRF-registered
-        // anchor identities ONLY — mirrors the proposer-side filter in
-        // `epoch::should_propose_seal`. Symmetric construction is what
-        // keeps the rank-derivation consensus rule consistent across the
-        // proposer/verifier boundary.
+        // LIVENESS-1 (2026-05-11; wording corrected 2026-09-05, R1-X1-V-P):
+        // the staker view is anchor-CF identities ∩ `staked > 0`
+        // (`state.rs` staked-anchor accessor). Every member is VRF-registered
+        // because VRF-registration records are what populate the anchor CF
+        // (`rocks.rs`) — a property of the CF's writer, NOT a filter applied
+        // here. Mirrors the proposer side (`epoch::should_propose_seal`);
+        // the symmetric construction keeps the rank-derivation consensus
+        // rule consistent across the proposer/verifier boundary.
         // Shared staked-anchor view (verifier side) — the SAME memoized
         // accessor the proposer (`epoch::should_propose_seal`) reads, so the
         // rank this verifier derives uses a bit-identical staked set. Symmetry
@@ -2533,7 +2536,7 @@ async fn insert_record_inner(state: &Arc<NodeState>, mut record: ValidationRecor
                     }
                 }
             }
-            Err(ref e) if e.to_string().contains("stake-unverifiable") => {
+            Err(ref e) if e.to_string().contains(crate::network::epoch::SEAL_DEFER_MARKER_STAKE) => {
                 // R1-X1-V (2026-09-02): non-genesis fast-forward seal whose creator
                 // is not admissible by our staked-anchor set (unstaked, or the set
                 // is still in the bootstrap regime). Same DEFER shape as B7 below:
@@ -2543,7 +2546,15 @@ async fn insert_record_inner(state: &Arc<NodeState>, mut record: ValidationRecor
                 // never shadow each other. Own counter: a sustained climb = a
                 // self-declared-anchor probe, or an honest joiner whose ledger
                 // view has not caught up (R1-X1-V-K).
-                state.epoch_seal_fastforward_unstaked_deferred_total.fetch_add(1, Relaxed);
+                // R1-X1-V-P (2026-09-05): the partition-merge arm now carries
+                // the same gate (same marker, own arm tag) — counted on its own
+                // canary so a same-height / behind-tip rival probe is
+                // distinguishable from a fast-forward probe.
+                if e.to_string().contains(crate::network::epoch::SEAL_DEFER_MARKER_PARTITION_MERGE) {
+                    state.epoch_seal_partition_merge_unstaked_deferred_total.fetch_add(1, Relaxed);
+                } else {
+                    state.epoch_seal_fastforward_unstaked_deferred_total.fetch_add(1, Relaxed);
+                }
                 return Err(ElaraError::Ledger(e.to_string()));
             }
             Err(ref e) if e.to_string().contains("VRF") => {
@@ -2562,16 +2573,27 @@ async fn insert_record_inner(state: &Arc<NodeState>, mut record: ValidationRecor
                 // registration syncs (honest self-heal), while a forged seal simply
                 // never verifies and ages out of the bounded retry buffer. Our own
                 // freshly-signed seal (is_self) is still accepted unconditionally.
-                if !is_self && e.to_string().contains("VRF-unverifiable") {
-                    state.epoch_seal_fastforward_vrf_deferred_total.fetch_add(1, Relaxed);
+                if !is_self && e.to_string().contains(crate::network::epoch::SEAL_DEFER_MARKER_VRF) {
+                    // R1-X1-V-P (2026-09-05): arm-aware counting — the
+                    // partition-merge arm emits the same marker with its own tag.
+                    if e.to_string().contains(crate::network::epoch::SEAL_DEFER_MARKER_PARTITION_MERGE) {
+                        state.epoch_seal_partition_merge_vrf_deferred_total.fetch_add(1, Relaxed);
+                    } else {
+                        state.epoch_seal_fastforward_vrf_deferred_total.fetch_add(1, Relaxed);
+                    }
                     return Err(ElaraError::Ledger(e.to_string()));
                 }
                 // Accept if: self-created, no VRF key registered, or registry only
                 // has the 32-byte hash (can't verify without full 1,952-byte key).
                 // Dilithium3 signature was already verified — identity is proven.
-                // NOTE (B7): this `vrf_pk.is_none()` acceptance survives only for
-                // the NON-fast-forward classes (sequential / partition-merge), which
-                // cannot wedge the tip; the fast-forward class is intercepted above.
+                // NOTE (B7; corrected 2026-09-05 by R1-X1-V-P): this
+                // `vrf_pk.is_none()` acceptance now survives only for the
+                // SEQUENTIAL class (held by the rank check and the register-time
+                // chain-link check) and for our own seals. The fast-forward AND
+                // partition-merge classes are both intercepted above under the
+                // `VRF-unverifiable` marker — B7's "partition-merge cannot wedge
+                // the tip" premise was false (equal-epoch canonicalization in
+                // `register_seal` is lex-min record hash with no weight gate).
                 let has_full_pk = vrf_pk.as_ref().is_some_and(|pk| !pk.full_pk().is_empty());
                 if is_self || vrf_pk.is_none() || !has_full_pk {
                     // fold_sunset fence on the VRF-lenient accept arm too
@@ -9979,6 +10001,204 @@ mod r1x1v_ingest_fastforward_tests {
                 .load(Relaxed),
             ff_before,
             "the stake arm must not fire on the VRF-unverifiable path: {msg}"
+        );
+    }
+
+    // ─── R1-X1-V-P (2026-09-05): partition-merge arm dispatch ────────────────
+    // The same gate on the OTHER arm that can rewrite the canonical tip: a
+    // same-height rival (gap 0) or a behind-tip seal (gap <= 100) from a
+    // creator our staked-anchor set does not admit is PARKED on the arm's own
+    // counters, the fast-forward counters stay put, and the registered tip
+    // (`latest_seal_id`) is never swapped. Each of these FAILS on the pre-fix
+    // tree at the `expect_err`: the ungated arm ACCEPTED the seal into
+    // `register_seal`. The tip-swap assertions are the secondary check — a
+    // gap-0 rival canonicalizes only when it wins the lex-min hash race and a
+    // behind-tip seal never does (`should_canonicalize` is strict `<`), so the
+    // deterministic pre-fix defect is the acceptance, not the swap.
+
+    /// Seed OUR canonical tip at `epoch` as a REGISTERED seal with a known id,
+    /// so an incoming seal at `epoch` routes to the partition-merge arm
+    /// (`epoch == our_latest`, gap 0) and a seal below it is a behind-tip merge.
+    fn seed_registered_tip(state: &Arc<NodeState>, zone: &crate::ZoneId, epoch: u64) {
+        let tip = crate::network::epoch::ParsedEpochSeal {
+            zone: zone.clone(),
+            epoch_number: epoch,
+            start: 0.0,
+            end: 40.0,
+            record_count: 0,
+            merkle_root: [0u8; 32],
+            previous_seal_hash: [0u8; 32],
+            vrf_output: None,
+            vrf_proof: None,
+            record_hashes: vec![],
+            zone_balance_total: None,
+            zone_registry_root: None,
+            zone_registry_delta: None,
+            seal_zone_count: None,
+            aggregator_rank: 0,
+            account_smt_root: None,
+            drand_pulse: None,
+            xzone_dest_finality_committees: None,
+            wire_version: crate::wire::CURRENT_SIGNING_VERSION,
+            sparse_merkle_root: None,
+        };
+        state.epoch.write().unwrap().register_seal(
+            &tip,
+            "r1x1p-our-tip",
+            crate::crypto::hash::sha3_256(b"r1x1p-our-tip"),
+        );
+    }
+
+    fn tip_seal_id(state: &Arc<NodeState>, zone: &crate::ZoneId) -> Option<String> {
+        state.epoch.read().unwrap().latest_seal_id.get(zone).cloned()
+    }
+
+    /// R1-X1-V-P (seat-4 addition): the per-zone VRF ring, cloned. A parked
+    /// rival must never reach `register_seal`, so the ring must be untouched
+    /// (V2 ring displacement — `upsert_vrf_ring` has no admission gate).
+    fn r1x1p_ring(state: &Arc<NodeState>, zone: &crate::ZoneId) -> Option<crate::network::epoch::VrfRing> {
+        state.epoch.read().unwrap().vrf_history.get(zone).cloned()
+    }
+
+    /// A foreign anchor's seal claiming `epoch`, signed in ONE pass (its private
+    /// EpochState tip seeded at `epoch - 1`; no post-sign mutation — see
+    /// `build_foreign_ff_seal` for why).
+    fn build_foreign_seal_at(state: &Arc<NodeState>, epoch: u64) -> (ValidationRecord, VrfPublicKey) {
+        let foreign = Identity::generate(EntityType::Device, CryptoProfile::ProfileB)
+            .expect("generate foreign anchor identity");
+        let zone = crate::ZoneId::from_legacy(0);
+        let vrf_sk = VrfSecretKey::generate().unwrap();
+        let vrf_pk = vrf_sk.public_key();
+        let mut es = EpochState::new();
+        es.latest_epoch.insert(zone.clone(), epoch - 1);
+        let (record, _) = create_epoch_seal(
+            &foreign,
+            &*state.rocks,
+            &es,
+            zone,
+            50.0,
+            200.0,
+            Some(&vrf_sk),
+            None,
+        )
+        .expect("build partition-merge seal");
+        (record, vrf_pk)
+    }
+
+    /// The four creator-gate canaries, snapshotted so each test can prove WHICH
+    /// arm fired and that the others did not.
+    #[derive(Debug, PartialEq, Eq)]
+    struct R1x1pGateCounters {
+        pm_unstaked: u64,
+        pm_vrf: u64,
+        ff_unstaked: u64,
+        ff_vrf: u64,
+    }
+
+    fn r1x1p_gate_counters(state: &Arc<NodeState>) -> R1x1pGateCounters {
+        R1x1pGateCounters {
+            pm_unstaked: state.epoch_seal_partition_merge_unstaked_deferred_total.load(Relaxed),
+            pm_vrf: state.epoch_seal_partition_merge_vrf_deferred_total.load(Relaxed),
+            ff_unstaked: state.epoch_seal_fastforward_unstaked_deferred_total.load(Relaxed),
+            ff_vrf: state.epoch_seal_fastforward_vrf_deferred_total.load(Relaxed),
+        }
+    }
+
+    /// Shared body: seed our tip at 10, ingest a foreign seal at `rival_epoch`
+    /// (10 = same-height rival, 5 = behind-tip merge) with the foreign VRF key
+    /// registered → the STAKE arm of the partition-merge gate must park it.
+    async fn r1x1p_assert_unstaked_rival_parked(rival_epoch: u64) {
+        let state = build_test_node_state();
+        let zone = crate::ZoneId::from_legacy(0);
+        seed_registered_tip(&state, &zone, 10);
+        let (seal, vrf_pk) = build_foreign_seal_at(&state, rival_epoch);
+        register_full_vrf(&state, &creator_identity_hash(&seal), &vrf_pk);
+        let before = r1x1p_gate_counters(&state);
+        let ring_before = r1x1p_ring(&state, &zone);
+
+        let msg = insert_record_synced(&state, seal)
+            .await
+            .expect_err("rival seal from an unstaked creator must be parked, never canonicalized")
+            .to_string();
+
+        assert!(
+            crate::network::gossip::is_retryable_ingest_rejection(&msg),
+            "R1-X1-V-P park must classify retryable: {msg}"
+        );
+        assert!(
+            msg.contains("partition-merge") && msg.contains("stake-unverifiable"),
+            "must be the partition-merge STAKE arm: {msg}"
+        );
+        let after = r1x1p_gate_counters(&state);
+        assert_eq!(
+            after,
+            R1x1pGateCounters { pm_unstaked: before.pm_unstaked + 1, ..before },
+            "exactly the partition-merge stake canary must move (epoch {rival_epoch}): {msg}"
+        );
+        assert_eq!(
+            tip_seal_id(&state, &zone).as_deref(),
+            Some("r1x1p-our-tip"),
+            "the canonical tip must not be swapped (epoch {rival_epoch})"
+        );
+        assert_eq!(zone_tip(&state, &zone), Some(10), "the tip height must not move");
+        assert_eq!(
+            r1x1p_ring(&state, &zone),
+            ring_before,
+            "a parked rival must leave the VRF ring untouched (V2 ring displacement)"
+        );
+    }
+
+    /// gap 0 — the V-P headline: a same-height rival whose record hash sorts
+    /// below ours would have SWAPPED `latest_seal_id` / `latest_seal_hash` in
+    /// `register_seal` and forked this node at its next sequential seal.
+    #[tokio::test]
+    async fn r1x1p_ingest_same_height_rival_from_unstaked_creator_is_parked() {
+        r1x1p_assert_unstaked_rival_parked(10).await;
+    }
+
+    /// gap 5 — a behind-tip merge from an unstaked creator (would have rewritten
+    /// that epoch's super-seal window and VRF ring).
+    #[tokio::test]
+    async fn r1x1p_ingest_behind_tip_rival_from_unstaked_creator_is_parked() {
+        r1x1p_assert_unstaked_rival_parked(5).await;
+    }
+
+    /// No registered VRF key for the rival's creator → the partition-merge VRF
+    /// arm parks it (its own canary), and the stake arm must not fire.
+    #[tokio::test]
+    async fn r1x1p_ingest_unregistered_vrf_rival_uses_vrf_arm_not_stake() {
+        let state = build_test_node_state();
+        let zone = crate::ZoneId::from_legacy(0);
+        seed_registered_tip(&state, &zone, 10);
+        let (seal, _vrf_pk) = build_foreign_seal_at(&state, 10);
+        let before = r1x1p_gate_counters(&state);
+        let ring_before = r1x1p_ring(&state, &zone);
+
+        let msg = insert_record_synced(&state, seal)
+            .await
+            .expect_err("VRF-unverifiable same-height rival must be parked")
+            .to_string();
+
+        assert!(
+            crate::network::gossip::is_retryable_ingest_rejection(&msg),
+            "must be retryable: {msg}"
+        );
+        assert!(
+            msg.contains("partition-merge") && msg.contains("VRF-unverifiable"),
+            "must be the partition-merge VRF arm: {msg}"
+        );
+        let after = r1x1p_gate_counters(&state);
+        assert_eq!(
+            after,
+            R1x1pGateCounters { pm_vrf: before.pm_vrf + 1, ..before },
+            "exactly the partition-merge VRF canary must move: {msg}"
+        );
+        assert_eq!(tip_seal_id(&state, &zone).as_deref(), Some("r1x1p-our-tip"));
+        assert_eq!(zone_tip(&state, &zone), Some(10));
+        assert_eq!(
+            r1x1p_ring(&state, &zone),
+            ring_before,
+            "a parked rival must leave the VRF ring untouched (V2 ring displacement)"
         );
     }
 }

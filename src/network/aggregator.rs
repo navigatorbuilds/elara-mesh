@@ -165,8 +165,16 @@ pub fn rank_of(
 ///
 /// `beacon = SHA3-256(prev_epoch_seal_hash || epoch_number_be || zone_str)`
 ///
-/// Chaining to the previous seal hash binds rank selection to a value no
-/// single node controls at proposal time — preventing beacon grinding.
+/// Chaining to the previous seal hash binds rank selection to the prior seal.
+///
+/// ⚠ This does NOT prevent beacon grinding, and the comment here claimed it did
+/// until 2026-09-05 (R1-X1-D synthesis §A5, independently re-verified in that
+/// item's Step-0 pass). The previous seal is authored by the previous sealer,
+/// whose free fields feed this hash, so the derived rank is a public function of
+/// a value that sealer controls: it can search them to steer its own next rank.
+/// Tracked as R1-X1-F2 (HIGH, hard-fork-class, audit-first) — chaining the beacon
+/// off `latest_vrf_output` so rank must consume the VRF output. Until F2 ships,
+/// treat rank order as steerable by the preceding sealer, not as a fair draw.
 ///
 /// Genesis epoch (no prior seal): `prev_epoch_seal_hash = [0u8; 32]`.
 pub fn chained_beacon(

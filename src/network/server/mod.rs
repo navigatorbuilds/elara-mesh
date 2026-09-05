@@ -7924,6 +7924,43 @@ pub(crate) async fn metrics_body_tiered(
          elara_epoch_seal_fastforward_unstaked_deferred_total {r1x1v_ff_unstaked}\n\
     ");
 
+    // R1-X1-V-P (2026-09-05): the partition-merge arm's two DEFER canaries —
+    // the same gate as the fast-forward pair above, on the arm that feeds
+    // `register_seal`'s equal-epoch canonicalization. Must-stay-0 (deploy-verify
+    // greps both).
+    let r1x1p_pm_vrf = state.epoch_seal_partition_merge_vrf_deferred_total.load(std::sync::atomic::Ordering::Relaxed);
+    let r1x1p_pm_unstaked = state.epoch_seal_partition_merge_unstaked_deferred_total.load(std::sync::atomic::Ordering::Relaxed);
+    let body = format!("{body}\
+         # HELP elara_epoch_seal_partition_merge_vrf_deferred_total Non-genesis epoch seals deferred on the partition-merge arm of `verify_epoch_seal_inner` (same height as, or behind, the local tip) because the proposer VRF key is not locally registered. Parked + retried, never applied — closes the R1-X1-V-P same-height-rival tip swap. Healthy = 0.\n\
+         # TYPE elara_epoch_seal_partition_merge_vrf_deferred_total counter\n\
+         elara_epoch_seal_partition_merge_vrf_deferred_total {r1x1p_pm_vrf}\n\
+         # HELP elara_epoch_seal_partition_merge_unstaked_deferred_total Non-genesis epoch seals deferred on the partition-merge arm of `verify_epoch_seal_inner` because the creator is not admissible by the local staked-anchor set (unstaked, or fewer than BOOTSTRAP_MIN_STAKERS staked anchors). Parked + retried, never applied — closes the R1-X1-V-P unstaked same-height / behind-tip rival vector. Healthy = 0.\n\
+         # TYPE elara_epoch_seal_partition_merge_unstaked_deferred_total counter\n\
+         elara_epoch_seal_partition_merge_unstaked_deferred_total {r1x1p_pm_unstaked}\n\
+    ");
+    // R1-X1-V-P seat-4: park-lane pressure. S1 turns an accepted hostile class
+    // into a PARKED class; parking is unconditional for non-stale seal-class
+    // rejections and the seal lane is one global FIFO of GOSSIP_RETRY_CAP, so
+    // eviction pressure must be visible.
+    let park_evicted = state.gossip_park_evicted_total.load(std::sync::atomic::Ordering::Relaxed);
+    let park_requeue_dropped = state.gossip_park_requeue_dropped_total.load(std::sync::atomic::Ordering::Relaxed);
+    let park_lane_seal_len = state.gossip_retry.lock_recover().len();
+    let park_lane_super_seal_len = state.super_seal_retry.lock_recover().len();
+    let body = format!("{body}\
+         # HELP elara_gossip_park_evicted_total Parked record ids front-evicted because a park lane (seal or super-seal) was at cap. Every first-hop seal-class rejection parks unconditionally, so a climb means honest parked seals are being pushed out (R1-X1-V-P Q7). Healthy = 0.\n\
+         # TYPE elara_gossip_park_evicted_total counter\n\
+         elara_gossip_park_evicted_total {park_evicted}\n\
+         # HELP elara_gossip_park_requeue_dropped_total Parked entries dropped by the drain's re-queue because the lane refilled during the drain (attempts lost; was uncounted before R1-X1-V-P). Healthy = 0.\n\
+         # TYPE elara_gossip_park_requeue_dropped_total counter\n\
+         elara_gossip_park_requeue_dropped_total {park_requeue_dropped}\n\
+         # HELP elara_gossip_park_lane_seal_len Current occupancy of the seal park lane (cap GOSSIP_RETRY_CAP = 1024).\n\
+         # TYPE elara_gossip_park_lane_seal_len gauge\n\
+         elara_gossip_park_lane_seal_len {park_lane_seal_len}\n\
+         # HELP elara_gossip_park_lane_super_seal_len Current occupancy of the super-seal park lane (cap SUPER_SEAL_RETRY_CAP = 256).\n\
+         # TYPE elara_gossip_park_lane_super_seal_len gauge\n\
+         elara_gossip_park_lane_super_seal_len {park_lane_super_seal_len}\n\
+    ");
+
     let c2_chain_rejected = state.epoch_seal_chain_link_rejected_total.load(std::sync::atomic::Ordering::Relaxed);
     let body = format!("{body}\
          # HELP elara_epoch_seal_chain_link_rejected_total Strictly-sequential epoch seals (epoch == our tip+1) REJECTED at ingest register-time because their previous_seal_hash did not chain to our canonical tip — the authoritative C2 chain-link guard under the epoch write lock (the verify-time check is advisory). A valid signature proves WHO signed, not which chain; this blocks a key-holding Byzantine anchor from advancing latest_seal_hash onto a fork. Healthy = 0; a sustained climb = a forged-seal fork probe.\n\
@@ -10413,7 +10450,7 @@ pub(crate) async fn metrics_body_tiered(
          # HELP elara_pinned_anchor_seal_rejections_total SEC-REGENESIS-FENCE: seals refused canonicalization because their record hash contradicted the compiled-in PINNED_CHAIN_ANCHORS entry at the pinned (zone, epoch). Enforced at BOTH tip-mutation funnels — apply_canonical_seal (zone seals: live ingest, boot replay, recovery, orphan promotion) and register_global_seal (cross-zone escalation seals). Any non-zero value is a security signal: this node was served a seal from the wrong chain (frozen pre-re-genesis history or a forgery) at the anchor point.\n\
          # TYPE elara_pinned_anchor_seal_rejections_total counter\n\
          elara_pinned_anchor_seal_rejections_total {pin_seal_rejections}\n\
-         # HELP elara_same_epoch_seal_demotions_total Monotonic count of same-epoch seal DEMOTIONS observed at seal-registration ingest, across BOTH the default lex-min path (register_seal) and the weight-reconcile path (register_seal_with_reconcile). Distinct from elara_orphan_seals_total, which only counts the weight-reconcile path's orphan-ring inserts; this counts every same-epoch canonical swap/drop regardless of the partition_merge_weight_reconcile flag. Non-zero rate is expected during partition heals / dual-proposer races. Feeds the cross-zone coverage scan (xzone_demotion_probe).\n\
+         # HELP elara_same_epoch_seal_demotions_total Monotonic count of same-epoch seal DEMOTIONS observed at seal-registration ingest, across BOTH the default lex-min path (register_seal) and the weight-reconcile path (register_seal_with_reconcile). Distinct from elara_orphan_seals_total, which only counts the weight-reconcile path's orphan-ring inserts; this counts every same-epoch canonical swap/drop regardless of the partition_merge_weight_reconcile flag. R1-X1-V-P (2026-09-05): this is the pre-fix DETECTOR for a same-height rival swapping the canonical tip (V1). Post-fix a same-epoch demotion requires an ADMISSIBLE non-genesis creator (VRF-registered AND in the staked-anchor set at >= BOOTSTRAP_MIN_STAKERS) or the genesis authority itself, so in the bootstrap regime (< 3 stakers) ANY non-zero value is a canary to investigate (a genesis restart re-propose, or a rival that should have been deferred); at >= 3 stakers a low rate is expected during partition heals / dual-proposer races among admissible stakers. Feeds the cross-zone coverage scan (xzone_demotion_probe).\n\
          # TYPE elara_same_epoch_seal_demotions_total counter\n\
          elara_same_epoch_seal_demotions_total {xz_same_epoch_demotions}\n\
          # HELP elara_xzone_demoted_seal_covers_lock_total Monotonic count of demoted-seal coverage scans where the demoted seal covered at least one in-flight cross-zone transfer (any status) still tracked in cross_zone.pending. Context for the claimed-lock trip-wire below: a non-zero value here with a zero claimed counter means demotions are touching cross-zone locks but none had been claimed yet (the claim gate's frozen-committee finality check still protects conservation).\n\

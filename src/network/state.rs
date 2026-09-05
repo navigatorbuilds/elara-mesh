@@ -2257,6 +2257,16 @@ pub struct NodeState {
     pub gossip_retry_total: AtomicU64,
     /// Gossip metrics: successful DHT fallback retries.
     pub gossip_retry_success_total: AtomicU64,
+    /// R1-X1-V-P (2026-09-05, seat-4): park-lane PRESSURE. Front-evictions at
+    /// lane cap in `gossip::park_retryable_in_lane` (either lane). Every
+    /// first-hop seal-class rejection parks unconditionally, so a flood of
+    /// non-admissible seals evicts HONEST parked seals ahead of them (Q7
+    /// starvation channel). Healthy = 0; a climb = lane saturation.
+    pub gossip_park_evicted_total: AtomicU64,
+    /// R1-X1-V-P (2026-09-05, seat-4): entries silently dropped by the drain's
+    /// re-queue because the lane refilled during the drain
+    /// (`gossip::retry_parked_lane`). Was uncounted before. Healthy = 0.
+    pub gossip_park_requeue_dropped_total: AtomicU64,
     /// Peer reconnection attempts to seed peers.
     pub peer_reconnect_attempts_total: AtomicU64,
     /// Successful peer reconnections.
@@ -2621,6 +2631,23 @@ pub struct NodeState {
     /// view has not caught up (cross-check the B7 counter above and the
     /// `snapshot_bootstrap_*` counters before paging).
     pub epoch_seal_fastforward_unstaked_deferred_total: AtomicU64,
+    /// R1-X1-V-P (2026-09-05): non-genesis seals DEFERRED on the PARTITION-MERGE
+    /// arm of `verify_epoch_seal_inner` (same height as our tip, or behind it
+    /// within the 100-epoch window) because the proposer's VRF key is not
+    /// locally registered. That arm feeds `register_seal`, whose equal-epoch
+    /// canonicalization is lex-min record hash with NO weight on the default
+    /// path — an unverifiable creator could swap our canonical tip and fork
+    /// this node at its next sequential seal. Parked (retryable), NOT applied.
+    /// Healthy = 0; a climb = a same-height / behind-tip rival probe, or an
+    /// honest partition peer whose VRF registration has not synced yet.
+    pub epoch_seal_partition_merge_vrf_deferred_total: AtomicU64,
+    /// R1-X1-V-P (2026-09-05): the stake-gate sibling for the partition-merge
+    /// arm — creator not admissible by this node's staked-anchor set (not
+    /// staked, or bootstrap regime). Parked (retryable), NOT applied: a
+    /// self-declared anchor with a valid VRF proof but no stake cannot
+    /// canonicalize a same-height rival or rewrite a behind-tip epoch's
+    /// super-seal window. Healthy = 0 (must-stay-0 canary).
+    pub epoch_seal_partition_merge_unstaked_deferred_total: AtomicU64,
     /// C2: strictly-sequential epoch seals REJECTED at register-time because their
     /// `previous_seal_hash` does not chain to our canonical tip (forged chain-link /
     /// Byzantine-anchor fork attempt). The authoritative chain-link check runs under
@@ -4462,6 +4489,8 @@ impl NodeState {
             gossip_push_failed_total: AtomicU64::new(0),
             gossip_retry_total: AtomicU64::new(0),
             gossip_retry_success_total: AtomicU64::new(0),
+            gossip_park_evicted_total: AtomicU64::new(0),
+            gossip_park_requeue_dropped_total: AtomicU64::new(0),
             peer_reconnect_attempts_total: AtomicU64::new(0),
             peer_reconnect_success_total: AtomicU64::new(0),
             peer_auto_banned_total: AtomicU64::new(0),
@@ -4553,6 +4582,8 @@ impl NodeState {
             demoted_seal_scan_queue_dropped_total: AtomicU64::new(0),
             epoch_seal_fastforward_vrf_deferred_total: AtomicU64::new(0),
             epoch_seal_fastforward_unstaked_deferred_total: AtomicU64::new(0),
+            epoch_seal_partition_merge_vrf_deferred_total: AtomicU64::new(0),
+            epoch_seal_partition_merge_unstaked_deferred_total: AtomicU64::new(0),
             epoch_seal_chain_link_rejected_total: AtomicU64::new(0),
             epoch_phantom_tip_suspected_total: AtomicU64::new(0),
             epoch_successor_chainable_total: AtomicU64::new(0),

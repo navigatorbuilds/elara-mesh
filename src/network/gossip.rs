@@ -284,7 +284,7 @@ pub(crate) fn is_retryable_ingest_rejection(err_str: &str) -> bool {
         // proposer's VRF registration record syncs the retry verifies. A forged
         // seal never verifies and ages out of the bounded retry buffer — it is NOT
         // permanent-cached, keeping the honest-joiner self-heal path open.
-        || err_str.contains("VRF-unverifiable")
+        || err_str.contains(crate::network::epoch::SEAL_DEFER_MARKER_VRF)
         // R1-X1-V (2026-09-02): the fast-forward STAKE gate's deferral — the
         // creator is not admissible by the local staked-anchor set. Same
         // contract as B7: an honest joiner's ledger view catches up and the
@@ -293,7 +293,7 @@ pub(crate) fn is_retryable_ingest_rejection(err_str: &str) -> bool {
         // `dispose_seal_ingest_failure` BEFORE `should_permanent_reject` on
         // every ingress path, so this clause is the acceptance-criterion pin
         // plus the guard for the non-seal consumers of this classifier.
-        || err_str.contains("stake-unverifiable")
+        || err_str.contains(crate::network::epoch::SEAL_DEFER_MARKER_STAKE)
 }
 
 /// B6 fork-safety linchpin: decide whether a rejected gossip-push record id may
@@ -655,6 +655,9 @@ pub(crate) fn park_retryable_in_lane(state: &NodeState, lane: ParkLane, record_i
     }
     if q.len() >= lane.cap() {
         q.pop_front();
+        // R1-X1-V-P (seat-4): the evicted entry was an HONEST-or-hostile parked
+        // id we will never retry — count it so lane saturation is visible.
+        state.gossip_park_evicted_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
     q.push_back((record_id.to_string(), attempts));
 }
@@ -700,8 +703,15 @@ async fn retry_parked_lane(state: &Arc<NodeState>, base_url: &str, lane: ParkLan
     let requeue = |entries: Vec<(String, u8)>| {
         let mut q = lane.queue(state).lock_recover();
         for entry in entries {
-            if !q.iter().any(|(id, _)| id == &entry.0) && q.len() < lane.cap() {
+            if q.iter().any(|(id, _)| id == &entry.0) {
+                continue;
+            }
+            if q.len() < lane.cap() {
                 q.push_back(entry);
+            } else {
+                // R1-X1-V-P (seat-4): the lane refilled during the drain; this
+                // entry is dropped (attempts lost). Previously silent.
+                state.gossip_park_requeue_dropped_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
         }
     };

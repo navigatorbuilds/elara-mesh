@@ -5764,6 +5764,34 @@ async fn apply_state_delta_for_repair(
 /// `state.peers` across awaits (endpoints snapshotted, lock dropped before
 /// HTTP fan-out). The apply path never holds `ledger.write()` across the
 /// disk I/O — the SMT flush runs in `spawn_blocking`.
+/// O9 bootstrap-source hardening (R1-X1-D Commit C, synthesis §B4/§D0).
+///
+/// Picks the peer a FRESH node takes its whole ledger from. The tips this ranks
+/// come from unauthenticated `/metrics` bodies (`poll_peer_tips`), so with a
+/// plain `max_by_key` a single peer advertising an inflated tip is *guaranteed*
+/// to be selected — it only has to claim the largest number. At three or more
+/// candidates we take the MEDIAN tip instead: one liar can no longer steer the
+/// choice, because to reach the median position it must out-number the honest
+/// peers rather than out-bid them.
+///
+/// Below three candidates there is no median to speak of and the old
+/// highest-tip behaviour is kept unchanged — with one or two peers a fresh node
+/// has no way to cross-check anyway, and preferring a lower tip there would only
+/// slow honest joins.
+///
+/// Deterministic by construction: sorted on `(tip, url)`, so equal tips resolve
+/// by URL and the same input always yields the same peer. This is steering, not
+/// a security boundary — it raises the cost of the fresh-join steer; it does not
+/// authenticate the tip (that is R1-X1-E).
+fn select_bootstrap_peer(peer_tips: &[(String, u64)]) -> Option<(String, u64)> {
+    if peer_tips.len() < 3 {
+        return peer_tips.iter().max_by_key(|(_, tip)| *tip).cloned();
+    }
+    let mut ranked: Vec<(String, u64)> = peer_tips.to_vec();
+    ranked.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+    ranked.get(ranked.len() / 2).cloned()
+}
+
 async fn chain_divergence_monitor_loop(state: Arc<NodeState>) {
     use std::sync::atomic::Ordering;
 
@@ -5854,9 +5882,11 @@ async fn chain_divergence_monitor_loop(state: Arc<NodeState>) {
                 // Truly fresh, never bootstrapped: route to snapshot-bootstrap (a
                 // wholesale ledger replace carrying every scalar + the stakes map),
                 // NOT the subset state-delta repair.
-                if let Some((max_peer_url, _)) =
-                    peer_tips.iter().max_by_key(|(_, tip)| *tip).cloned()
-                {
+                // O9 / Commit C: MEDIAN tip at >=3 peers, not max — see
+                // `select_bootstrap_peer`. Only this fresh-node site changes; the
+                // repair-path pick below still takes the max tip deliberately (it
+                // has local history and a trust set, and is threshold-gated).
+                if let Some((max_peer_url, _)) = select_bootstrap_peer(&peer_tips) {
                     warn!(
                         "chain-divergence: FRESH node (local_tip=0, total_supply=0) behind {} epochs vs {} — routing to snapshot-bootstrap, NOT repair",
                         max_peer_tip, max_peer_url,
@@ -8553,6 +8583,58 @@ elara_epoch_seals_total 99999\n\
             Some(("http://b".to_string(), 30u64)),
             "max_by_key must select the highest-tip peer"
         );
+    }
+
+    #[test]
+    fn o9_bootstrap_peer_ignores_a_single_inflated_tip() {
+        // THE point of Commit C: one peer lying about its tip on unauthenticated
+        // /metrics must NOT be able to make itself the source a fresh node takes
+        // its whole ledger from. Under the old max_by_key it was guaranteed to win.
+        let tips = vec![
+            ("http://honest-a".to_string(), 100u64),
+            ("http://honest-b".to_string(), 101u64),
+            ("http://liar".to_string(), 9_999_999u64),
+        ];
+        let picked = crate::select_bootstrap_peer(&tips).expect("3 peers must yield a pick");
+        assert_ne!(picked.0, "http://liar", "the inflated tip must not be selected");
+        assert_eq!(picked, ("http://honest-b".to_string(), 101u64), "median tip wins");
+    }
+
+    #[test]
+    fn o9_bootstrap_peer_keeps_max_below_three_peers() {
+        // Below 3 there is no median; old behaviour is kept so honest joins are
+        // not slowed. Documented deliberately — this is the residual, not an oversight.
+        let one = vec![("http://a".to_string(), 5u64)];
+        assert_eq!(
+            crate::select_bootstrap_peer(&one),
+            Some(("http://a".to_string(), 5u64))
+        );
+        let two = vec![
+            ("http://a".to_string(), 5u64),
+            ("http://b".to_string(), 50u64),
+        ];
+        assert_eq!(
+            crate::select_bootstrap_peer(&two),
+            Some(("http://b".to_string(), 50u64)),
+            "with 2 peers the highest tip is still taken"
+        );
+        assert_eq!(crate::select_bootstrap_peer(&[]), None, "empty yields None");
+    }
+
+    #[test]
+    fn o9_bootstrap_peer_is_deterministic_on_equal_tips() {
+        // Same input must always give the same peer: ties resolve by URL, so the
+        // pick cannot drift between ticks (or between nodes) on identical data.
+        let tips = vec![
+            ("http://c".to_string(), 42u64),
+            ("http://a".to_string(), 42u64),
+            ("http://b".to_string(), 42u64),
+        ];
+        let first = crate::select_bootstrap_peer(&tips);
+        let mut shuffled = tips.clone();
+        shuffled.reverse();
+        assert_eq!(first, crate::select_bootstrap_peer(&shuffled), "order-independent");
+        assert_eq!(first, Some(("http://b".to_string(), 42u64)), "median by (tip,url)");
     }
 
     #[test]

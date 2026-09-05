@@ -4025,7 +4025,18 @@ pub async fn compute_epoch_headers(
     // 18K+ seals and current_epoch was 9500 — light clients calling
     // `/headers/from/{epoch}` would never see the post-cache seals, so
     // `LightClient::verify_account` failed with "no Gap-1 headers" forever.
-    let bypass_cache = since.is_some_and(|s| s > 0);
+    //
+    // 2026-09-05: this was `since.is_some_and(|s| s > 0)`, which carved out the
+    // ONE value a genesis cold-start uses. `/headers/from/0` sets `since=Some(0)`
+    // (`headers_from_epoch` always inserts the path param), so it fell to the
+    // cache and served whatever stale slice was there — measured on the live seed:
+    // `from/0` → `{"total":5}` while `from/1` → `{"total":2000}`, same start epoch,
+    // against 58,614 seals actually held. That is the failure the paragraph below
+    // describes, recurring with 5 instead of 0 — so the "never trust an EMPTY
+    // cached vec" guard never fires. An explicit `since` is a light-client request
+    // at any value including zero; only the bare `/epochs/headers` call (since =
+    // None, the "show me everything" explorer use case) keeps the cache.
+    let bypass_cache = since.is_some();
 
     // Try cache first. If stale, return stale + refresh in background.
     //
@@ -4050,12 +4061,24 @@ pub async fn compute_epoch_headers(
                     all_headers = cached.clone();
                     if when.elapsed() < EPOCH_HEADERS_TTL {
                         need_compute = false;
-                    } else {
-                        // Stale: return old data, refresh in background
-                        drop(guard);
-                        warm_stats_cache(state.clone());
-                        need_compute = false;
                     }
+                    // Stale (TTL expired) ⇒ leave `need_compute` true and fall
+                    // through to a real recompute below.
+                    //
+                    // 2026-09-05: this arm used to read "Stale: return old data,
+                    // refresh in background", call `warm_stats_cache(...)`, and
+                    // set `need_compute = false`. But `warm_stats_cache` was
+                    // hollowed to `{}` when `/dag/stats` moved to O(1) atomic
+                    // loads — its own comment says it was "kept as a public
+                    // no-op so existing boot-side and stale-cache callers keep
+                    // compiling". So the branch served stale data and scheduled
+                    // nothing: the TTL never caused a refresh. Measured on the
+                    // live seed, 31 min past the 1800 s TTL with the tip 31
+                    // epochs further on, this endpoint returned the identical
+                    // cached page. Honouring the TTL costs one bounded
+                    // CF_EPOCHS scan (O(returned), `limit` ≤ 2000, ~175 µs per
+                    // epoch measured) — the same work every `since`-bearing
+                    // request already does on the bypass path.
                 }
                 // Empty cache + non-empty CF_EPOCHS = poisoned; fall
                 // through to recompute below.  Recompute will repopulate
@@ -4065,7 +4088,12 @@ pub async fn compute_epoch_headers(
         }
     }
 
-    if need_compute && all_headers.is_empty() {
+    // `need_compute` alone — NOT `need_compute && all_headers.is_empty()`.
+    // The old conjunct meant a stale but NON-EMPTY cache skipped the recompute
+    // (true && false), so the only cache that ever refreshed was an empty one
+    // and the TTL was load-bearing for nothing. `all_headers` still holds the
+    // stale clone here; the recompute below overwrites it.
+    if need_compute {
         // DISC-5: prefer the CF_EPOCHS prefix-iter index (O(seals_returned),
         // not O(all_records)). Falls back to legacy CF_RECORDS scan if the
         // index hasn't been backfilled yet — keeps fresh nodes serving until
@@ -4179,10 +4207,32 @@ pub async fn compute_epoch_headers(
             })
         });
 
-        // Only cache when we computed the full unfiltered list (since=0 path).
-        // The bypass_cache path returns a since-filtered subset and would
-        // poison the cache with a partial view.
-        if !bypass_cache {
+        // Only cache a computation that was genuinely COMPLETE and UNSCOPED.
+        //
+        // 2026-09-05: this used to test `!bypass_cache` alone. That reasons
+        // about ONE scoping dimension — `since` — but `computed` is also
+        // bounded by `limit` (the scan stops at `results.len() >= limit_inner`)
+        // and narrowed by `zone_filter`. So a `?limit=5` request stored its
+        // 5-entry page, and every later `since = None` reader — which assumes
+        // the value is the whole list — was served those 5 regardless of its
+        // own limit. Measured on the live seed: `?limit=5` followed by
+        // `?limit=2000` returned 5 while the node held 58,700+ headers. The
+        // `?zone=X` form is worse: a scoped query poisons the global view.
+        // Nothing heals it either — the stale branch above calls
+        // `warm_stats_cache`, which is a no-op.
+        //
+        // `computed.len() < limit` means the scan exhausted the data instead of
+        // hitting the cap, i.e. this really is everything there is to see.
+        //
+        // CONSEQUENCE, stated rather than hidden: `limit` is capped at 2000 at
+        // the top of this function, so on a node holding more than 2000 headers
+        // the cache no longer populates at all. That is the correct trade —
+        // serving a partial view as the complete one is a wrong answer, and a
+        // cold recompute is merely a slow one — but it does mean this cache is
+        // effectively inert at production scale. If caching is wanted back,
+        // key it on `(limit, zone_filter)` rather than widening this guard.
+        let computed_is_whole = zone_filter.is_none() && computed.len() < limit;
+        if !bypass_cache && computed_is_whole {
             if let Ok(mut guard) = EPOCH_HEADERS_CACHE.lock() {
                 *guard = Some((std::time::Instant::now(), computed.clone()));
             }
@@ -4515,7 +4565,32 @@ pub async fn compute_checkpoints_from(
         }
     }
 
-    if need_compute && all_checkpoints.is_empty() {
+    // `need_compute` alone — NOT `need_compute && all_checkpoints.is_empty()`.
+    //
+    // 2026-09-05: with that conjunct, a cache that was STALE but non-empty took
+    // `true && false` and skipped the recompute — and since this block is the
+    // only place the cache is ever written, it was never refreshed either. Once
+    // populated, this endpoint served that snapshot for the life of the process
+    // and newly minted super-seals never appeared; the TTL was load-bearing only
+    // for the empty case. The in-tree tell was `reset_super_seals_cache_qqqq()`
+    // in the test module, whose whole job is nulling the cache so a test can see
+    // fresh state — production had no such reset.
+    //
+    // This mirrors the same fix already shipped for `compute_epoch_headers`
+    // (`e91e79e3`), where the freeze was measured live: 31 min past the TTL,
+    // tip 31 epochs on, the identical page returned.
+    //
+    // Cost: one `O(active_zones)` pass over `latest_super_seal` inside
+    // `spawn_blocking`, once per TTL rather than once per process. No
+    // frozen-vs-fresh counter is added, because under this rule a frozen serve
+    // can no longer happen — there is nothing left for such a counter to count.
+    //
+    // Both surfaces get this: the axum route (`:4542`) and the PQ transport
+    // router (`pq_transport/router.rs:3015`) call this same function, and
+    // `light_sync_loop`'s cold start (`light.rs:636`,
+    // `/checkpoints/from/0?limit=2000`) is the production consumer that was
+    // inheriting the frozen baseline.
+    if need_compute {
         // Scale fix (internal design notes rule 9): the previous implementation did a full
         // CF_RECORDS scan (`rocks.for_each_record`) which is O(total_records)
         // and times out at ~350K records. Instead, iterate the bounded

@@ -1,7 +1,7 @@
 ----------------------- MODULE MCInZoneLiveBootstrap -----------------------
 (* In-zone liveness, BOOTSTRAP FREEZE TRAP (staked.len() < 3). The carve-out *)
 (* at aggregator.rs:316 collapses the ladder to a single genesis-only rank, *)
-(* and no bootstrap escalation path (escalation_decision (:359)). Modelled  *)
+(* and no bootstrap escalation path (escalation_decision (:367)). Modelled  *)
 (* as a single rank {0} that is BYZANTINE (genesis offline/equivocating ->   *)
 (* HonestRanks = {}) and EscalationAvailable = FALSE in BOTH cfgs. Nothing   *)
 (* can seal: LiveWithEscalation is VIOLATED with NO safety net — neither the *)

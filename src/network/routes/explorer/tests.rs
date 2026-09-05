@@ -1562,6 +1562,18 @@ async fn s1123_la1_with_relay_propagates_validation_err_without_entering_fetcher
     );
 }
 
+/// Serializes the only two tests that exercise `compute_epoch_headers`' cache
+/// path (`since = None` and `since = Some(0)`). Every other test in this module
+/// passes `Some(1)`, which bypasses `EPOCH_HEADERS_CACHE` entirely — so those
+/// two are the whole contention set for that process-global. Without this,
+/// whichever runs second reads the other's cache state.
+///
+/// `tokio::sync::Mutex`, not `std::sync::Mutex`: the guard is deliberately held
+/// across `compute_epoch_headers(...).await` — that await IS the critical
+/// section — and a std guard held across an await point is
+/// `clippy::await_holding_lock` (`-D warnings` on the `--features node` CI leg).
+static CACHE_PATH_TESTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// `compute_epoch_headers` used to cache the very
 /// first computation indefinitely.  When that first computation ran
 /// before any seals existed, the cache held `Some((t, vec![]))`, and
@@ -1574,6 +1586,13 @@ async fn s1123_la1_with_relay_propagates_validation_err_without_entering_fetcher
 #[tokio::test]
 async fn ops170_empty_cache_recomputes_when_index_has_seals() {
     use crate::network::epoch::{create_epoch_seal, disc5_index_key};
+
+    // This test's fixture IS the pristine global cache — it asserts `total == 0`
+    // on its first call. Any concurrent test that populates the cache makes that
+    // assertion read the other test's data, so both cache-path tests take this
+    // lock. (Added 2026-09-05 with the `since = Some(0)` test below.)
+    let _serial = CACHE_PATH_TESTS.lock().await;
+    *EPOCH_HEADERS_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None;
 
     let state = test_state();
     let z = ZoneId::new("ops170/zone");
@@ -1637,6 +1656,503 @@ async fn ops170_empty_cache_recomputes_when_index_has_seals() {
             .iter()
             .any(|h| h["seal_id"].as_str() == Some(seal_rec.id.as_str())),
         "newly-written seal not in recomputed list: {headers:?}"
+    );
+}
+
+/// Companion to `ops170_empty_cache_recomputes_when_index_has_seals`, which
+/// pins the EMPTY-cache case. This pins the case that guard cannot reach: a
+/// **non-empty but stale** cache served to a genesis cold-start.
+///
+/// `bypass_cache` was `since.is_some_and(|s| s > 0)`, so `since = Some(0)` —
+/// the one value `/headers/from/0` produces, since `headers_from_epoch` always
+/// inserts the path param — fell through to the cache. "Never trust an empty
+/// cached vec" does not fire when the cache holds a few stale entries, so the
+/// client is told the node has that many headers and no more.
+///
+/// Measured on the live seed 2026-09-05 before the fix: `/headers/from/0` →
+/// `{"total":5}` while `/headers/from/1` → `{"total":2000}`, same start epoch,
+/// against 58,614 seals actually held.
+///
+/// Note the shape of the blind spot: every other `compute_epoch_headers` test
+/// passes `None` or `Some(1)`. None passed `Some(0)`.
+#[tokio::test]
+async fn headers_since_zero_bypasses_stale_nonempty_cache() {
+    use crate::network::epoch::{create_epoch_seal, disc5_index_key};
+
+    let state = test_state();
+
+    let write_seal = |zone: ZoneId, start: f64, end: f64| {
+        let epoch_state = state.epoch.read_recover().clone();
+        let (seal_rec, parsed) = create_epoch_seal(
+            &state.identity,
+            state.rocks.as_ref(),
+            &epoch_state,
+            zone.clone(),
+            start,
+            end,
+            None,
+            None,
+        )
+        .expect("create_epoch_seal");
+        state
+            .rocks
+            .put_record(&seal_rec.id, &seal_rec)
+            .expect("put seal");
+        let idx_key = disc5_index_key(parsed.epoch_number, zone.path(), &seal_rec.id);
+        state
+            .rocks
+            .put_cf_raw(crate::storage::rocks::CF_EPOCHS, &idx_key, &[])
+            .expect("put_cf_raw");
+        seal_rec.id
+    };
+
+    // Serialize against OPS-170, the only other test that reads this global.
+    let _serial = CACHE_PATH_TESTS.lock().await;
+
+    // Two seals live in THIS state.
+    let _first = write_seal(ZoneId::new("hz/zone-a"), 100.0, 200.0);
+    let second = write_seal(ZoneId::new("hz/zone-b"), 300.0, 400.0);
+
+    // Seed a stale, NON-empty cache directly rather than warming it through a
+    // `since = None` call. Going through the compute path would populate the
+    // global cache for whoever runs next — which is exactly how the first draft
+    // of this test broke OPS-170 (it asserts `total == 0` on a pristine cache
+    // and read this test's warm entry instead: `left: Some(1), right: Some(0)`).
+    let sentinel = serde_json::json!({
+        "zone": "hz/stale-zone",
+        "epoch_number": 424_242,
+        "seal_id": "stale-cache-sentinel",
+    });
+    *EPOCH_HEADERS_CACHE.lock().unwrap_or_else(|e| e.into_inner()) =
+        Some((std::time::Instant::now(), vec![sentinel]));
+
+    // A genesis cold-start. Pre-fix this served the sentinel and never looked
+    // at CF_EPOCHS; post-fix `since = Some(0)` bypasses the cache entirely, so
+    // the response can only come from this state's own seals.
+    let body = compute_epoch_headers(state.clone(), None, Some(0), 100)
+        .await
+        .expect("since=0 call ok");
+    let total = body["total"].as_u64().unwrap_or(0);
+    let headers = body["headers"].as_array().expect("headers array").clone();
+
+    // Restore the pristine cache BEFORE asserting, so a failure here cannot
+    // cascade into an unrelated OPS-170 failure and misdirect the next reader.
+    *EPOCH_HEADERS_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+
+    assert!(
+        !headers
+            .iter()
+            .any(|h| h["seal_id"].as_str() == Some("stale-cache-sentinel")),
+        "since=0 served the stale cache instead of seeking CF_EPOCHS: {headers:?}"
+    );
+    assert_eq!(
+        total, 2,
+        "since=0 must see both seals held by this state (got total={total})"
+    );
+    assert!(
+        headers
+            .iter()
+            .any(|h| h["seal_id"].as_str() == Some(second.as_str())),
+        "post-cache seal missing from a since=0 response: {headers:?}"
+    );
+}
+
+/// The seam that let the `since = 0` bug ship: the light client had a test
+/// pinning "cold start sends `since = 0`"
+/// (`light.rs::test_compute_zone_pulls_cold_start_returns_single_unfiltered_probe`),
+/// the server had tests for `compute_epoch_headers`, and every one of those
+/// passed `None` or `Some(1)`. Both sides were correct in isolation; nobody
+/// exercised the pair, so a server that mishandled exactly `0` looked green.
+///
+/// This is a COUPLING test, not a bug repro (the repro is
+/// `headers_since_zero_bypasses_stale_nonempty_cache`). It takes `since` from
+/// the client function rather than hardcoding it, so if either side moves —
+/// the client stops sending 0, or the server special-cases it again — the pair
+/// is checked rather than each half separately.
+#[tokio::test]
+async fn light_client_cold_start_since_is_served_by_the_headers_handler() {
+    use crate::network::epoch::{create_epoch_seal, disc5_index_key};
+    use crate::network::light::LightState;
+
+    // Serialize with the other cache-path tests: a `since = 0` request must not
+    // race another test's writes to the process-global header cache.
+    let _serial = CACHE_PATH_TESTS.lock().await;
+    *EPOCH_HEADERS_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+
+    // ── CLIENT SIDE ── what a cold-start light client actually asks for.
+    let client = LightState::new();
+    let pulls = client.compute_zone_pulls();
+    assert_eq!(pulls.len(), 1, "cold start issues one unfiltered probe");
+    let (zone_filter, since) = pulls[0].clone();
+    assert!(zone_filter.is_none(), "cold start must not pin a zone");
+
+    // ── SERVER SIDE ── seed one seal, then answer that exact request.
+    let state = test_state();
+    let zone = ZoneId::new("seam/zone");
+    let epoch_state = state.epoch.read_recover().clone();
+    let (seal_rec, parsed) = create_epoch_seal(
+        &state.identity,
+        state.rocks.as_ref(),
+        &epoch_state,
+        zone.clone(),
+        100.0,
+        200.0,
+        None,
+        None,
+    )
+    .expect("create_epoch_seal");
+    state
+        .rocks
+        .put_record(&seal_rec.id, &seal_rec)
+        .expect("put seal");
+    let idx_key = disc5_index_key(parsed.epoch_number, zone.path(), &seal_rec.id);
+    state
+        .rocks
+        .put_cf_raw(crate::storage::rocks::CF_EPOCHS, &idx_key, &[])
+        .expect("put_cf_raw");
+
+    // `Some(since)` — the client's own value, not a literal.
+    let body = compute_epoch_headers(state, zone_filter, Some(since), 100)
+        .await
+        .expect("headers call ok");
+
+    *EPOCH_HEADERS_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+
+    let total = body["total"].as_u64().unwrap_or(0);
+    assert!(
+        total >= 1,
+        "a cold-start client's own `since = {since}` must return the seal the \
+         server holds (got total={total}) — client and server have drifted apart"
+    );
+    let headers = body["headers"].as_array().expect("headers array");
+    assert!(
+        headers
+            .iter()
+            .any(|h| h["seal_id"].as_str() == Some(seal_rec.id.as_str())),
+        "seeded seal missing from the cold-start response: {headers:?}"
+    );
+}
+
+/// DISAMBIGUATOR for the live `/epochs/headers` under-report measured 2026-09-05
+/// (internal design notes §5-bis):
+/// the public endpoint returned **5** headers with `since = None` while
+/// `?since=0` and `?since=1` returned 2000 on the same node and the same data.
+///
+/// The scan cannot explain it — `since_epoch = since.unwrap_or(0)` (`mod.rs`),
+/// so `None` and `Some(0)` walk CF_EPOCHS identically. Only two things differ on
+/// the `None` path: it consults `EPOCH_HEADERS_CACHE`, and it applies the
+/// canonical-chain filter that the bypass path skips. This test removes the
+/// cache from the equation by nulling it around every call, so a discrepancy
+/// here is attributable to the FILTER alone.
+///
+/// Equal counts ⇒ the filter is sound on a well-formed chain, and the live 5
+/// came from cache contents rather than filtering. Unequal ⇒ the filter drops
+/// canonical headers, which is the more serious reading and the one this test
+/// exists to catch.
+#[tokio::test]
+async fn epochs_headers_since_none_matches_explicit_since_on_a_real_chain() {
+    use crate::network::epoch::{create_epoch_seal, disc5_index_key};
+    use crate::network::RwLockRecover;
+
+    let _serial = CACHE_PATH_TESTS.lock().await;
+    let state = test_state();
+    let zone = ZoneId::new("filterdelta/zone");
+
+    // Build a genuine chain: `create_epoch_seal` derives `previous_seal_hash`
+    // from the epoch state, so registering each seal before minting the next
+    // links them — which is what the filter's walkback needs to seat a tip.
+    const N: u64 = 6;
+    for i in 0..N {
+        let epoch_state = state.epoch.read_recover().clone();
+        let (rec, parsed) = create_epoch_seal(
+            &state.identity,
+            state.rocks.as_ref(),
+            &epoch_state,
+            zone.clone(),
+            100.0 + (i as f64) * 10.0,
+            105.0 + (i as f64) * 10.0,
+            None,
+            None,
+        )
+        .expect("create_epoch_seal");
+        state.rocks.put_record(&rec.id, &rec).expect("put seal");
+        let idx = disc5_index_key(parsed.epoch_number, zone.path(), &rec.id);
+        state
+            .rocks
+            .put_cf_raw(crate::storage::rocks::CF_EPOCHS, &idx, &[])
+            .expect("put_cf_raw");
+        let rec_hash = rec.record_hash();
+        state
+            .epoch
+            .write_recover()
+            .register_seal(&parsed, &rec.id, rec_hash);
+    }
+
+    let reset = || {
+        *EPOCH_HEADERS_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    };
+
+    // Bypass path: no cache, no canonical filter. MUST be Some(0), not Some(1):
+    // `since_epoch = since.unwrap_or(0)`, so only Some(0) scans the identical
+    // range to `None`. Some(1) skips epoch 0 and the comparison stops being
+    // like-for-like (that mistake made the first run of this test fail 5-vs-6
+    // on its own arithmetic rather than on the behaviour under test).
+    reset();
+    let bypassed = compute_epoch_headers(state.clone(), None, Some(0), 100)
+        .await
+        .expect("since=Some(0) ok");
+    // Cache path: identical scan (`unwrap_or(0)`), but the filter runs.
+    reset();
+    let filtered = compute_epoch_headers(state.clone(), None, None, 100)
+        .await
+        .expect("since=None ok");
+    reset();
+
+    let b = bypassed["total"].as_u64().unwrap_or(0);
+    let f = filtered["total"].as_u64().unwrap_or(0);
+    assert!(b >= N, "bypass path should see all {N} seeded seals (got {b})");
+    assert_eq!(
+        f, b,
+        "since=None dropped headers the bypass path kept ({f} vs {b}) — the \
+         canonical-chain filter is discarding canonical seals, which is the \
+         mechanism behind the live /epochs/headers under-report"
+    );
+
+    // ── The shape that actually matches the live case ──
+    // Above, the zone tip is INSIDE the returned page, so the filter's walkback
+    // seats it and keeps the chain. Live, the page holds the EARLIEST epochs
+    // while the tip is ~59k epochs above it, so `tip_hash` is absent from
+    // `by_hash` — the pass-through branch the filter comment describes
+    // ("the filter would drop every returned header" without it). A small
+    // `limit` reproduces that geometry: the page excludes the tip.
+    const PAGE: usize = 3;
+    reset();
+    let b_small = compute_epoch_headers(state.clone(), None, Some(0), PAGE)
+        .await
+        .expect("bypass, tip outside page");
+    reset();
+    let f_small = compute_epoch_headers(state.clone(), None, None, PAGE)
+        .await
+        .expect("filtered, tip outside page");
+    reset();
+
+    let bs = b_small["total"].as_u64().unwrap_or(0);
+    let fs = f_small["total"].as_u64().unwrap_or(0);
+    assert_eq!(
+        fs, bs,
+        "tip-outside-page: since=None returned {fs} where the bypass path \
+         returned {bs} — the pass-through for an unseatable tip is not holding, \
+         which is the geometry of the live /epochs/headers under-report \
+         (page of earliest epochs, tip far above)"
+    );
+}
+
+/// A small-`limit` request must not poison the cache for later larger ones.
+///
+/// Root cause of the live `/epochs/headers` under-report (2026-09-05): the
+/// store guard tested `!bypass_cache` only, so a `?limit=5` computation — which
+/// the scan truncates at 5 — was cached as though it were the complete list.
+/// Measured live: `?limit=5` then `?limit=2000` returned 5 while the node held
+/// 58,700+ headers.
+#[tokio::test]
+async fn small_limit_request_does_not_poison_the_header_cache() {
+    use crate::network::epoch::{create_epoch_seal, disc5_index_key};
+    use crate::network::RwLockRecover;
+
+    let _serial = CACHE_PATH_TESTS.lock().await;
+    let state = test_state();
+    let zone = ZoneId::new("poison/zone");
+
+    const N: u64 = 6;
+    for i in 0..N {
+        let epoch_state = state.epoch.read_recover().clone();
+        let (rec, parsed) = create_epoch_seal(
+            &state.identity,
+            state.rocks.as_ref(),
+            &epoch_state,
+            zone.clone(),
+            100.0 + (i as f64) * 10.0,
+            105.0 + (i as f64) * 10.0,
+            None,
+            None,
+        )
+        .expect("create_epoch_seal");
+        state.rocks.put_record(&rec.id, &rec).expect("put seal");
+        let idx = disc5_index_key(parsed.epoch_number, zone.path(), &rec.id);
+        state
+            .rocks
+            .put_cf_raw(crate::storage::rocks::CF_EPOCHS, &idx, &[])
+            .expect("put_cf_raw");
+        let rec_hash = rec.record_hash();
+        state
+            .epoch
+            .write_recover()
+            .register_seal(&parsed, &rec.id, rec_hash);
+    }
+
+    *EPOCH_HEADERS_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+
+    // A truncated request first — this is the poisoner.
+    let small = compute_epoch_headers(state.clone(), None, None, 2)
+        .await
+        .expect("limit=2 ok");
+    assert_eq!(small["total"].as_u64(), Some(2), "limit=2 returns its page");
+
+    // Now ask for everything. Pre-fix this returned the cached 2.
+    let full = compute_epoch_headers(state.clone(), None, None, 100)
+        .await
+        .expect("limit=100 ok");
+    let got = full["total"].as_u64().unwrap_or(0);
+
+    *EPOCH_HEADERS_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+
+    assert_eq!(
+        got, N,
+        "a later unbounded request was served the earlier limit=2 page ({got} of {N}) — \
+         the cache stored a limit-scoped computation as if it were the whole list"
+    );
+}
+
+/// The more severe form of the same missing check: a `?zone=X` request narrows
+/// the computation, and caching it poisons later UNFILTERED readers with a
+/// single zone's view.
+#[tokio::test]
+async fn zone_filtered_request_does_not_poison_the_global_header_cache() {
+    use crate::network::epoch::{create_epoch_seal, disc5_index_key};
+    use crate::network::RwLockRecover;
+
+    let _serial = CACHE_PATH_TESTS.lock().await;
+    let state = test_state();
+
+    for (zi, zname) in ["zpoison/a", "zpoison/b"].iter().enumerate() {
+        let zone = ZoneId::new(zname);
+        for i in 0..3u64 {
+            let epoch_state = state.epoch.read_recover().clone();
+            let base = 100.0 + (zi as f64) * 1000.0 + (i as f64) * 10.0;
+            let (rec, parsed) = create_epoch_seal(
+                &state.identity,
+                state.rocks.as_ref(),
+                &epoch_state,
+                zone.clone(),
+                base,
+                base + 5.0,
+                None,
+                None,
+            )
+            .expect("create_epoch_seal");
+            state.rocks.put_record(&rec.id, &rec).expect("put seal");
+            let idx = disc5_index_key(parsed.epoch_number, zone.path(), &rec.id);
+            state
+                .rocks
+                .put_cf_raw(crate::storage::rocks::CF_EPOCHS, &idx, &[])
+                .expect("put_cf_raw");
+            let rec_hash = rec.record_hash();
+            state
+                .epoch
+                .write_recover()
+                .register_seal(&parsed, &rec.id, rec_hash);
+        }
+    }
+
+    *EPOCH_HEADERS_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+
+    // Zone-scoped request first — the poisoner.
+    let scoped = compute_epoch_headers(state.clone(), Some(ZoneId::new("zpoison/a")), None, 100)
+        .await
+        .expect("zone-scoped ok");
+    let s = scoped["total"].as_u64().unwrap_or(0);
+
+    // Then the global view.
+    let global = compute_epoch_headers(state.clone(), None, None, 100)
+        .await
+        .expect("unfiltered ok");
+    let g = global["total"].as_u64().unwrap_or(0);
+
+    *EPOCH_HEADERS_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+
+    assert!(
+        g > s,
+        "the unfiltered view ({g}) is no larger than the preceding zone-scoped one ({s}) — \
+         a zone-scoped computation was cached as the global list"
+    );
+}
+
+/// An EXPIRED cache must actually be refreshed, not served forever.
+///
+/// The stale arm used to call `warm_stats_cache` — hollowed to `{}` — and then
+/// set `need_compute = false`, while the recompute was additionally gated on
+/// `all_headers.is_empty()`. Between them, a stale non-empty cache could never
+/// refresh: measured live 2026-09-05, 31 minutes past the 1800 s TTL with the
+/// tip 31 epochs further on, `/epochs/headers` returned the identical page.
+///
+/// The TTL cannot be waited out in a unit test, so the staleness is injected by
+/// backdating the cache's `Instant`.
+#[tokio::test]
+async fn expired_header_cache_is_recomputed_not_served_forever() {
+    use crate::network::epoch::{create_epoch_seal, disc5_index_key};
+    use crate::network::RwLockRecover;
+    use std::time::{Duration, Instant};
+
+    let _serial = CACHE_PATH_TESTS.lock().await;
+    let state = test_state();
+    let zone = ZoneId::new("ttlrefresh/zone");
+
+    const N: u64 = 4;
+    for i in 0..N {
+        let epoch_state = state.epoch.read_recover().clone();
+        let (rec, parsed) = create_epoch_seal(
+            &state.identity,
+            state.rocks.as_ref(),
+            &epoch_state,
+            zone.clone(),
+            100.0 + (i as f64) * 10.0,
+            105.0 + (i as f64) * 10.0,
+            None,
+            None,
+        )
+        .expect("create_epoch_seal");
+        state.rocks.put_record(&rec.id, &rec).expect("put seal");
+        let idx = disc5_index_key(parsed.epoch_number, zone.path(), &rec.id);
+        state
+            .rocks
+            .put_cf_raw(crate::storage::rocks::CF_EPOCHS, &idx, &[])
+            .expect("put_cf_raw");
+        let rec_hash = rec.record_hash();
+        state
+            .epoch
+            .write_recover()
+            .register_seal(&parsed, &rec.id, rec_hash);
+    }
+
+    // Seed an EXPIRED cache holding a sentinel that no recompute could produce.
+    let stale_at = Instant::now()
+        .checked_sub(Duration::from_secs(7200))
+        .expect("backdate instant");
+    let sentinel = serde_json::json!({
+        "zone": "ttlrefresh/ghost",
+        "epoch_number": 999_999,
+        "seal_id": "ttl-stale-sentinel",
+    });
+    *EPOCH_HEADERS_CACHE.lock().unwrap_or_else(|e| e.into_inner()) =
+        Some((stale_at, vec![sentinel]));
+
+    let body = compute_epoch_headers(state.clone(), None, None, 100)
+        .await
+        .expect("since=None ok");
+    let headers = body["headers"].as_array().expect("headers").clone();
+    let total = body["total"].as_u64().unwrap_or(0);
+
+    *EPOCH_HEADERS_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+
+    assert!(
+        !headers
+            .iter()
+            .any(|h| h["seal_id"].as_str() == Some("ttl-stale-sentinel")),
+        "an EXPIRED cache was served instead of recomputed: {headers:?}"
+    );
+    assert_eq!(
+        total, N,
+        "expired cache should have been replaced by a fresh scan of all {N} seals (got {total})"
     );
 }
 
@@ -1734,7 +2250,7 @@ async fn seed_seal_at(
 /// `{total, headers}` at the top and exactly the 10 expected keys
 /// per header. Defends against (a) a `serde_json::to_value(&header)`
 /// swap that would either drop fields or introduce serde's own key
-/// set (the manual `json!(…)` block at :2966 emits 10 keys
+/// set (the manual `json!(…)` block emits 10 keys
 /// regardless of `EpochHeader.account_smt_root.is_none()` — a
 /// `skip_serializing_if = "Option::is_none"` refactor on the struct
 /// would silently drop `account_smt_root` and `seal_record_hash`
@@ -1820,7 +2336,7 @@ async fn compute_epoch_headers_envelope_has_two_keys_and_each_header_eleven_keys
 /// Axis 2 — legacy-seal compatibility: when a seal
 /// record was produced before Gap-1 (no `epoch_account_smt_root`
 /// in metadata), `EpochHeader.account_smt_root` is `None` and the
-/// manual JSON emitter at :2974 renders it as `null` (NOT a
+/// manual JSON emitter renders it as `null` (NOT a
 /// missing key). A account calling `header.account_smt_root` must
 /// see the key as present-with-null so the proof-binding code can
 /// branch on `is_null()` instead of `is_undefined()`. Defends
@@ -1872,7 +2388,7 @@ async fn compute_epoch_headers_legacy_seal_emits_null_account_smt_root_key() {
 /// the limit was applied before the canonical-chain filter, so the
 /// filter could shrink the response below `limit` and `total ==
 /// headers.len()` was only true coincidentally; the modern shape
-/// applies limit AFTER all filters at :3099 so `total ==
+/// applies limit AFTER all filters (the trailing truncate) so `total ==
 /// headers.len()` is a hard invariant. Defends against a refactor
 /// that returns `{"total": pre_truncate_len, "headers": …}` where
 /// the count would diverge from the array length — accounts paging
@@ -1902,7 +2418,7 @@ async fn compute_epoch_headers_limit_truncates_and_total_matches_headers_len() {
 /// Axis 4 — sort order pins epoch-ascending across
 /// insertion order. CF_EPOCHS keys are `(epoch_be, zone, record_id)`
 /// so the RocksDB prefix scan already yields epoch-ascending order;
-/// the post-scan `sort_by` at :3036 is defensive against that
+/// the post-scan `sort_by` is defensive against that
 /// invariant changing. Plants 4 seals in scrambled insertion order
 /// (epochs 10, 3, 10, 3 across two zones) and asserts the final
 /// `headers[*].epoch_number` sequence is monotonically non-
@@ -1950,7 +2466,7 @@ async fn compute_epoch_headers_sorted_by_epoch_ascending() {
 }
 
 /// Axis 5 — `zone_filter` narrows the response to the
-/// requested zone. Filter is applied at :3084 over the post-scan
+/// requested zone. Filter is applied over the post-scan
 /// vec (NOT pushed into the RocksDB prefix scan), so it must
 /// correctly handle BOTH the modern string-zone JSON and the
 /// legacy numeric-zone JSON via the `is_none_or` predicate pair.
@@ -2022,7 +2538,7 @@ async fn compute_epoch_headers_zone_filter_restricts_to_matching_zone() {
 // for light clients: at boot they pull the latest super-seal per
 // zone, verify it against the trusted anchor key, then fast-forward
 // to the next epoch via /headers/from/{epoch}. compute_checkpoints_
-// from at :3305 is the pure handler — pre-slice has ZERO DIRECT
+// from is the pure handler — pre-slice has ZERO DIRECT
 // tests (only one indirect end-to-end empty-state probe in
 // pq_transport/router.rs:3957 via PqNodeClient::checkpoints_from)
 // yet covers FIVE behaviour classes account/light-client traffic
@@ -2031,21 +2547,21 @@ async fn compute_epoch_headers_zone_filter_restricts_to_matching_zone() {
 // envelope emitted with 9 per-checkpoint keys + 3 top-level keys);
 // (ii) empty-state short-circuit (no latest_super_seal entries →
 // return immediately with empty array AND cache the empty result,
-// skipping the spawn_blocking entirely per the :3345-3356 branch);
+// skipping the spawn_blocking entirely per the `latest_map.is_empty()` branch);
 // (iii) sort order across zones ((zone_str, end_epoch) ascending
-// lexicographic at :3391-3399, defending against HashMap iter
-// non-determinism); (iv) zone_filter post-cache narrowing at
-// :3407-3417 (filter applied AFTER cache load, so a "lift the
+// lexicographic in the `computed.sort_by` step, defending against HashMap iter
+// non-determinism); (iv) zone_filter post-cache narrowing in
+// the trailing `.filter(...)` (applied AFTER cache load, so a "lift the
 // filter into the latest_super_seal iter" refactor would break
-// cache reuse); (v) limit truncation at :3418 with total
+// cache reuse); (v) `checkpoints.truncate(limit)` with total
 // reflecting post-truncate count. The SUPER_SEALS_CACHE static
 // is a process-global Mutex with no bypass-cache parameter (unlike
 // compute_epoch_headers which has `since=Some(N)`), so a tokio
 // gate Mutex serializes these 5 tests at the same level the
 // function locks the cache — without it, a parallel test could
 // poison the cache between our reset and our compute call, the
-// cache-always-wins logic at :3315-3322 would feed the parallel
-// test's super-seals to our filter+truncate at :3407-3418, and
+// cache-always-wins logic in the cache-read block would feed the
+// parallel test's super-seals to our trailing filter+truncate, and
 // our assertions would fail flakily.
 
 static QQQQ_CACHE_GATE: std::sync::LazyLock<tokio::sync::Mutex<()>> =
@@ -2053,7 +2569,7 @@ static QQQQ_CACHE_GATE: std::sync::LazyLock<tokio::sync::Mutex<()>> =
 
 /// Plant a super-seal record in rocks AND register it in
 /// EpochState.latest_super_seal so compute_checkpoints_from finds
-/// it via the O(active_zones) iter at :3336-3343.
+/// it via the O(active_zones) `latest_super_seal` iter.
 async fn seed_super_seal_at(
     state: &Arc<NodeState>,
     zone_path: &str,
@@ -2106,6 +2622,70 @@ async fn seed_super_seal_at(
 fn reset_super_seals_cache_qqqq() {
     let mut guard = SUPER_SEALS_CACHE.lock().expect("cache mutex");
     *guard = None;
+}
+
+/// An EXPIRED super-seal cache must be recomputed, not served for the life of
+/// the process.
+///
+/// `compute_checkpoints_from` gated its recompute on
+/// `need_compute && all_checkpoints.is_empty()`. A stale but NON-EMPTY cache
+/// took `true && false`, skipped the block — which is the only place the cache
+/// is ever written — and so never refreshed. Newly minted super-seals never
+/// appeared. The in-tree tell was `reset_super_seals_cache_qqqq()` itself:
+/// a helper whose only job is nulling the cache so a test can see fresh state,
+/// which production has no equivalent of.
+///
+/// This covers BOTH surfaces at once: the axum route and the PQ transport
+/// router (`pq_transport/router.rs:3015`) call this same function, and
+/// `light_sync_loop`'s cold start (`light.rs:636`) is the production consumer
+/// that was inheriting the frozen baseline.
+///
+/// The TTL is 1800 s, so staleness is injected by backdating the cache Instant
+/// rather than waited out — same technique as
+/// `expired_header_cache_is_recomputed_not_served_forever`.
+#[tokio::test]
+async fn expired_super_seal_cache_is_recomputed_not_served_forever() {
+    use std::time::{Duration, Instant};
+
+    let _gate = QQQQ_CACHE_GATE.lock().await;
+    reset_super_seals_cache_qqqq();
+
+    let state = test_state();
+    let committee_hash = [0xA7u8; 32];
+    let rec_id = seed_super_seal_at(&state, "ttlss/zone", 1, 64, 64, committee_hash).await;
+
+    // Seed an EXPIRED cache holding a sentinel no recompute could produce.
+    let stale_at = Instant::now()
+        .checked_sub(Duration::from_secs(7200))
+        .expect("backdate instant");
+    let ghost = serde_json::json!({
+        "zone": "ttlss/ghost",
+        "start_epoch": 1,
+        "end_epoch": 999_999,
+        "seal_count": 64,
+        "record_id": "ttl-superseal-sentinel",
+    });
+    {
+        let mut guard = SUPER_SEALS_CACHE.lock().expect("cache mutex");
+        *guard = Some((stale_at, vec![ghost]));
+    }
+
+    let body = compute_checkpoints_from(&state, 0, None, 500)
+        .await
+        .expect("checkpoints ok");
+    let cps = body["checkpoints"].as_array().expect("checkpoints array").clone();
+
+    reset_super_seals_cache_qqqq();
+
+    assert!(
+        !cps.iter()
+            .any(|c| c["record_id"].as_str() == Some("ttl-superseal-sentinel")),
+        "an EXPIRED super-seal cache was served instead of recomputed: {cps:?}"
+    );
+    assert!(
+        cps.iter().any(|c| c["record_id"].as_str() == Some(rec_id.as_str())),
+        "recompute did not surface the seeded super-seal {rec_id}: {cps:?}"
+    );
 }
 
 /// Axis 1 — populated-state JSON envelope is exactly
@@ -2209,9 +2789,9 @@ async fn compute_checkpoints_from_envelope_has_three_keys_and_each_checkpoint_ni
 /// Axis 2 — empty-state short-circuit. When
 /// EpochState.latest_super_seal is empty (fresh-genesis / bootstrap
 /// / pre-first-super-seal), compute_checkpoints_from short-circuits
-/// BEFORE the spawn_blocking call at :3358, returning
+/// BEFORE the spawn_blocking call, returning
 /// `{total: 0, super_seal_interval: 64, checkpoints: []}` with the
-/// empty result cached at :3348-3350. Defends against (a) a
+/// empty result cached in that same branch. Defends against (a) a
 /// refactor that consolidates the empty-check into the post-spawn
 /// loop — same JSON output but a wasted thread-pool slot per call,
 /// matters at the 1M-zone target where the cold-start storm could
@@ -2248,7 +2828,7 @@ async fn compute_checkpoints_from_empty_state_short_circuits_with_canonical_inte
 }
 
 /// Axis 3 — sort order pins (zone_str, end_epoch)
-/// ascending lexicographic at the post-fetch sort at :3391-3399.
+/// ascending lexicographic at the post-fetch `computed.sort_by`.
 /// latest_super_seal is a `HashMap<ZoneId, ...>` so insertion
 /// order is non-deterministic (HashMap iter is randomized per
 /// process via RandomState seed); the explicit sort guarantees
@@ -2309,7 +2889,7 @@ async fn compute_checkpoints_from_sorted_by_zone_ascending_lexicographic() {
 }
 
 /// Axis 4 — `zone_filter` narrows the response to the
-/// requested zone at the post-cache filter at :3407-3417. Filter
+/// requested zone at the post-cache trailing `.filter(...)`. Filter
 /// is applied AFTER cache load, so a "lift the filter into the
 /// latest_super_seal iter" refactor would break the cache reuse
 /// pattern (filtered + unfiltered calls would clobber each other's
@@ -2411,14 +2991,14 @@ async fn compute_checkpoints_from_limit_truncates_and_total_matches_array_len() 
 
 // ── compute_committees_snapshot tests ──────
 //
-// compute_committees_snapshot at :1659 is the /committees route handler
+// compute_committees_snapshot is the /committees route handler
 // — the gap-5 per-zone VRF witness committee surface that light clients
 // hit to verify a seal's claimed committee_hash against the ground-
 // truth draw per Protocol §11.5 + internal design notes. The
 // helper delegates to state_committees_snapshot at zone_committee.rs:569
 // for the per-zone resolver-cache draw, but the SHAPE of the JSON
 // envelope at this route layer + the 4 query-param default-fallback
-// semantics (epoch, k, from, limit) live ENTIRELY at :1666-1691 and
+// semantics (epoch, k, from, limit) live ENTIRELY in that fn and
 // have had ZERO direct coverage at the route layer — the 4
 // existing tests at zone_committee.rs:1782/1793/1845/2144 cover the
 // helper one layer below, but NOT this wrapper's envelope or default-
@@ -2433,8 +3013,8 @@ async fn compute_checkpoints_from_limit_truncates_and_total_matches_array_len() 
 // account for-loop iteration semantics.
 //
 // Test-fixture pattern: ALL 5 tests use the existing test_state()
-// helper at :3746 plus a new seed_committees_state(state, zones,
-// anchors_with_stake) helper at :5557-5599 wrapping the three-step
+// helper plus a new seed_committees_state(state, zones,
+// anchors_with_stake) helper wrapping the three-step
 // ZoneRegistry::with_genesis + VrfRegistry::register + ledger.accounts
 // .insert ritual already proven at zone_committee.rs:1802-1844. No
 // process-global cache here — NodeState's vrf_registry / zone_registry
@@ -2583,9 +3163,9 @@ async fn compute_committees_snapshot_envelope_has_six_keys_with_wire_type_pins()
 /// Axis 2 — None-fallbacks pull from canonical constants
 /// + state.dag.current_epoch(). When the caller passes `epoch=None,
 /// k=None, limit=None`, the function MUST use
-/// `state.dag.read().await.current_epoch()` (at :1668) +
-/// `DEFAULT_COMMITTEE_SIZE` (=7, at :1670) +
-/// `DEFAULT_COMMITTEES_PAGE_SIZE` (=1000, at :1672). Defends against
+/// `state.dag.read().await.current_epoch()` +
+/// `DEFAULT_COMMITTEE_SIZE` (=7) +
+/// `DEFAULT_COMMITTEES_PAGE_SIZE` (=1000). Defends against
 /// (a) a refactor that hardcodes `0`/`1`/`5` for k/limit (would
 /// diverge from the operator-mental-model of "use the protocol
 /// default unless overridden"), (b) a refactor that swaps
@@ -2831,7 +3411,7 @@ async fn compute_committees_snapshot_empty_registry_emits_canonical_empty_envelo
 
 // ── compute_consensus_record_detail tests ──
 //
-// compute_consensus_record_detail at :1270 is the /consensus/record/{id}
+// compute_consensus_record_detail is the /consensus/record/{id}
 // route handler — the critical-path consensus-status lookup that every
 // account hits to determine whether a transfer has settled / been
 // finalized. Existing coverage is ONE indirect test at
@@ -2863,7 +3443,7 @@ async fn compute_committees_snapshot_empty_registry_emits_canonical_empty_envelo
 // via #[serde(rename)] or skip empty defaults).
 //
 // Test-fixture pattern: ALL 5 tests use the existing `test_state()`
-// helper at :3746. No process-global cache constraint here — consensus
+// helper. No process-global cache constraint here — consensus
 // / finalized / ledger are per-NodeState — so no test gate Mutex
 // needed (unlike the EPOCH_HEADERS_CACHE /
 // SUPER_SEALS_CACHE tests). Zone assignment is derived via
@@ -15935,7 +16515,7 @@ fn batch_uuu_compute_activity_identity_echo_preserves_input_casing_verbatim() {
 //
 // The pure helper at routes/explorer.rs:3241 is the read-side of the
 // Gap-3 super-seal wire surface served at GET /checkpoints/latest/{zone}.
-// Two callers: (1) `checkpoint_latest` axum adapter at :3271, (2) the
+// Two callers: (1) the `checkpoint_latest` axum adapter, (2) the
 // PQ-transport /checkpoints route. Previously the helper was 100%
 // un-pinned despite serving light-client cold-sync paths (PQ account
 // bootstrap reads the latest super-seal to anchor its trust chain
@@ -17932,7 +18512,7 @@ fn batch_mmmm_compute_challenge_detail_option_fields_emit_json_null_on_none_and_
 //       for active-filter at governance.rs:1163 + delegation_of active-
 //       filter at governance.rs:1168)
 //
-// Test-fixture pattern: all 5 use existing test_state() helper at :3746.
+// Test-fixture pattern: all 5 use the existing test_state() helper.
 // No process-global cache constraint — ledger.governance/ledger.stakes
 // are per-NodeState — no test-gate Mutex needed.
 

@@ -586,6 +586,21 @@ pub const PARTITION_MERGE_SIBLING_RING_GLOBAL_KEYS: usize = 1024;
 /// `None` (legacy pre-VRF behavior).
 pub const VRF_HISTORY_PER_ZONE: usize = 64;
 
+/// R1-X1-V-P (2026-09-05): deferral-marker substrings SHARED by the seal-verify
+/// emitters (`verify_epoch_seal_inner`'s catch-up and partition-merge arms) and
+/// the ingest dispatch arms (`ingest.rs`, `match seal_verify_result`). The
+/// ingest side keys accept-vs-defer on these EXACT substrings — a VRF-shaped
+/// error that lacks `VRF-unverifiable` falls into the lenient
+/// `vrf_pk.is_none()` acceptance branch — so emitter and matcher reference one
+/// constant instead of two hand-typed literals.
+pub const SEAL_DEFER_MARKER_VRF: &str = "VRF-unverifiable";
+/// See [`SEAL_DEFER_MARKER_VRF`].
+pub const SEAL_DEFER_MARKER_STAKE: &str = "stake-unverifiable";
+/// Arm-attribution marker: present in partition-merge deferrals only, so the
+/// ingest arms can route the partition-merge canaries apart from the
+/// catch-up (fast-forward) canaries.
+pub const SEAL_DEFER_MARKER_PARTITION_MERGE: &str = "partition-merge";
+
 /// One per-zone VRF history ring entry: `(end_ts, epoch, vrf_output, record_hash)`.
 /// `record_hash` is the per-epoch canonical (lex-min) tiebreak. See
 /// `EpochState::vrf_history` and internal design notes.
@@ -1422,6 +1437,9 @@ impl EpochState {
                 self.epoch_start_ts.remove(z);
                 self.latest_seal_end.remove(z);
                 self.vrf_history.remove(z);
+                // R1-X1-CS: the super-seal window (64 hashes, ~2 KB per zone)
+                // was never pruned either — bounded at scale like the rest.
+                self.recent_seal_hashes.remove(z);
                 // PARTITION-MERGE Phase B: drop any orphan-sibling rings for
                 // pruned zones — keeps the (zone, epoch) keyspace bounded
                 // when a zone count drops mid-fleet.
@@ -1468,14 +1486,23 @@ impl EpochState {
             // §E fence: a rejected (wrong-chain) seal is dropped entirely —
             // it must not canonicalize AND must not seed the VRF ring.
             let _ = self.apply_canonical_seal(seal, record_id, record_hash);
-        } else if let Some(vrf) = seal.vrf_output {
-            // Mode 2 (Fisherman ring fork): this seal lost the tip race (stale
-            // epoch < current, or same-epoch lex-loser) so it never reaches
-            // apply_canonical_seal — but its VRF must still enter the ring as a
-            // pure function of the seal set. `upsert_vrf_ring` keeps the lex-min
-            // record_hash per epoch, so this is a no-op unless this seal is the
-            // canonical (lex-min) winner for its epoch.
-            self.upsert_vrf_ring(&seal.zone, seal.end, seal.epoch_number, vrf, record_hash);
+        } else {
+            // R1-X1-CS: this seal lost the tip race (stale epoch < current, or
+            // same-epoch lex-loser) so it never reaches apply_canonical_seal —
+            // but the super-seal window is a function of the stored seal SET:
+            // a late lex-min rival inside [tip-63, tip] still corrects its
+            // epoch's entry (boot repopulation and the admission A4 rocks
+            // fallback derive it from CF_EPOCHS either way); a lex-loser is a
+            // no-op. See internal design notes.
+            self.upsert_seal_window(&seal.zone, seal.epoch_number, record_hash);
+            if let Some(vrf) = seal.vrf_output {
+                // Mode 2 (Fisherman ring fork): its VRF must still enter the
+                // ring as a pure function of the seal set. `upsert_vrf_ring`
+                // keeps the lex-min record_hash per epoch, so this is a no-op
+                // unless this seal is the canonical (lex-min) winner for its
+                // epoch.
+                self.upsert_vrf_ring(&seal.zone, seal.end, seal.epoch_number, vrf, record_hash);
+            }
         }
     }
 
@@ -1527,9 +1554,13 @@ impl EpochState {
             return self.apply_canonical_seal(seal, record_id, record_hash);
         }
         if seal.epoch_number < current {
-            // Mode 2 (Fisherman ring fork): stale-epoch seal never canonicalizes,
-            // but its VRF must still enter the ring (lex-min per epoch) so jury
-            // seeding is a pure function of the seal set, not arrival order.
+            // R1-X1-CS: a stale-epoch seal never canonicalizes, but a late
+            // lex-min rival inside the super-seal window still corrects its
+            // epoch's entry (the window is a function of the stored seal SET).
+            self.upsert_seal_window(&seal.zone, seal.epoch_number, record_hash);
+            // Mode 2 (Fisherman ring fork): its VRF must still enter the ring
+            // (lex-min per epoch) so jury seeding is a pure function of the
+            // seal set, not arrival order.
             if let Some(vrf) = seal.vrf_output {
                 self.upsert_vrf_ring(&seal.zone, seal.end, seal.epoch_number, vrf, record_hash);
             }
@@ -1575,6 +1606,13 @@ impl EpochState {
                 seal.epoch_number,
                 record_id.to_string(),
             );
+            // R1-X1-CS: the demoted seal still upserts the super-seal window —
+            // a lighter lex-min rival must hold its epoch's entry (boot
+            // repopulation and the admission A4 rocks fallback would pick it)
+            // while the tip keeps the weight winner. Without this, honest nodes
+            // that saw the rivals in opposite orders mint different 64-hash
+            // roots for the same boundary.
+            self.upsert_seal_window(&seal.zone, seal.epoch_number, record_hash);
             // Mode 2 (Fisherman ring fork): the demoted seal still upserts its
             // VRF (lex-min per epoch). No-op unless it's the lex-min winner for
             // this epoch — which keeps the ring a pure function of the seal set
@@ -1779,15 +1817,13 @@ impl EpochState {
         // then prune to the SUPER_SEAL_INTERVAL epochs ending at the new tip.
         // Seal-loop calls `should_create_super_seal` to detect when to roll an
         // aggregate. O(log 64) per seal; the prune pops only what left the window.
-        let buf = self.recent_seal_hashes.entry(seal.zone.clone()).or_default();
-        buf.entry(seal.epoch_number)
-            .and_modify(|existing| {
-                if record_hash < *existing {
-                    *existing = record_hash;
-                }
-            })
-            .or_insert(record_hash);
-        prune_seal_window(buf, seal.epoch_number);
+        // R1-X1-CS: the upsert lives in `upsert_seal_window`, which is ALSO
+        // called from every non-canonical drop path (late in-window rival,
+        // reconcile demotion), so the window is a function of the stored seal
+        // SET — never of arrival order or attestation weight — exactly as boot
+        // repopulation and the admission A4 rocks fallback derive it from
+        // CF_EPOCHS. `latest_epoch` was advanced above, so tip == this epoch.
+        self.upsert_seal_window(&seal.zone, seal.epoch_number, record_hash);
         true
     }
 
@@ -2200,6 +2236,47 @@ impl EpochState {
             }
         }
         None
+    }
+
+    /// R1-X1-CS: upsert one seal hash into the zone's super-seal window
+    /// (`recent_seal_hashes`), preserving the invariant that the window is a
+    /// pure function of the stored seal SET — lex-min `record_hash` per epoch,
+    /// bounded to the live window `[tip-63, tip]` at the zone's CURRENT tip.
+    /// Order-independent: the same set of `(epoch, record_hash)` inputs in any
+    /// arrival order yields a byte-identical window, which is exactly what
+    /// `repopulate_recent_seal_hashes` (boot) and the admission A4 rocks
+    /// fallback (`canonical_seal_at`) compute from CF_EPOCHS. Called from
+    /// `apply_canonical_seal` (the canonical-winner path, tip just advanced to
+    /// this epoch) AND from every non-canonical drop path in `register_seal` /
+    /// `register_seal_with_reconcile`: a late lex-min rival for an in-window
+    /// epoch, or a lighter lex-min rival the weight reconcile demoted, still
+    /// corrects its epoch's entry — the `upsert_vrf_ring` rule. Outside the
+    /// window it is a no-op: the tip never moves backwards, so an epoch below
+    /// the floor is gone for good and one above the tip belongs to a future
+    /// canonicalization. Always prunes with the CURRENT tip, never the seal's
+    /// epoch — pruning with a stale epoch would pop the head of the window and
+    /// wedge `super_seal_window_complete`. O(log 64) per call.
+    /// No anchor / tombstone / slash / chain-link filter here — deliberate:
+    /// the two rocks derivations (`repopulate_recent_seal_hashes`,
+    /// `canonical_seal_at`) apply none either, and a filter on one side alone
+    /// recreates the live != boot divergence. Changing that is follow-on F3
+    /// and must change all three together.
+    /// See internal design notes.
+    fn upsert_seal_window(&mut self, zone: &ZoneId, epoch: u64, record_hash: [u8; 32]) {
+        let tip = self.latest_epoch.get(zone).copied().unwrap_or(0);
+        let floor = tip.saturating_sub(SUPER_SEAL_INTERVAL - 1);
+        if epoch < floor || epoch > tip {
+            return;
+        }
+        let buf = self.recent_seal_hashes.entry(zone.clone()).or_default();
+        buf.entry(epoch)
+            .and_modify(|existing| {
+                if record_hash < *existing {
+                    *existing = record_hash;
+                }
+            })
+            .or_insert(record_hash);
+        prune_seal_window(buf, tip);
     }
 
     /// Upsert one canonical VRF entry for `(zone, epoch)` into the per-zone ring,
@@ -3672,8 +3749,9 @@ pub struct SealStakeView<'a> {
 impl SealStakeView<'static> {
     /// The strict view (no staked anchors known): tests, historical replay and
     /// any caller without ledger context. Defers every non-genesis
-    /// fast-forward; genesis and the sequential / partition-merge arms are
-    /// unaffected.
+    /// fast-forward; genesis and the sequential arm are unaffected. The
+    /// partition-merge arm is gated as of R1-X1-V-P (2026-09-05) and consults
+    /// this view too: an empty view defers every non-genesis merge seal.
     pub fn empty() -> Self {
         static EMPTY: std::sync::OnceLock<HashSet<String>> = std::sync::OnceLock::new();
         SealStakeView { staked: EMPTY.get_or_init(HashSet::new) }
@@ -3924,6 +4002,18 @@ fn verify_epoch_seal_inner(
             );
         }
     } else if seal.epoch_number > our_latest {
+        // ⚠ R1-X1-D (2026-09-05): this arm is the unbacked-fast-forward surface, and
+        // it is STILL OPEN. The condition is only `epoch_number > our_latest`, so a
+        // staked identity can mint one valid seal at an arbitrary future epoch X and
+        // every node below X follows it; `skip_merkle` below also skips the rank check,
+        // and the VRF alpha derives from the seal's OWN claimed predecessor. Retention
+        // gates (GC floor, super-seal admission, checkpoints, snapshot export) then key
+        // on that phantom tip. Inert while `staked.len() < 3`; a pre-mainnet gate.
+        // The proposed contiguity-keyed fix was NOT built: its Step-0 adversarial verify
+        // refuted the probation, gate-placement and boot-rederivation rules
+        // (see internal design notes §D and the queue's
+        // Step-0 verdict). Do not add a partial mitigation here without redoing that audit.
+        //
         // Catch-up case: seal is ahead of us — we've been offline or are syncing.
         // Accept the seal so the node can fast-forward its epoch state.
         // Skip merkle verification — we don't have the historical records.
@@ -3945,16 +4035,24 @@ fn verify_epoch_seal_inner(
         // (genesis-only-proposer today). If we cannot verify, DEFER: return a
         // retryable error (the ingest caller parks it and re-tries once the
         // proposer's VRF registration syncs) rather than silently fast-forward.
-        // Scoped to the fast-forward arm ONLY: the sequential (+1) and
-        // partition-merge arms cannot wedge the tip and lose to attestation
-        // weight, so their legacy VRF-skip behaviour is intentionally left intact
-        // (full closure of the sequential VRF-skip is the S3 registry-in-snapshot
-        // follow-up — see internal design notes).
+        // Scope (corrected 2026-09-05, R1-X1-V-P): B7 scoped this gate to the
+        // fast-forward arm on the premise that the sequential (+1) and
+        // partition-merge arms "cannot wedge the tip and lose to attestation
+        // weight". That premise was FALSE for the partition-merge arm: equal-
+        // epoch canonicalization in `register_seal` is lex-min record hash with
+        // no weight on the default path, so that arm now runs the same VRF +
+        // stake gate (see the `epoch_gap <= 100` arm below). The sequential
+        // arm is held by `verify_aggregator_rank` (an unstaked creator has no
+        // rank → Err whenever the rank check runs) plus the register-time
+        // chain-link check (C2); its legacy VRF-skip residual is intentionally
+        // left intact (full closure of the sequential VRF-skip is the S3
+        // registry-in-snapshot follow-up — see
+        // internal design notes).
         if !is_genesis {
             let vrf_verifiable = vrf_pk.is_some_and(|pk| !pk.full_pk().is_empty());
             if !vrf_verifiable {
                 return Err(ElaraError::Ledger(format!(
-                    "non-genesis catch-up seal from {} is VRF-unverifiable \
+                    "non-genesis catch-up seal from {} is {SEAL_DEFER_MARKER_VRF} \
                      (proposer key not registered) — deferring fast-forward for \
                      zone {} epoch {}",
                     &creator[..creator.len().min(16)], seal.zone, seal.epoch_number
@@ -3994,7 +4092,7 @@ fn verify_epoch_seal_inner(
                     if bootstrap { "; bootstrap regime: genesis-only" } else { "" }
                 );
                 return Err(ElaraError::Ledger(format!(
-                    "non-genesis catch-up seal from {} is stake-unverifiable \
+                    "non-genesis catch-up seal from {} is {SEAL_DEFER_MARKER_STAKE} \
                      (creator not admissible by the local staked-anchor set: \
                      staked={}, need >= {} incl. creator{}) — deferring \
                      fast-forward for zone {} epoch {}",
@@ -4011,10 +4109,63 @@ fn verify_epoch_seal_inner(
         );
         skip_merkle = true;
     } else if epoch_gap <= 100 {
-        // Partition-merge case: seal is behind us but within merge window.
-        // Accept the seal — it's from a partition that sealed independently.
-        // The records it covers will arrive via delta sync.
+        // Partition-merge case: seal is behind us (or AT our tip — gap 0) but
+        // within the merge window. Accept it — it's from a partition that
+        // sealed independently; the records it covers arrive via delta sync.
         // Don't check previous_seal_hash — the partition has its own chain.
+        //
+        // R1-X1-V-P (2026-09-05): the CREATOR is gated here exactly as on the
+        // catch-up arm above. B7's premise that this arm "cannot wedge the tip
+        // and loses to attestation weight" was FALSE on the default path:
+        // `register_seal` canonicalizes an equal-epoch seal by lex-min record
+        // hash with no creator check upstream (`apply_canonical_seal` swaps
+        // `latest_seal_id` / `latest_seal_hash` and the VRF ring), so any
+        // unstaked, unregistered key could grind a same-height rival (fresh
+        // uuid7 id + timestamp per attempt, ~50 % odds per try) and fork this
+        // node off the honest chain at its next sequential seal
+        // (`is_forged_sequential_seal` → chain-link reject), while a
+        // behind-tip rival rewrote that epoch's super-seal window and VRF ring.
+        // Weight exists only in `register_seal_with_reconcile` (flag-dark:
+        // `partition_merge_weight_reconcile`). Same DEFER contract as B7 /
+        // R1-X1-V: the retryable markers (`VRF-unverifiable`,
+        // `stake-unverifiable`) park an honest staker whose VRF registration
+        // or stake record has not reached us yet (re-verified on drain), while
+        // a forged rival never becomes admissible and ages out of the bounded
+        // retry buffer. The arm marker `partition-merge` lets ingest count this
+        // arm separately (it carries neither `VRF` nor `stake-unverifiable`).
+        // Genesis stays exempt (trust root, VRF-exempt by design). Prophylactic
+        // only: boot replay never re-verifies, so a tip already swapped on an
+        // unpatched node is not repaired by upgrading — operational remediation.
+        if !is_genesis {
+            let vrf_verifiable = vrf_pk.is_some_and(|pk| !pk.full_pk().is_empty());
+            if !vrf_verifiable {
+                return Err(ElaraError::Ledger(format!(
+                    "non-genesis {SEAL_DEFER_MARKER_PARTITION_MERGE} seal from {} is {SEAL_DEFER_MARKER_VRF} \
+                     (proposer key not registered) — deferring partition-merge for \
+                     zone {} epoch {}",
+                    &creator[..creator.len().min(16)], seal.zone, seal.epoch_number
+                )));
+            }
+            if !stake_view.admits_fastforward(&creator) {
+                let bootstrap = stake_view.staked.len() < super::aggregator::BOOTSTRAP_MIN_STAKERS;
+                tracing::info!(
+                    "partition-merge: deferring non-genesis seal from {} for zone {} epoch {} (our latest: {}, gap: {}) — creator not admissible by the local staked-anchor set (staked={}, need >= {} incl. creator{})",
+                    &creator[..creator.len().min(16)], seal.zone, seal.epoch_number, our_latest, epoch_gap,
+                    stake_view.staked.len(), super::aggregator::BOOTSTRAP_MIN_STAKERS,
+                    if bootstrap { "; bootstrap regime: genesis-only" } else { "" }
+                );
+                return Err(ElaraError::Ledger(format!(
+                    "non-genesis {SEAL_DEFER_MARKER_PARTITION_MERGE} seal from {} is {SEAL_DEFER_MARKER_STAKE} \
+                     (creator not admissible by the local staked-anchor set: \
+                     staked={}, need >= {} incl. creator{}) — deferring \
+                     partition-merge for zone {} epoch {}",
+                    &creator[..creator.len().min(16)], stake_view.staked.len(),
+                    super::aggregator::BOOTSTRAP_MIN_STAKERS,
+                    if bootstrap { "; bootstrap regime: genesis-only" } else { "" },
+                    seal.zone, seal.epoch_number
+                )));
+            }
+        }
         tracing::info!(
             "partition-merge: accepting epoch {} for zone {} (our latest: {}, gap: {})",
             seal.epoch_number, seal.zone, our_latest, epoch_gap
@@ -9102,12 +9253,24 @@ mod tests {
         content_salt: &[u8],
     ) -> ValidationRecord {
         let record = build_test_seal_record(identity, zone, epoch, content_salt);
-        engine.insert(&record).unwrap();
+        store_test_seal(engine, zone, epoch, &record);
+        record
+    }
+
+    /// Store an already-built seal record the way Phase-2 ingest does: the
+    /// record itself plus its DISC-5 key in CF_EPOCHS (what boot repopulation
+    /// and the admission A4 rocks fallback scan). Split out of
+    /// `write_test_seal` so a test that must store the EXACT record it built
+    /// can do so — `ValidationRecord::create` puts a uuid7 id (random suffix)
+    /// and the creation stamp inside the signed bytes, so two builds from
+    /// identical inputs never hash identically (the R1-X1-CS T1 test hit
+    /// this: 1 in 3 isolated runs, and the loaded full-suite run).
+    fn store_test_seal(engine: &mut StorageEngine, zone: &str, epoch: u64, record: &ValidationRecord) {
+        engine.insert(record).unwrap();
         let key = disc5_index_key(epoch, zone, &record.id);
         engine
             .put_cf_raw(crate::storage::rocks::CF_EPOCHS, &key, &[])
             .unwrap();
-        record
     }
 
     #[test]
@@ -11366,9 +11529,13 @@ mod tests {
         record.signature = Some(identity.sign(&signable).unwrap());
 
         let result = verify_epoch_seal(&record, &storage, &epoch_state, &genesis, None, None, SealStakeView::empty());
-        // Epoch 5 is within the ±100 partition-merge window from epoch 0, so it's accepted.
-        // To test rejection, use an epoch far beyond the window:
-        assert!(result.is_ok()); // partition-merge accepts epoch 5
+        // Corrected 2026-09-05 (R1-X1-V-P): from a fresh state (latest 0,
+        // expected 1) epoch 5 is AHEAD of our tip, so this lands on the
+        // CATCH-UP arm (`epoch_number > our_latest`), not partition-merge.
+        // The creator IS the genesis authority, so the B7/R1-X1-V creator
+        // gate exempts it → accepted. Rejection needs an epoch beyond the
+        // window (see the too-far-behind / too-far-ahead tests).
+        assert!(result.is_ok()); // catch-up arm, genesis creator: accepted
     }
 
     // ── verify wrong chain ───────────────────────────────────────
@@ -12220,19 +12387,21 @@ mod tests {
         assert!(msg.contains("VRF-unverifiable") && !msg.contains("stake-unverifiable"), "got: {msg}");
     }
 
-    #[test]
-    fn r1x1v_partition_merge_nongenesis_unaffected_by_empty_view() {
-        // Scoping pin: the gate lives on the fast-forward arm ONLY. A
-        // non-genesis seal BEHIND our tip within the merge window (partition
-        // merge) must still verify under an EMPTY view — that arm never raises
-        // `latest_epoch` (it cannot wedge the tip) and loses to attestation
-        // weight, exactly as B7 left it.
+    /// R1-X1-V-P fixture: our tip is a REGISTERED seal at epoch 10; the
+    /// incoming non-genesis seal claims `pm_epoch` (<= 10, gap <= 100 → the
+    /// partition-merge arm; 10 itself = the same-height rival). The VRF proof is
+    /// recomputed over the beacon the verifier derives from our tip's hash, so
+    /// step 6 passes and only the creator gate is under test. `creator_is_genesis`
+    /// names the creator as the genesis authority (the exempt trust root).
+    /// Returns the creator hash for staked-set construction.
+    fn r1x1p_partition_merge_seal(
+        pm_epoch: u64,
+        creator_is_genesis: bool,
+    ) -> (ValidationRecord, StorageEngine, tempfile::TempDir, EpochState, String, crate::crypto::vrf::VrfPublicKey, String) {
         use crate::crypto::vrf::{VrfSecretKey, vrf_prove};
         let identity = test_identity();
-        let genesis = "r1x1v_other_genesis_authority_deadbeef".to_string();
-        let (mut storage, _dir) = test_engine();
+        let (mut storage, dir) = test_engine();
         let zone = ZoneId::from_legacy(0);
-        // Our tip is epoch 10 (a registered seal); the incoming seal claims 5.
         let mut epoch_state = EpochState::new();
         let tip = ParsedEpochSeal {
             zone: zone.clone(),
@@ -12256,34 +12425,157 @@ mod tests {
             wire_version: crate::wire::CURRENT_SIGNING_VERSION,
             sparse_merkle_root: None,
         };
-        epoch_state.register_seal(&tip, "seal-10", sha3_256(b"r1x1v-seal10"));
-        insert_test_record(&mut storage, &identity, b"r1x1v-pm", 100.0);
+        epoch_state.register_seal(&tip, "seal-10", sha3_256(b"r1x1p-seal10"));
+        insert_test_record(&mut storage, &identity, b"r1x1p-pm", 100.0);
 
         let vrf_sk = VrfSecretKey::generate().unwrap();
         let vrf_pk = vrf_sk.public_key();
         let (mut record, _) = create_epoch_seal(
             &identity, &storage, &epoch_state, zone.clone(), 50.0, 200.0, Some(&vrf_sk), None,
         ).unwrap();
-        // Rewind the claimed epoch to 5 (behind tip 10, gap 5 <= 100 → partition
-        // merge) and recompute the VRF over the beacon the verifier derives
-        // from the seal's own previous_seal_hash.
-        let pm_epoch = 5u64;
         let prev = epoch_state.previous_seal_hash(&zone);
         let beacon = crate::network::aggregator::chained_beacon(&prev, pm_epoch, &zone);
         let (out, proof) = vrf_prove(&vrf_sk, &beacon).unwrap();
         record.metadata.insert("epoch_number".into(), serde_json::json!(pm_epoch));
         record.metadata.insert("epoch_vrf_output".into(), serde_json::json!(hex::encode(out.as_bytes())));
         record.metadata.insert("epoch_vrf_proof".into(), serde_json::json!(hex::encode(proof.to_bytes())));
+        let creator = creator_identity_hash(&record);
+        let genesis = if creator_is_genesis {
+            creator.clone()
+        } else {
+            "r1x1p_other_genesis_authority_deadbeef".to_string()
+        };
+        (record, storage, dir, epoch_state, genesis, vrf_pk, creator)
+    }
 
+    #[test]
+    fn r1x1p_partition_merge_nongenesis_defers_under_empty_view() {
+        // INVERTS the R1-X1-V F13 pin (`r1x1v_partition_merge_nongenesis_unaffected_by_empty_view`,
+        // 2026-09-02), which encoded B7's false premise that the partition-merge
+        // arm "cannot wedge the tip". It can: `register_seal`'s equal-epoch
+        // canonicalization is lex-min record hash with no weight on the default
+        // path. A non-genesis seal BEHIND our tip under an EMPTY view must now
+        // DEFER on the stake arm, tagged with the `partition-merge` arm marker.
+        let (record, storage, _dir, epoch_state, genesis, vrf_pk, _creator) =
+            r1x1p_partition_merge_seal(5, false);
         let res = verify_epoch_seal_no_merkle(
             &record, &storage, &epoch_state, &genesis, Some(&vrf_pk), None, SealStakeView::empty(),
         );
-        if let Err(ref e) = res {
-            assert!(!e.to_string().contains("stake-unverifiable"), "stake gate must not fire on partition-merge: {e}");
-        }
-        assert!(res.is_ok(), "partition-merge non-genesis seal must verify under an empty view: {:?}", res.err());
+        let msg = res.expect_err("unstaked non-genesis partition-merge seal must defer").to_string();
+        assert!(msg.contains("stake-unverifiable"), "got: {msg}");
+        assert!(msg.contains("partition-merge"), "arm marker missing: {msg}");
+        assert!(!msg.contains("VRF"), "must not route to the VRF arm: {msg}");
+        assert!(
+            crate::network::gossip::is_retryable_ingest_rejection(&msg),
+            "must be retryable (DEFER, not reject): {msg}"
+        );
     }
 
+    #[test]
+    fn r1x1p_same_height_rival_nongenesis_defers_under_empty_view() {
+        // gap 0 — the V-P headline vector: a same-height rival whose record
+        // hash sorts below ours would have SWAPPED the canonical tip in
+        // `register_seal`. It routes to the partition-merge arm
+        // (`epoch == our_latest`, neither `== expected` nor `> our_latest`).
+        let zone = ZoneId::from_legacy(0);
+        let (record, storage, _dir, epoch_state, genesis, vrf_pk, _creator) =
+            r1x1p_partition_merge_seal(10, false);
+        let res = verify_epoch_seal_no_merkle(
+            &record, &storage, &epoch_state, &genesis, Some(&vrf_pk), None, SealStakeView::empty(),
+        );
+        let msg = res.expect_err("same-height rival from an unstaked creator must defer").to_string();
+        assert!(msg.contains("stake-unverifiable") && msg.contains("partition-merge"), "got: {msg}");
+        assert!(crate::network::gossip::is_retryable_ingest_rejection(&msg), "got: {msg}");
+        assert_eq!(
+            epoch_state.latest_seal_id.get(&zone).map(String::as_str),
+            Some("seal-10"),
+            "verification must never touch the registered tip"
+        );
+    }
+
+    #[test]
+    fn r1x1p_partition_merge_defers_when_not_member() {
+        // A full (>= BOOTSTRAP_MIN_STAKERS) set that does NOT contain the
+        // creator: membership, not set size alone, is the predicate.
+        let (record, storage, _dir, epoch_state, genesis, vrf_pk, _creator) =
+            r1x1p_partition_merge_seal(5, false);
+        let staked: HashSet<String> = (0..crate::network::aggregator::BOOTSTRAP_MIN_STAKERS)
+            .map(|i| format!("r1x1p-stranger-anchor-{i}"))
+            .collect();
+        let res = verify_epoch_seal_no_merkle(
+            &record, &storage, &epoch_state, &genesis, Some(&vrf_pk), None, SealStakeView { staked: &staked },
+        );
+        let msg = res.expect_err("non-member creator must defer on partition-merge").to_string();
+        assert!(msg.contains("stake-unverifiable") && msg.contains("partition-merge"), "got: {msg}");
+        assert!(!msg.contains("bootstrap regime"), "set is full — membership, not size, failed: {msg}");
+    }
+
+    #[test]
+    fn r1x1p_partition_merge_defers_in_bootstrap_regime() {
+        // Creator IS staked but the set is below BOOTSTRAP_MIN_STAKERS: under
+        // the bootstrap regime only genesis may seal.
+        let (record, storage, _dir, epoch_state, genesis, vrf_pk, creator) =
+            r1x1p_partition_merge_seal(5, false);
+        let staked: HashSet<String> =
+            [creator, "r1x1p-filler-anchor-1".to_string()].into_iter().collect();
+        assert!(staked.len() < crate::network::aggregator::BOOTSTRAP_MIN_STAKERS);
+        let res = verify_epoch_seal_no_merkle(
+            &record, &storage, &epoch_state, &genesis, Some(&vrf_pk), None, SealStakeView { staked: &staked },
+        );
+        let msg = res.expect_err("bootstrap regime: non-genesis partition-merge must defer").to_string();
+        assert!(msg.contains("stake-unverifiable") && msg.contains("bootstrap regime"), "got: {msg}");
+    }
+
+    #[test]
+    fn r1x1p_partition_merge_vrf_deferral_precedes_stake_gate() {
+        // No verifiable proposer key → the `VRF-unverifiable` marker, never the
+        // stake marker (arm order mirrors the catch-up arm; ingest dispatches on
+        // the substrings, so the two must stay disjoint).
+        let (record, storage, _dir, epoch_state, genesis, _vrf_pk, _creator) =
+            r1x1p_partition_merge_seal(5, false);
+        let res = verify_epoch_seal_no_merkle(
+            &record, &storage, &epoch_state, &genesis, None, None, SealStakeView::empty(),
+        );
+        let msg = res.expect_err("unregistered proposer key must defer on partition-merge").to_string();
+        assert!(msg.contains("VRF-unverifiable") && msg.contains("partition-merge"), "got: {msg}");
+        assert!(!msg.contains("stake-unverifiable"), "got: {msg}");
+        assert!(crate::network::gossip::is_retryable_ingest_rejection(&msg), "got: {msg}");
+    }
+
+    #[test]
+    fn r1x1p_partition_merge_passes_for_admissible_creator() {
+        // Positive control on both gaps: a staked member with a registered key,
+        // set out of the bootstrap regime → the arm accepts exactly as before.
+        for pm_epoch in [5u64, 10u64] {
+            let (record, storage, _dir, epoch_state, genesis, vrf_pk, creator) =
+                r1x1p_partition_merge_seal(pm_epoch, false);
+            let mut staked: HashSet<String> = (1..crate::network::aggregator::BOOTSTRAP_MIN_STAKERS)
+                .map(|i| format!("r1x1p-peer-anchor-{i}"))
+                .collect();
+            staked.insert(creator);
+            assert!(staked.len() >= crate::network::aggregator::BOOTSTRAP_MIN_STAKERS);
+            let res = verify_epoch_seal_no_merkle(
+                &record, &storage, &epoch_state, &genesis, Some(&vrf_pk), None, SealStakeView { staked: &staked },
+            );
+            assert!(
+                res.is_ok(),
+                "admissible creator must pass the partition-merge arm (epoch {pm_epoch}): {:?}",
+                res.err()
+            );
+        }
+    }
+
+    #[test]
+    fn r1x1p_partition_merge_genesis_unaffected() {
+        // Genesis is the trust root (VRF-exempt by design): the creator gate
+        // never applies, so the live first-external-join path is untouched.
+        let (record, storage, _dir, epoch_state, genesis, vrf_pk, _creator) =
+            r1x1p_partition_merge_seal(5, true);
+        let res = verify_epoch_seal_no_merkle(
+            &record, &storage, &epoch_state, &genesis, Some(&vrf_pk), None, SealStakeView::empty(),
+        );
+        assert!(res.is_ok(), "genesis partition-merge seal must verify under an empty view: {:?}", res.err());
+    }
     #[test]
     fn test_verify_epoch_seal_wrong_vrf_key_fails() {
         use crate::crypto::vrf::VrfSecretKey;
@@ -16122,6 +16414,46 @@ mod tests {
         let win = state.recent_seal_hashes.get(&zone).expect("window");
         assert_eq!(win.len() as u64, SUPER_SEAL_INTERVAL);
         assert_eq!(win[&SUPER_SEAL_INTERVAL], [0x00; 32]);
+
+        // R1-X1-CS (T2): fresh epoch — a heavier lex-larger seal arrives FIRST
+        // and takes the tip weight-blind (nothing to compare against), then a
+        // lighter lex-min rival is demoted by the weight reconcile. The window
+        // must still hold the lex-min (boot repopulation would), while the tip
+        // keeps the weight winner. Pre-CS the demoted seal reached only the
+        // VRF ring and the window kept the lex-larger hash.
+        let tip2 = SUPER_SEAL_INTERVAL + 1;
+        let (heavy, _) = m1_seal(&zone, tip2, 5);
+        assert!(state.register_seal_with_reconcile(&heavy, "epoch:0:65:heavy", [0xee; 32], 9, 0));
+        assert_eq!(state.recent_seal_hashes.get(&zone).expect("window")[&tip2], [0xee; 32]);
+        let (light, _) = m1_seal(&zone, tip2, 6);
+        assert!(!state.register_seal_with_reconcile(&light, "epoch:0:65:light", [0x03; 32], 5, 9));
+        assert_eq!(state.latest_seal_hash.get(&zone).copied(), Some([0xee; 32]), "tip = weight winner");
+        let win = state.recent_seal_hashes.get(&zone).expect("window");
+        assert_eq!(win[&tip2], [0x03; 32], "window = lex-min of the stored set");
+        assert_eq!(win.len() as u64, SUPER_SEAL_INTERVAL);
+        assert_eq!(win.keys().next().copied(), Some(2), "floor advanced with the tip");
+
+        // Flag-off path: a lex-min rival for an epoch BELOW the tip but inside
+        // the window (a dual-proposer seal that gossip delivered late) corrects
+        // that epoch's entry and touches nothing else. Pre-CS `register_seal`
+        // sent a stale-epoch seal to the VRF ring only.
+        let (late, _) = m1_seal(&zone, 40, 7);
+        state.register_seal(&late, "epoch:0:40:late", [0x00; 32]);
+        assert_eq!(state.latest_epoch.get(&zone).copied(), Some(tip2));
+        assert_eq!(state.latest_seal_hash.get(&zone).copied(), Some([0xee; 32]));
+        let win = state.recent_seal_hashes.get(&zone).expect("window");
+        assert_eq!(win[&40], [0x00; 32], "late lex-min rival corrected epoch 40");
+        assert_eq!(win.len() as u64, SUPER_SEAL_INTERVAL);
+        assert!(state.super_seal_window_complete(&zone, tip2));
+
+        // Below the floor: a no-op — the tip never moves backwards, and boot
+        // repopulation windows off the same floor.
+        let (gone, _) = m1_seal(&zone, 1, 8);
+        state.register_seal(&gone, "epoch:0:1:gone", [0x00; 32]);
+        let win = state.recent_seal_hashes.get(&zone).expect("window");
+        assert_eq!(win.len() as u64, SUPER_SEAL_INTERVAL);
+        assert_eq!(win.keys().next().copied(), Some(2));
+        assert!(state.super_seal_window_complete(&zone, tip2));
     }
 
     #[test]
@@ -16135,9 +16467,25 @@ mod tests {
         let zone = "/zone/m1";
         let zid = ZoneId::new(zone);
 
+        // R1-X1-CS (T1): two rivals for one in-window epoch, ORDERED by hash
+        // rather than searched for (a salt search can miss; ordering two
+        // builds cannot). The lex-LARGER one goes into the history so it is
+        // the live incumbent; the lex-min one lands late, further down.
+        let late_epoch = 100u64;
+        let (early_rival, late_rival) = {
+            let p = build_test_seal_record(&identity, zone, late_epoch, b"pair-a");
+            let q = build_test_seal_record(&identity, zone, late_epoch, b"pair-b");
+            if p.record_hash() < q.record_hash() { (q, p) } else { (p, q) }
+        };
+
         let mut history: Vec<(u64, ValidationRecord)> = Vec::new();
         for epoch in 30..=128u64 {
-            let a = write_test_seal(&mut engine, &identity, zone, epoch, &epoch.to_be_bytes());
+            let a = if epoch == late_epoch {
+                store_test_seal(&mut engine, zone, epoch, &early_rival);
+                early_rival.clone()
+            } else {
+                write_test_seal(&mut engine, &identity, zone, epoch, &epoch.to_be_bytes())
+            };
             if epoch % 17 == 0 {
                 // Dual-proposer rival; even epochs see the rival FIRST.
                 let b = write_test_seal(&mut engine, &identity, zone, epoch, b"rival");
@@ -16179,6 +16527,42 @@ mod tests {
                 .expect("rival pair");
             assert_eq!(live_win[&e], lex_min, "epoch {e}: lex-min of the rival pair");
         }
+
+        // R1-X1-CS (T1): a lex-min rival that lands AFTER the tip advanced past
+        // its epoch (dual proposer + gossip delay; gossip accepts seals up to
+        // STALE_EPOCH_SEAL_GAP = 100 epochs behind, wider than the window) is
+        // stored in CF_EPOCHS like any seal, so boot repopulation and the
+        // admission A4 rocks fallback derive it; the live window must too, or
+        // two honest nodes compute different 64-hash roots for one boundary.
+        // Pre-CS `register_seal` sent a stale-epoch seal to the VRF ring only.
+        let incumbent = live.recent_seal_hashes.get(&zid).expect("live window")[&late_epoch];
+        assert_eq!(incumbent, early_rival.record_hash(), "lex-larger rival is the live incumbent");
+        // Store the EXACT record built above (a rebuild never hashes the same:
+        // the uuid7 id and the creation stamp are inside the hash).
+        store_test_seal(&mut engine, zone, late_epoch, &late_rival);
+        let late = late_rival;
+        let late_seal = extract_epoch_seal(&late).unwrap().expect("test record is a seal");
+        live.register_seal(&late_seal, &late.id, late.record_hash());
+        assert_eq!(live.latest_epoch.get(&zid).copied(), Some(128), "tip untouched");
+        // Below the floor (65): stored, but outside every derivation's window.
+        let gone = write_test_seal(&mut engine, &identity, zone, 40, b"late-below-floor");
+        let gone_seal = extract_epoch_seal(&gone).unwrap().expect("test record is a seal");
+        live.register_seal(&gone_seal, &gone.id, gone.record_hash());
+
+        let mut boot2 = EpochState::new();
+        boot2.latest_epoch.insert(zid.clone(), 128);
+        repopulate_recent_seal_hashes(&mut boot2, &engine);
+        let live_win = live.recent_seal_hashes.get(&zid).expect("live window");
+        assert_eq!(
+            Some(live_win),
+            boot2.recent_seal_hashes.get(&zid),
+            "live == boot after late rivals"
+        );
+        assert_eq!(live_win[&late_epoch], late.record_hash(), "late lex-min rival took its entry");
+        assert_eq!(live_win.len() as u64, SUPER_SEAL_INTERVAL);
+        assert_eq!(live_win.keys().next().copied(), Some(65));
+        assert!(live.should_create_super_seal(&zid) && boot2.should_create_super_seal(&zid));
+        assert_eq!(live.snapshot_recent_seal_hashes(&zid), boot2.snapshot_recent_seal_hashes(&zid));
     }
 
     #[test]
