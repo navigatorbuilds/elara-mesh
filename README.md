@@ -165,6 +165,36 @@ balance fails with `LeafHashMismatch`, corrupting one Merkle sibling fails with
 one-byte-different root. Read-only — the SDK holds no key and cannot move funds.
 Source: [`examples/light_client_live.rs`](examples/light_client_live.rs).
 
+### For agents — the same verdict as a paid API (x402 on Algorand)
+
+Everything above is free and stays free. What an agent cannot produce alone is a
+verdict someone *else* will accept, so the same verifier also runs as a paid
+[x402](https://x402.org) resource at
+`https://elara-verify-x402.aivelikivodja.workers.dev` (`GET /` describes it):
+
+| Route | Price (USDC on Algorand mainnet) | What it answers |
+|---|---|---|
+| `POST /verify/record` | $0.005 | is this Elara record well-formed, identity-bound, and validly signed (ML-DSA-65 / Dilithium3) |
+| `POST /authority/check` | $0.02 | was this act inside a time-boxed, revocable mandate from a named principal — evaluated over the bundle you submit |
+
+Each paid response carries an Ed25519 countersignature over the input hash and
+the verdict, bound to that call's own Algorand payment transaction id: a public
+fact nobody can forge or backdate. Check it against `GET /attestation-key` (the
+key is classical, labelled `pq:false`; the on-chain payment is the anchor). A
+bare request returns HTTP 402 with the price and pay-to address, and any x402
+v2 client with Algorand network support pays and retries:
+
+```bash
+curl -si -X POST https://elara-verify-x402.aivelikivodja.workers.dev/verify/record \
+  -H 'content-type: application/json' -d '{}' | grep -i '^payment-required'
+```
+
+Fast tier only: Dilithium3 records and mandate bundles. SPHINCS+ dual-signature
+records are declined with a 4xx that says so; verify those with the CLI above.
+Usage, stated plainly: the endpoint went live in early September 2026, and the
+only payments settled so far are our own end-to-end tests. It is listed in the
+x402 Bazaar catalog and entered in the Algorand Foundation's x402 Global Challenge.
+
 ## Why now — the verification gap
 
 Intelligence is becoming abundant; verification is not. As fluent AI output
