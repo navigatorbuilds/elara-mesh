@@ -249,6 +249,18 @@ see Project status above):
   `examples/verify/` ships a production seal with its own embedded pulse,
   offline-checkable. Making that the network default is the remaining step
   (`docs/KNOWN-LIMITATIONS.md` §2).
+- **Bitcoin existed-by — live today, sample published.** The other half of the
+  time bracket. Since June 2026 the authority node has submitted its latest
+  anchor-signed epoch seal (drand pulse included) to **OpenTimestamps** every
+  hour; each proof matures into a Bitcoin block-header attestation, and the
+  node archives that block's 80-byte header from two independent sources.
+  `elara-verify` grades the leg offline (feature `verify-anchor`): PASS when a
+  matured proof lands in a block whose header hash the verifier pins, PARTIAL
+  while it is still calendar-pending — no Bitcoin node, no calendar server at
+  check time. The sample bundle in `examples/verify/` carries one:
+  `epoch-41340-zone-0.json.ots`, committed into block 957487, with that
+  block's header shipped alongside. The full hourly trail is not published
+  yet — today it lives on the operator's node.
 - **Realms.** Three membership modes — open self-assembling mesh, federated
   consortium networks, fully sovereign isolated deployments — where a realm
   is an *exposure policy*, never a privilege: no tier confers any advantage
