@@ -257,10 +257,11 @@ see Project status above):
   `elara-verify` grades the leg offline (feature `verify-anchor`): PASS when a
   matured proof lands in a block whose header hash the verifier pins, PARTIAL
   while it is still calendar-pending — no Bitcoin node, no calendar server at
-  check time. The sample bundle in `examples/verify/` carries one:
-  `epoch-41340-zone-0.json.ots`, committed into block 957487, with that
-  block's header shipped alongside. The full hourly trail is not published
-  yet — today it lives on the operator's node.
+  check time. The sample bundle in `examples/verify/` carries two, 57 days
+  apart on the same chain: `epoch-41340-zone-0.json.ots` (block 957487,
+  2026-07-10) and `epoch-107599-zone-0.json.ots` (block 965547, 2026-09-05),
+  each with that block's header shipped alongside. The full hourly trail is
+  not published yet — today it lives on the operator's node.
 - **Realms.** Three membership modes — open self-assembling mesh, federated
   consortium networks, fully sovereign isolated deployments — where a realm
   is an *exposure policy*, never a privilege: no tier confers any advantage

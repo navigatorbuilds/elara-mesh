@@ -715,6 +715,17 @@ const PINNED_BTC_HEADER_HASHES: &[(u64, [u8; 32])] = &[
             0x00, 0x00, 0x00, 0x00,
         ],
     ),
+    // block 965547 — display 000000000000000000010b8abe3c53b62958b01fe855189e346913ab80e8e435
+    // (the second examples/verify/ demo anchor: epoch 107599, zone 0, stamped
+    // 2026-09-05 — a later seal on the same live chain, 57 days after 41340).
+    (
+        965547,
+        [
+            0x35, 0xe4, 0xe8, 0x80, 0xab, 0x13, 0x69, 0x34, 0x9e, 0x18, 0x55, 0xe8, 0x1f, 0xb0,
+            0x58, 0x29, 0xb6, 0x53, 0x3c, 0xbe, 0x8a, 0x0b, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00,
+        ],
+    ),
 ];
 
 /// The pinned double-SHA256 block hash for `height`, if the verifier ships one.

@@ -198,6 +198,74 @@ here. That is the point.
 > behaviour is *shown*, not just asserted, and the leg fails the demo if a future
 > change ever lets a withheld proof pass as VERIFIED.
 
+### A second, later sample — epoch 107599 → Bitcoin block 965547
+
+```bash
+$V --anchor examples/verify/epoch-107599-zone-0.json
+```
+
+The same pipeline, 57 days later, on the same chain and under the same zone-0
+validator key: `epoch-107599-zone-0.json` was stamped 2026-09-05 by the producing
+node's hourly stamping job and matured by its daily upgrade job (two ops cron
+scripts, not part of this public tree). Its files, all offline:
+
+| File | What it proves |
+|------|----------------|
+| `epoch-107599-zone-0.json`      | the epoch-anchor artifact: `seal_hash` `65f4ea8e…`, drand round 6438006 **with the beacon's BLS signature** |
+| `epoch-107599-zone-0.json.ots`  | OpenTimestamps: the SHA-256 path committing the seal into **Bitcoin block 965547** |
+| `btc-header-965547.txt`         | the archived 80-byte header of that block — its hash is pinned in the verifier, so this leg is trustless |
+| `epoch-107599-zone-0.json.tsr`  | an RFC-3161 timestamp token — independent witness, **not checked by `elara-verify`** |
+| `epoch-107599-zone-0.json.qtsr` | an **eIDAS-qualified** timestamp token — **not checked by `elara-verify`** |
+| `epoch-107599-zone-0.seal.wire` | the seal itself (49,171 bytes, wire v7), signed by the same `zone-0-anchor-pubkey.hex` key as epoch 41340's |
+
+Expected verdict (captured from the verifier run that shipped this sample):
+
+```
+✓ VERIFIED — all 3 checks pass; the proven claims are exactly the ✓ lines above (the full record → inclusion → seal → anchor chain was not established).
+
+  ✓ anchor structure  epoch-anchor for epoch 107599 (seal 65f4ea8e7a3a7c15)
+  ✓ drand not-before  this existed-by anchor cites drand chain 8990e7a9aaed2ffe round 6438006, published 2026-09-05 01:20:00 UTC — TRUSTLESS freshness of the anchor (the existed-by proof is provably not back-dated) — NOT a lower bound on the seal, which predates it: the beacon's BLS signature VERIFIES against the pinned League-of-Entropy key
+  ✓ existed-by        OTS proof commits the seal into Bitcoin block 965547; the archived header is authenticated against the block hash PINNED in this verifier — TRUSTLESS, existed by 2026-09-05 01:47:09 UTC
+
+VERDICT: VERIFIED
+         TIME BRACKET (seal 65f4ea8e7a3a7c15…):
+           the seal was NOTARIZED into Bitcoin within a trustless window:
+             after  2026-09-05 01:20:00 UTC  — drand round (BLS-verified — trustless): the anchor is provably fresh, minted after this pulse
+             by     2026-09-05 01:47:09 UTC  — Bitcoin block 965547 (archived header — pin-authenticated, trustless): the anchoring was mined by here
+           ⇒ the seal provably existed BY the upper bound. Its OWN (earlier) not-before is proven from the seal's embedded pulse — verify the seal wire.
+```
+
+A **27m09s anchoring window** this time (Bitcoin's block interval sets the
+width, not us). The seal's own, earlier not-before is the pulse it embeds —
+round 6438005, published 2026-09-05 01:19:30 UTC, one 30-second beacon period
+before the anchor's round — which the seal leg BLS-verifies:
+
+```bash
+$V --seal examples/verify/epoch-107599-zone-0.seal.wire \
+   --trusted-anchor "$(cat examples/verify/zone-0-anchor-pubkey.hex)" \
+   --expected-hash 65f4ea8e7a3a7c1528b30d4ce307574a10c3f8d2a63bb204aaf78c7adb4c1d21
+```
+
+```
+  ✓ seal anchor       seal 65f4ea8e7a3a7c15… is signed by a pinned anchor (ML-DSA-65 valid); record_hash matches the header you pinned
+  ✓ drand not-before  the seal cites drand chain 8990e7a9aaed2ffe round 6438005, published 2026-09-05 01:19:30 UTC — TRUSTLESS not-before for the seal: the beacon's BLS signature VERIFIES against the pinned League-of-Entropy key
+
+VERDICT: VERIFIED
+```
+
+Add `--anchor examples/verify/epoch-107599-zone-0.json` to that command and the
+verifier checks all six claims in one run, including `seal↔anchor` — *the anchor
+commits to THIS seal* — for a VERIFIED exit 0. (Leave `--expected-hash` off and
+the seal's identity is honestly graded ⚠ UNPROVEN, exit 3: a valid signature
+alone proves that *some* pinned anchor signed *some* seal, and the verifier says
+so rather than guessing.)
+
+What this sample does **not** show: it sealed an empty epoch (`record_count` 0),
+so it proves the seal's timing, not any record's inclusion — the record,
+inclusion and account-proof legs (§1, §3, `verify.sh`) stay on epoch 41340. Two
+committed seals you can check, 57 days apart, is exactly the claim; the
+operator's hourly trail beyond these two is not published here.
+
 ## Run both at once
 
 ```bash
@@ -527,6 +595,18 @@ one epoch of one chain**:
   6276496 (2026-07-10 23:25:00 UTC) and timestamped into Bitcoin block
   957487 (23:34:41 UTC). The anchor's `seal_hash` field IS the seal's hash —
   the convergence you exploit with the one-run chained command above.
+
+- **The second anchor + seal (§2, added 2026-09-05):** `epoch-107599-zone-0.json`
+  and `epoch-107599-zone-0.seal.wire` — a later seal of the same zone-0 chain
+  (hash `65f4ea…`, wire v7, `record_count` 0), signed by the same validator key,
+  with its own embedded pulse (round 6438005, 2026-09-05 01:19:30 UTC); anchored
+  against drand round 6438006 (01:20:00 UTC) and timestamped into Bitcoin block
+  965547 (01:47:09 UTC). Produced by our node's cron jobs
+  (hourly stamp, daily upgrade; the ops scripts are not part of this tree); the seal
+  bytes were pulled from the producing node by seal id the way
+  `scripts/harvest-verify-bundle.sh` does. The block's hash is pinned in the
+  verifier, so the existed-by leg is trustless; the `.tsr`/`.qtsr` tokens beside
+  it are the same two independent witnesses as for 41340.
 
 The verifier still never fakes a link: leg 3 pairs the record with the anchor
 and honestly grades the unclaimed `record↔seal` bind ⚠ UNPROVEN, and an anchor

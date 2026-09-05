@@ -390,8 +390,13 @@ jobs:
       # neither run above enables — so a warning in it (e.g. a dead binding
       # field) shipped uncaught. Gate it explicitly: this is the "verify us,
       # don't trust us" binary a reviewer compiles first.
-      - name: clippy (verify-cli, elara-verify bin)
-        run: cargo clippy --features verify-cli --bin elara-verify -- -D warnings
+      # `--tests` + `node` (2026-09-05): the bin's #[cfg(test)] module was never
+      # linted by any gate (required-features keeps it out of --all-targets), and
+      # it deliberately spans both feature graphs (loe_trust_root_drift_guard
+      # pins verifier == node-fetcher LoE constants), so lint it the way the
+      # test gate builds it.
+      - name: clippy (verify-cli, elara-verify bin + its #[cfg(test)] module)
+        run: cargo clippy --features "node verify-cli" --bin elara-verify --tests -- -D warnings
       # NO pyo3 leg here — DELIBERATE, same law as the cognition note above:
       # this workflow executes only on the public mirror, and the mirror's
       # Stage-1d strip removes the `pyo3` feature (the bindings are held back),

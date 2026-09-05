@@ -374,7 +374,7 @@ mod tests {
         // last branch = sha256 -> Bitcoin attestation. The 0xff path must still
         // reach the Bitcoin leaf.
         let d0 = Sha256::digest(b"forked");
-        let expected_root = Sha256::digest(&d0);
+        let expected_root = Sha256::digest(d0);
 
         let mut proof = ots_header(&d0);
         proof.push(0xff); // fork: another branch follows
@@ -468,6 +468,46 @@ mod tests {
     }
 
     #[test]
+    fn btc_header_pin_authenticates_genuine_965547_second_sample() {
+        // The second examples/verify/ demo anchor (epoch 107599, zone 0, stamped
+        // 2026-09-05) commits into block 965547. Same contract as 953657 above:
+        // the genuine archived header double-SHA256s to the compiled-in pin →
+        // TRUSTLESS existed-by; a one-byte substitution does not.
+        let genuine = "00807434472a835bdafc56da992bf7ab7eba373d9600adbc840700000000000000000000ac68fc34a1599696636543062b2228c69ff0da9e9f2eb84c6ee0c63f004eb58f9d749b6ac13c02170d0f39ea";
+        let pin = pinned_btc_hash(965_547).expect("965547 must be pinned");
+        let mut display = pin;
+        display.reverse();
+        assert_eq!(
+            hex::encode(display),
+            "000000000000000000010b8abe3c53b62958b01fe855189e346913ab80e8e435",
+            "pin must be block 965547's display hash in internal byte order"
+        );
+
+        let dir = std::env::temp_dir().join("elara_verify_pin_test_965547");
+        let _ = std::fs::create_dir_all(&dir);
+        let p = dir.join("btc-header-965547.txt");
+        std::fs::write(&p, format!("height: 965547\nblockstream_header: {genuine}\n")).unwrap();
+        match load_btc_header(&dir, 965_547) {
+            HeaderLoad::Found(_, _, block_hash) => {
+                assert_eq!(block_hash, pin, "genuine header must double-SHA256 to the pin");
+            }
+            _ => panic!("genuine header should load as Found"),
+        }
+
+        let mut raw = hex::decode(genuine).unwrap();
+        raw[79] ^= 0x01;
+        std::fs::write(&p, format!("height: 965547\nblockstream_header: {}\n", hex::encode(&raw)))
+            .unwrap();
+        match load_btc_header(&dir, 965_547) {
+            HeaderLoad::Found(_, _, block_hash) => {
+                assert_ne!(block_hash, pin, "tampered header must NOT match the pin");
+            }
+            _ => panic!("tampered header should still load as Found"),
+        }
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
     fn seal_anchor_accepts_pinned_rejects_unknown_and_wrong_hash() {
         // A seal record signed by an anchor key. --seal must accept it when that
         // key is pinned, and reject an unpinned anchor or a wrong expected-hash.
@@ -481,7 +521,7 @@ mod tests {
         // Pinned anchor + correct --expected-hash → Pass (identity bound).
         let mut checks_pin = Vec::new();
         let good_hash = hex::encode(rec.record_hash());
-        verify_seal(&p, &[anchor_hex.clone()], Some(&good_hash), &mut checks_pin).expect("runs");
+        verify_seal(&p, std::slice::from_ref(&anchor_hex), Some(&good_hash), &mut checks_pin).expect("runs");
         assert!(
             checks_pin.iter().any(|c| c.name == "seal anchor" && c.status == Status::Pass),
             "pinned anchor + matching expected-hash accepted"
@@ -491,7 +531,7 @@ mod tests {
         // signed by a trusted anchor, but its identity is bound to nothing (the
         // record_hash check was a tautology). A green ✓ here was the fail-open.
         let mut checks = Vec::new();
-        verify_seal(&p, &[anchor_hex.clone()], None, &mut checks).expect("runs");
+        verify_seal(&p, std::slice::from_ref(&anchor_hex), None, &mut checks).expect("runs");
         assert!(
             checks.iter().any(|c| c.name == "seal anchor" && c.status == Status::Partial),
             "unpinned (no --expected-hash) seal is PARTIAL, never a green Pass"
@@ -1667,7 +1707,7 @@ mod tests {
     }
 
     #[test]
-    fn account_time_bracket_requires_a_PROVEN_anchor_bound_not_just_chain_linkage() {
+    fn account_time_bracket_requires_a_proven_anchor_bound_not_just_chain_linkage() {
         let pass = |name: &'static str| Check { name, status: Status::Pass, detail: String::new() };
         // Fully chain-linked (account inclusion + account-root↔seal + seal↔anchor).
         let linked = vec![pass("account inclusion"), pass("account-root↔seal"), pass("seal↔anchor")];
@@ -2062,13 +2102,13 @@ mod hostile_input_tests {
         for filler in [0x00u8, 0x08, 0xf0, 0xff, 0x51] {
             let mut v = MAGIC.to_vec();
             v.push(0x01); // version varint
-            v.extend(std::iter::repeat(filler).take(64));
+            v.extend(std::iter::repeat_n(filler, 64));
             cases.push(v);
         }
         // deep fork nesting to exercise the recursion budget
         let mut deep = MAGIC.to_vec();
         deep.push(0x01);
-        deep.extend(std::iter::repeat(0xff).take(4096));
+        deep.extend(std::iter::repeat_n(0xff, 4096));
         cases.push(deep);
         for c in &cases {
             let _ = ots_bitcoin_attestations(c, &digest); // must return, never panic
@@ -2274,7 +2314,7 @@ mod hostile_input_tests {
         // regressed to unbounded call-stack depth — do not delete the probe.
         let digest = [0x11u8; 32];
         let mut deep = ots_prologue(&digest);
-        deep.extend(std::iter::repeat(0x08).take(OTS_MAX_OPS + 64));
+        deep.extend(std::iter::repeat_n(0x08, OTS_MAX_OPS + 64));
         let r = ots_bitcoin_attestations(&deep, &digest);
         assert!(r.is_err(), "budget-exhausted proof must Err (walk returned Ok)");
 
