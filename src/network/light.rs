@@ -516,7 +516,8 @@ fn coverage_headers_response_too_large(returned: usize) -> bool {
 /// @spec Protocol §11.3
 pub async fn light_sync_loop(
     state: std::sync::Arc<super::state::NodeState>,
-    mut shutdown: tokio::sync::mpsc::Receiver<()>,
+    mut shutdown: tokio::sync::watch::Receiver<()>,
+    hb: std::sync::Arc<super::supervision::LoopStatus>,
 ) {
     use std::time::Duration;
     use tracing::{debug, info, warn};
@@ -583,11 +584,13 @@ pub async fn light_sync_loop(
     loop {
         tokio::select! {
             _ = tokio::time::sleep(interval) => {}
-            _ = shutdown.recv() => {
+            _ = shutdown.changed() => {
                 debug!("light_sync_loop shutting down");
                 return;
             }
         }
+        // C5-B1 (audit 2026-08-30): supervised like the other 19 loops.
+        hb.heartbeat();
 
         // Stage 6 cooperative scheduler (Protocol §11.10): extra backoff
         // when host is saturated. Light sync downloads + verifies headers
@@ -2267,7 +2270,10 @@ mod tests {
             start: 0.0,
             end: 100.0,
             seal_record_hash: None,
-            seal_wire_version: 0,
+            // A10adj: an explicit pre-v7 version routes the v1 recipe this
+            // proof was built under. 0 is "unknown" and (since the audit fix)
+            // never a selector — pinned below.
+            seal_wire_version: 5,
         }).unwrap();
 
         assert!(state.verify_record(&ZoneId::from_legacy(0), 0, &proof));
@@ -2275,6 +2281,23 @@ mod tests {
         assert!(!state.verify_record(&ZoneId::from_legacy(0), 1, &proof));
         // Wrong zone
         assert!(!state.verify_record(&ZoneId::from_legacy(1), 0, &proof));
+
+        // A10adj: the SAME valid proof against an unknown-era header (0) must
+        // fail closed — 0 is never a fold selector (light.rs contract).
+        let mut unknown = LightState::new();
+        unknown.add_header(EpochHeader {
+            zone: ZoneId::from_legacy(2),
+            epoch_number: 0,
+            merkle_root: root,
+            previous_seal_hash: [0u8; 32],
+            record_count: 4,
+            account_smt_root: None,
+            start: 0.0,
+            end: 100.0,
+            seal_record_hash: None,
+            seal_wire_version: 0,
+        }).unwrap();
+        assert!(!unknown.verify_record(&ZoneId::from_legacy(2), 0, &proof));
     }
 
     // ── Gap 1: account-proof binds to signed header root ─────────────

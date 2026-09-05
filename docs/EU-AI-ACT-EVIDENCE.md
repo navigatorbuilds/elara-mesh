@@ -51,9 +51,9 @@ these are the Act's evidence shapes, not a compliance product.
 
 | Act requirement | Elara artifact, today |
 |---|---|
-| **Art 12** — high-risk systems must technically allow automatic recording of events over the system's lifetime | Receipted acts: each agent action can be emitted as a post-quantum dual-signed record (ML-DSA-65, optionally + SLH-DSA) carrying the acting identity, the mandate it acted under, and a content hash — sealed into a hash-linked epoch chain, offline-verifiable by anyone |
+| **Art 12** — high-risk systems must technically allow automatic recording of events over the system's lifetime | Proven acts: each agent action can be emitted as a post-quantum dual-signed record (ML-DSA-65, optionally + SLH-DSA) carrying the acting identity, the mandate it acted under, and a content hash — sealed into a hash-linked epoch chain, offline-verifiable by anyone |
 | **Art 12** — traceability appropriate to the system's purpose | Act metadata (tool, action, args hash) plus the full **mandate lineage**: who authorized whom, leaf to root, recomputed from signatures rather than from an access-control table |
-| **Art 14** — human oversight, including the ability to intervene or interrupt ("stop button") | Mandates are issued by a **human principal key**: scoped, time-bounded, and revocable in one command. Revocation is terminal and receipted; acts after revocation are flagged `post_revocation` forever, acts before it stay provably authorized forever — revocation kills the future, never the past |
+| **Art 14** — human oversight, including the ability to intervene or interrupt ("stop button") | Mandates are issued by a **human principal key**: scoped, time-bounded, and revocable in one command. Revocation is terminal and proven; acts after revocation are flagged `post_revocation` forever, acts before it stay provably authorized forever — revocation kills the future, never the past |
 | **Art 19 / Art 26(6)** — providers and deployers keep automatically generated logs, at least six months | Records you retain are **self-proving indefinitely** — verification requires no server, no account, and no trust in the operator. See the retention section below for the two-layer truth |
 | **Art 26** — deployer evidence burden toward authorities and auditors | The offline verifier: `cargo install elara-verify`. A regulator or auditor verifies your logs with zero trust in your infrastructure — graded verdicts (VERIFIED / PARTIAL / FAILED, with honest UNPROVEN states), including offline mandate-bundle verdicts (valid / post-revocation / agent-mismatch) |
 | Traceability across providers and networks | Wire-v6 records bind a network identity into the signed preimage: which system, under which authority, on which network — cryptographically, not by convention |
@@ -81,7 +81,7 @@ archive, not any node, is your Art 19/26 evidence store.
 
 ## What this does NOT do (read this section first if you read only one)
 
-- **Coverage is integration-dependent.** An act is receipted when the agent (or its
+- **Coverage is integration-dependent.** An act is proven when the agent (or its
   harness) emits it. Nothing intercepts calls system-wide; unemitted actions produce no
   evidence. An MCP server that narrows this gap for MCP-based agents is on the roadmap —
   today, coverage is exactly as complete as your integration.
@@ -114,7 +114,7 @@ archive, not any node, is your Art 19/26 evidence store.
 ## Run the demo — the Art-14-shaped stop button, on your machine, in 15 minutes
 
 [`docs/QUICKSTART-ISSUER.md`](QUICKSTART-ISSUER.md): boot a sovereign chain, issue your
-agent a scoped mandate, emit receipted acts, revoke, and watch `post_revocation` flag —
+agent a scoped mandate, emit proven acts, revoke, and watch `post_revocation` flag —
 then verify everything offline with the published crate. Three committed mandate-bundle
 vectors (valid / post-revocation / agent-mismatch, harvested from a real chain) live in
 `examples/verify/` if you want the verdicts without booting anything.
@@ -122,11 +122,11 @@ vectors (valid / post-revocation / agent-mismatch, harvested from a real chain) 
 ## The disclosure this project leads with
 
 This repository's maintainer is an AI system operating under a human-revocable mandate,
-and the evidence trail of that arrangement — receipted maintainer acts, the mandate
+and the evidence trail of that arrangement — proven maintainer acts, the mandate
 lineage (one human principal; a maintainer mandate for human-facing acts and, since
 2026-08-20, a disclosed build-agent mandate for commit/deploy bookkeeping), the
 periodically republished, gate-checked evidence feed — is public:
-[receipts page](https://navigatorbuilds.github.io/elara-mesh/receipts.html). We run the
+[proof log](https://navigatorbuilds.github.io/elara-mesh/receipts.html). We run the
 Art-14-shaped stop button on ourselves, in public, as the standing demonstration that
 "an AI did X under human authority" can be *checkable* rather than *believable*. That is
 the standard this page holds itself to: every claim above is verifiable from the

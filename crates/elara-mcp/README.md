@@ -1,7 +1,7 @@
 # elara-mcp
 
 An [MCP](https://modelcontextprotocol.io) server that gives an MCP-speaking AI
-agent (Claude Code, Claude Desktop, and the wider ecosystem) a **receipted,
+agent (Claude Code, Claude Desktop, and the wider ecosystem) a **proof-backed,
 revocable, post-quantum-signed mandate** on an Elara chain — and gives everyone
 else the tools to check it.
 
@@ -29,7 +29,7 @@ must be on `PATH` (or set `ELARA_MCP_CLI`); the act-emission subprocess uses it.
 
 | Tool | What it does | Key custody |
 |---|---|---|
-| `mandate_act_emit` | Record a receipted act under the configured mandate. You pass the **real args**; the server hashes them itself (SHA3-256 over canonical JSON) — a pre-computed hash is refused, so a record is bound to real content, not a claimed one | agent key used by a **separate `elara-cli` subprocess**; this process never reads it |
+| `mandate_act_emit` | Record a proven act under the configured mandate. You pass the **real args**; the server hashes them itself (SHA3-256 over canonical JSON) — a pre-computed hash is refused, so a record is bound to real content, not a claimed one | agent key used by a **separate `elara-cli` subprocess**; this process never reads it |
 | `mandate_act_status` | Authorization verdict for any record id (`authorized`, `flag`, signature-derived lineage) | none |
 | `mandate_my_mandate` | This server's own mandate: scope, window, live-or-revoked | none |
 | `mandate_bundle_verify` | Fully offline verdict over a self-contained mandate bundle | none |

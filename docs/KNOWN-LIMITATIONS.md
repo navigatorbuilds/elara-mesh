@@ -196,10 +196,24 @@ design-review-first fix after launch:
 - **Cross-zone stuck-zone escalation** (a recovery seal for a zone that stops
   finalizing) cannot currently trigger under the production timing clamp —
   relevant only with multiple zones. (Finding AGG-01.)
-- **Per-identity submission rate-limits** anchor their daily counter on a
-  record-supplied timestamp and are not yet atomic under concurrency, so the
-  cap is bypassable by a determined submitter. Not security-load-bearing at
-  single-authority. (Findings TRUST-01/02.)
+- **Per-identity submission rate-limits** — **FIXED 2026-07-19**, hardened
+  2026-07-29 and 2026-08-29. The daily cap is now a single atomic
+  check-and-increment under its own short-lived lock (`DailyCapCounter`),
+  keyed on the node's wall clock rather than the record-supplied timestamp,
+  persisted across restarts (a restart used to reset every identity's
+  quota), and every lock-contention fallback fails closed to the strictest
+  tier cap. (Findings TRUST-01/02.)
+- **Per-identity entropy profiles are time-bounded, not count-bounded.** The
+  7-day event window that feeds the trust tiers is pruned by age only; a
+  single identity sustaining thousands of records a day (possible only for a
+  staked identity, or through a trusted relay) grows its profile and the
+  per-record scoring pass with it. Harmless at today's record rate; queued as
+  a bounded-reservoir refactor. (Finding TRUST-03.)
+- **DAG parent edges are not checked for self-reference or cycles at
+  re-link.** Every DAG walk is visited-guarded and depth-capped, so a
+  malformed parent set cannot loop a node; it can only pollute the
+  root/tip/orphan gauges. Moot while the operator's authority is the only
+  record creator. (Finding DAG-01.)
 - **Ledger-record content-hash enforcement is staged behind the re-genesis.**
   The 2026-07-06 fix (finding TOKEN-TYPES/F1) closed the equivocation-proof
   gap two ways: conflict proofs now discriminate duplicate-vs-conflict on the
@@ -207,14 +221,14 @@ design-review-first fix after launch:
   equal content hashes on two different same-slot transfers and make the pair
   unprovable, and the old preimage in fact hashed every amount as 0), and all
   ledger builders emit a canonical v2 content-hash preimage binding creator,
-  nonce, and every signed metadata field. What remains staged: the ingest
-  gate that REJECTS a record whose content hash does not commit to its
-  metadata (`enforce_ledger_content_hash_v2`) defaults OFF, because
-  catching-up nodes re-ingest pre-v2 history and would wedge mid-chain. It
-  flips ON at the coordinated re-genesis; until then a hand-set content hash
-  can still shadow entries in the non-consensus by-hash lookup index
-  (equivocation accountability itself is already closed by the record-hash
-  discriminator).
+  nonce, and every signed metadata field. The ingest gate that REJECTS a
+  record whose content hash does not commit to its metadata
+  (`enforce_ledger_content_hash_v2`) has run ON at the authority node since
+  the coordinated re-genesis of 2026-07-11; its compiled default stays OFF so
+  that a node replaying a pre-v2 archive is not wedged mid-chain. On a node
+  running that default, a hand-set content hash can still shadow entries in
+  the non-consensus by-hash lookup index (equivocation accountability itself
+  is closed by the record-hash discriminator).
 - **Seal merkle-root is not recomputed at ingest.** Production seal
   verification (`verify_epoch_seal_no_merkle`) trusts a seal's committed
   `merkle_root` rather than recomputing it from local records, so a malicious

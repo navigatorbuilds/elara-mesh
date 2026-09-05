@@ -60,26 +60,32 @@ use crate::network::zone::ZoneId;
 /// zone snapshots carry the committee that was sealing the zone at
 /// `current_epoch`; child zones get a freshly-drawn committee for the
 /// same epoch. All-zeros if `candidates` is empty (no staked anchors).
+#[allow(clippy::too_many_arguments)] // 8th arg = step-0c epoch_interval_secs; house precedent lib.rs:189
 pub fn propose_transition_from_decision(
     storage: &crate::storage::rocks::StorageEngine,
     identity: &crate::identity::Identity,
     decision: &ScalingDecision,
     per_zone_activity: &HashMap<ZoneId, f64>,
     current_epoch: u64,
+    epoch_interval_secs: u64,
     candidates: &[super::zone_committee::Candidate],
     committee_size: usize,
 ) -> crate::errors::Result<Option<crate::network::zone_transition_seal::TransitionSeal>> {
     use crate::network::zone_committee::{committee_hash_from_members, select_zone_committee};
     use crate::network::zone_transition_seal::{
-        build_zone_snapshot, newborn_child_snapshot, TransitionKind, TransitionSeal,
-        TRANSITION_DISPUTE_WINDOW_EPOCHS,
+        build_zone_snapshot, dispute_window_epochs, newborn_child_snapshot, TransitionKind,
+        TransitionSeal,
     };
 
     let Some(target) = pick_transition_target(decision, per_zone_activity) else {
         return Ok(None);
     };
 
-    let effective_epoch = current_epoch.saturating_add(TRANSITION_DISPUTE_WINDOW_EPOCHS);
+    // Step 0c (2026-08-29 seal-gate verdict): window in epochs derived from the
+    // wall-clock floor — at today's 60 s cadence this is exactly the old
+    // `+ TRANSITION_DISPUTE_WINDOW_EPOCHS`; under adaptive cadence the floor binds.
+    let effective_epoch =
+        current_epoch.saturating_add(dispute_window_epochs(epoch_interval_secs));
 
     // Compute committee_hash for a zone: select members via VRF, then hash.
     let zone_committee_hash = |zone: &ZoneId| -> [u8; 32] {
@@ -206,7 +212,7 @@ mod tests {
             avg_rate: 1.0,
             reason: ScalingReason::Balanced,
         };
-        let out = propose_transition_from_decision(&storage, &id, &dec, &act, 100, &[], crate::network::zone_committee::DEFAULT_COMMITTEE_SIZE).unwrap();
+        let out = propose_transition_from_decision(&storage, &id, &dec, &act, 100, 60, &[], crate::network::zone_committee::DEFAULT_COMMITTEE_SIZE).unwrap();
         assert!(out.is_none());
     }
 
@@ -220,7 +226,7 @@ mod tests {
         let act = activity(&[(0, 1.0), (1, 5.0)]);
         let dec = ScalingDecision::Split { new_count: 4, avg_rate: 3.0 };
 
-        let seal = propose_transition_from_decision(&storage, &id, &dec, &act, 1000, &[], crate::network::zone_committee::DEFAULT_COMMITTEE_SIZE)
+        let seal = propose_transition_from_decision(&storage, &id, &dec, &act, 1000, 60, &[], crate::network::zone_committee::DEFAULT_COMMITTEE_SIZE)
             .expect("propose")
             .expect("some seal");
 
@@ -261,7 +267,7 @@ mod tests {
         let act = activity(&[(0, 10.0), (1, 0.1), (2, 0.2), (3, 20.0)]);
         let dec = ScalingDecision::Merge { new_count: 2, avg_rate: 7.0 };
 
-        let seal = propose_transition_from_decision(&storage, &id, &dec, &act, 500, &[], crate::network::zone_committee::DEFAULT_COMMITTEE_SIZE)
+        let seal = propose_transition_from_decision(&storage, &id, &dec, &act, 500, 60, &[], crate::network::zone_committee::DEFAULT_COMMITTEE_SIZE)
             .expect("propose")
             .expect("some seal");
 
@@ -291,10 +297,10 @@ mod tests {
         let act = activity(&[(7, 2.0), (3, 5.0), (11, 2.0)]);
         let dec = ScalingDecision::Split { new_count: 6, avg_rate: 3.0 };
 
-        let seal_a = propose_transition_from_decision(&storage_a, &id_a, &dec, &act, 200, &[], crate::network::zone_committee::DEFAULT_COMMITTEE_SIZE)
+        let seal_a = propose_transition_from_decision(&storage_a, &id_a, &dec, &act, 200, 60, &[], crate::network::zone_committee::DEFAULT_COMMITTEE_SIZE)
             .unwrap()
             .unwrap();
-        let seal_b = propose_transition_from_decision(&storage_b, &id_b, &dec, &act, 200, &[], crate::network::zone_committee::DEFAULT_COMMITTEE_SIZE)
+        let seal_b = propose_transition_from_decision(&storage_b, &id_b, &dec, &act, 200, 60, &[], crate::network::zone_committee::DEFAULT_COMMITTEE_SIZE)
             .unwrap()
             .unwrap();
 

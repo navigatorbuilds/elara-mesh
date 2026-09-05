@@ -24,6 +24,14 @@
 //! `iter_zone` is prefix-bounded so the per-tick cost is O(MAX_PURGE_PER_TICK)
 //! not O(zone_size). At 5000 records / 250 ms = 20 K records / sec / zone,
 //! a 1M-record zone drains in ~50 s with no disk-IO spike.
+//!
+//! ## Ghost rows (R14-b, 2026-09-02)
+//!
+//! An index row with no record behind it (leaked by the pre-R14 delete path)
+//! cannot be removed by `delete_record`, which re-derives keys from the record
+//! it can no longer load. The tick deletes such rows by their exact key and
+//! counts them in `elara_zone_idx_ghosts_pruned_total`, so a zone holding
+//! ≥ `MAX_PURGE_PER_TICK` ghosts drains instead of being re-enqueued forever.
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -117,12 +125,31 @@ pub async fn run_purge_tick(state: &Arc<NodeState>) -> usize {
     }
 
     let zone_key = zone.to_key_bytes();
-    let record_ids =
-        state.rocks.iter_zone(&zone_key, None, None, MAX_PURGE_PER_TICK);
+    let entries = state
+        .rocks
+        .iter_zone_entries(&zone_key, None, None, MAX_PURGE_PER_TICK);
 
-    if record_ids.is_empty() {
+    if entries.is_empty() {
         // Zone fully drained — drop without re-enqueue.
         return 0;
+    }
+
+    // R14-b: split live records from ghost rows. `delete_record` can only
+    // remove a row it re-derives from the record, so a ghost survived every
+    // tick and — at ≥ MAX_PURGE_PER_TICK ghosts in one zone — kept the zone
+    // re-enqueued forever. Ghosts are deleted by their exact key below.
+    let fetched = entries.len();
+    let mut record_ids: Vec<String> = Vec::with_capacity(fetched);
+    let mut ghost_keys: Vec<Vec<u8>> = Vec::new();
+    for (key, rid) in entries {
+        match state.rocks.record_exists(&rid) {
+            Ok(true) => record_ids.push(rid),
+            Ok(false) => ghost_keys.push(key),
+            Err(e) => {
+                tracing::warn!("ZSP Phase D: record_exists({rid}) failed: {e}");
+                record_ids.push(rid);
+            }
+        }
     }
 
     // DAG hot tier: take the write lock once and apply all removals in a
@@ -159,11 +186,22 @@ pub async fn run_purge_tick(state: &Arc<NodeState>) -> usize {
         .zone_purge_records_purged_total
         .fetch_add(deleted as u64, Ordering::Relaxed);
 
-    // If we hit the per-tick ceiling, more records likely remain — re-queue
-    // for the next tick. If we deleted fewer than the ceiling, this zone is
+    if !ghost_keys.is_empty() {
+        match state.rocks.delete_zone_idx_rows(&ghost_keys) {
+            Ok(n) => {
+                state
+                    .zone_idx_ghosts_pruned_total
+                    .fetch_add(n as u64, Ordering::Relaxed);
+            }
+            Err(e) => tracing::warn!("ZSP Phase D: ghost row delete failed: {e}"),
+        }
+    }
+
+    // If we hit the per-tick ceiling, more rows likely remain — re-queue
+    // for the next tick. If we fetched fewer than the ceiling, this zone is
     // (probably) drained; one more tick with empty iter would confirm, but
     // that's the next caller's concern.
-    if record_ids.len() == MAX_PURGE_PER_TICK {
+    if fetched == MAX_PURGE_PER_TICK {
         enqueue_purge_zone(state, zone);
     }
 
@@ -247,6 +285,31 @@ mod tests {
             state.zone_purge_records_purged_total.load(Ordering::Relaxed),
             3
         );
+    }
+
+    /// R14-b: ghost rows (index entries with no record) are deleted by exact
+    /// key and counted separately, so the zone drains instead of re-enqueueing.
+    #[tokio::test]
+    async fn purge_tick_deletes_ghost_rows_and_drains_the_zone() {
+        let state = temp_state();
+        let zone = ZoneId::new("zpghost");
+        state.zone_manager.lock().unwrap().subscribe(&zone);
+        let zone_key = zone.to_key_bytes();
+        let live = record_in(&zone, "live-0", 100.0);
+        state.rocks.put_record(&live.id, &live).unwrap();
+        for i in 0..3u32 {
+            let key = StorageEngine::zone_idx_key(&zone_key, 200.0 + i as f64, &format!("ghost-{i}"));
+            state.rocks.plant_zone_idx_row_for_test(&key).unwrap();
+        }
+        assert_eq!(state.rocks.iter_zone(&zone_key, None, None, 100).len(), 4);
+
+        state.unsubscribe_zone(&zone);
+        let n = run_purge_tick(&state).await;
+        assert_eq!(n, 1, "only the live record counts as purged");
+        assert!(state.rocks.iter_zone(&zone_key, None, None, 100).is_empty());
+        assert_eq!(state.zone_purge_records_purged_total.load(Ordering::Relaxed), 1);
+        assert_eq!(state.zone_idx_ghosts_pruned_total.load(Ordering::Relaxed), 3);
+        assert_eq!(queue_depth(&state), 0, "a drained zone is not re-enqueued");
     }
 
     #[tokio::test]

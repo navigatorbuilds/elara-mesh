@@ -52,6 +52,9 @@ const ALLOWED_KEYS: &[&str] = &[
     "beat_challenger",
     "beat_jury",
     "beat_stake_id",
+    // F2 (2026-09-02): offense digest on auto-slash records (64 hex, fixed
+    // width — under the 256-B default cap, so no TEXT_LIMITS entry).
+    "beat_offense",
     "beat_last_activity",
     "beat_dormant_identity",
     "beat_target_identity",

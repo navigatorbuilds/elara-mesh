@@ -2412,4 +2412,250 @@ mod tests {
             "stripped binding must change the preimage the verifier recomputes"
         );
     }
+
+    // ── Property / differential wire-codec hardening (pre-audit, 2026-09-03) ──
+    //
+    // Extends the example-based round-trip tests (`test_wire_roundtrip`,
+    // `batch_b_metadata_roundtrip_seven_variants`) into a randomized sweep over
+    // the full ValidationRecord input space. Three properties per generated
+    // record, across every accepted wire version {4..=7}:
+    //
+    //   INV-IDEMPOTENT  to_bytes(from_bytes(to_bytes(r))) == to_bytes(r)
+    //                   The anti-corruption invariant the codec comments guard
+    //                   ("metadata that to_bytes could never re-emit — silent
+    //                   round-trip corruption"). A record whose bytes mutate in
+    //                   transit breaks its own signature and content hash. This
+    //                   is robust to decode-normalization (identity_hash_wire,
+    //                   version-gated tails): it re-encodes the DECODED record.
+    //   INV-STRUCTURAL  every consensus field survives encode→decode unchanged
+    //                   (catches compensating encode+decode bugs idempotence
+    //                   alone can mask, e.g. a byte-order flip on both sides).
+    //   INV-NOPANIC     from_bytes() on mutated / truncated / random bytes must
+    //                   return Ok|Err, never panic (memory-safety / DoS fuzz).
+    //
+    // Records are generated in the decoder's VALID space (the AUDIT-7 SPHINCS
+    // coherence rules, fixed 24-byte zone refs, ASCII network ids, the accepted
+    // algorithm bytes) so a failure means a real codec defect, not a malformed
+    // input. Zero test-only deps (elara-record is a public crypto crate — a
+    // hand-rolled SplitMix64 keeps the dependency surface unchanged and the
+    // sweep fully reproducible: every failure prints its seed for a 1-line repro).
+    struct SplitMix64(u64);
+    impl SplitMix64 {
+        fn next_u64(&mut self) -> u64 {
+            self.0 = self.0.wrapping_add(0x9E3779B97F4A7C15);
+            let mut z = self.0;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+            z ^ (z >> 31)
+        }
+        fn below(&mut self, n: u64) -> u64 {
+            if n == 0 { 0 } else { self.next_u64() % n }
+        }
+        fn byte(&mut self) -> u8 { (self.next_u64() & 0xFF) as u8 }
+        fn bytes(&mut self, len: usize) -> Vec<u8> { (0..len).map(|_| self.byte()).collect() }
+        // length draws done in one receiver borrow (no rng-in-rng nesting, which
+        // trips E0499 at the call site). `_upto` = [0,max), `_1to` = [1,max).
+        fn bytes_upto(&mut self, max_excl: u64) -> Vec<u8> {
+            let n = self.below(max_excl) as usize;
+            self.bytes(n)
+        }
+        fn bytes_1to(&mut self, max_excl: u64) -> Vec<u8> {
+            let n = 1 + self.below(max_excl) as usize;
+            self.bytes(n)
+        }
+        fn boolean(&mut self) -> bool { self.next_u64() & 1 == 1 }
+    }
+
+    fn gen_ascii_lower(rng: &mut SplitMix64, len: usize) -> String {
+        (0..len).map(|_| (b'a' + (rng.below(26) as u8)) as char).collect()
+    }
+    fn gen_ascii_upto(rng: &mut SplitMix64, max_excl: u64) -> String {
+        let n = rng.below(max_excl) as usize;
+        gen_ascii_lower(rng, n)
+    }
+    fn gen_ascii_1to(rng: &mut SplitMix64, max_excl: u64) -> String {
+        let n = 1 + rng.below(max_excl) as usize;
+        gen_ascii_lower(rng, n)
+    }
+
+    // Valid UUIDv7-shaped wire id: 8-4-4-4-12 hex, version nibble 7, variant 8.
+    // Identical shape to the ids the passing example tests use, so validate_wire_id
+    // accepts every generated id; the varied groups still exercise id byte carriage.
+    fn gen_wire_id(rng: &mut SplitMix64) -> String {
+        let g1 = rng.next_u64() & 0xFFFF_FFFF;
+        let g5hi = rng.next_u64() & 0xFFFF;
+        let g5lo = rng.next_u64() & 0xFFFF_FFFF;
+        format!("{g1:08x}-1234-7000-8000-{g5hi:04x}{g5lo:08x}")
+    }
+
+    fn gen_json(rng: &mut SplitMix64, depth: u32) -> serde_json::Value {
+        use serde_json::Value;
+        // Cap nesting well under MAX_METADATA_DEPTH(8); only scalars past depth 2.
+        let pick = if depth >= 2 { rng.below(5) } else { rng.below(7) };
+        match pick {
+            0 => Value::Null,
+            1 => Value::Bool(rng.boolean()),
+            2 => Value::Number((rng.next_u64() as i64).into()),
+            3 => {
+                let f = f64::from_bits(rng.next_u64());
+                let f = if f.is_finite() { f } else { 1.5 };
+                serde_json::Number::from_f64(f).map(Value::Number).unwrap_or(Value::Null)
+            }
+            4 => Value::String(gen_ascii_upto(rng, 9)),
+            5 => {
+                let n = rng.below(4) as usize;
+                Value::Array((0..n).map(|_| gen_json(rng, depth + 1)).collect())
+            }
+            _ => {
+                let n = rng.below(4) as usize;
+                let mut m = serde_json::Map::new();
+                for _ in 0..n {
+                    let key = gen_ascii_1to(rng, 6);
+                    let val = gen_json(rng, depth + 1);
+                    m.insert(key, val);
+                }
+                Value::Object(m)
+            }
+        }
+    }
+
+    // Non-empty so the Some(empty) vs None presence encoding is never the axis
+    // under test here (real signatures / proofs are never zero-length).
+    fn gen_opt_bytes(rng: &mut SplitMix64) -> Option<Vec<u8>> {
+        if rng.boolean() { Some(rng.bytes_1to(64)) } else { None }
+    }
+
+    #[test]
+    fn wire_reemission_idempotence_and_structural_property() {
+        const ITERATIONS: u64 = 200_000;
+        let mut idempotent = 0u64;
+        for seed in 0..ITERATIONS {
+            let mut rng = SplitMix64(seed.wrapping_mul(0x2545F4914F6CDD1D).wrapping_add(1));
+
+            let version: u16 = 4 + rng.below(4) as u16; // {4,5,6,7} = WIRE_VERSION_MIN..=WIRE_VERSION
+            let np = rng.below(5) as usize;
+            let parents: Vec<String> = (0..np).map(|_| gen_wire_id(&mut rng)).collect();
+            let nz = rng.below(4) as usize;
+            let zone_refs: Vec<Vec<u8>> = (0..nz).map(|_| rng.bytes(24)).collect(); // decode reads fixed 24 B
+            let nm = rng.below(7) as usize;
+            let mut metadata = BTreeMap::new();
+            for _ in 0..nm {
+                let key = gen_ascii_1to(&mut rng, 6);
+                let val = gen_json(&mut rng, 0);
+                metadata.insert(key, val);
+            }
+            let ts = {
+                let t = f64::from_bits(rng.next_u64());
+                if t.is_finite() { t } else { 1739712345.5 }
+            };
+            // Hoisted out of the struct literal (varied-length draws can't nest
+            // inside a single rng borrow there).
+            let id = gen_wire_id(&mut rng);
+            let content_hash = rng.bytes(32);
+            let creator_public_key = rng.bytes_upto(65);
+            let classification = Classification::from_u8(rng.below(4) as u8).unwrap();
+            let signature = gen_opt_bytes(&mut rng);
+            let zk_proof = gen_opt_bytes(&mut rng);
+            let itc_stamp = gen_opt_bytes(&mut rng);
+
+            // SPHINCS+ triple must satisfy the decoder's AUDIT-7 coherence rules:
+            //   algorithm.is_some()  <=> signature.is_some()   (both or neither)
+            //   algorithm.is_some()  =>  creator_sphincs_pk.is_some()
+            // Model it as one atomic choice. A pk WITHOUT an algorithm is legal
+            // (no decode check forbids it), so exercise that arm too.
+            let use_sphincs = rng.boolean();
+            let (sphincs_algorithm, sphincs_signature, creator_sphincs_pk) = if use_sphincs {
+                let sig = rng.bytes_1to(64);
+                let pk = rng.bytes_1to(64);
+                (Some(crate::pqc::ALG_SPHINCS_SHA2_192F), Some(sig), Some(pk))
+            } else {
+                let pk = if rng.boolean() { Some(rng.bytes_1to(64)) } else { None };
+                (None, None, pk)
+            };
+
+            let zone = if rng.boolean() { Some(crate::ZoneId::from_legacy(rng.next_u64())) } else { None };
+            let nonce = if version >= 5 { rng.next_u64() } else { 0 };
+            let network_id = if version >= 6 { gen_ascii_upto(&mut rng, 13) } else { String::new() };
+
+            let rec = ValidationRecord {
+                id,
+                version,
+                content_hash,
+                creator_public_key,
+                timestamp: ts,
+                parents,
+                classification,
+                metadata,
+                signature,
+                sphincs_signature,
+                zk_proof,
+                itc_stamp,
+                zone_refs,
+                creator_sphincs_pk,
+                sig_algorithm: crate::pqc::ALG_DILITHIUM3, // decode rejects any other primary
+                sphincs_algorithm,
+                zone,
+                identity_hash_wire: None, // decode-derived, never emitted by to_bytes
+                nonce,
+                network_id,
+            };
+
+            // ── INV-IDEMPOTENT + the encoder-output-is-always-decodable property ──
+            let b1 = rec.to_bytes();
+            let dec = match ValidationRecord::from_bytes(&b1) {
+                Ok(d) => d,
+                Err(e) => panic!(
+                    "seed {seed}: to_bytes() output failed to decode (encode/decode asymmetry): {e}\n  wire = {}",
+                    hex::encode(&b1)
+                ),
+            };
+            let b2 = dec.to_bytes();
+            assert_eq!(
+                b1, b2,
+                "seed {seed}: RE-EMISSION NOT IDEMPOTENT — silent wire corruption\n  b1 = {}\n  b2 = {}",
+                hex::encode(&b1), hex::encode(&b2)
+            );
+            idempotent += 1;
+
+            // ── INV-STRUCTURAL: every consensus field survives the round trip ──
+            assert_eq!(dec.version, rec.version, "seed {seed}: version");
+            assert_eq!(dec.id, rec.id, "seed {seed}: id");
+            assert_eq!(dec.content_hash, rec.content_hash, "seed {seed}: content_hash");
+            assert_eq!(dec.creator_public_key, rec.creator_public_key, "seed {seed}: creator_public_key");
+            assert_eq!(dec.timestamp.to_bits(), rec.timestamp.to_bits(), "seed {seed}: timestamp");
+            assert_eq!(dec.parents, rec.parents, "seed {seed}: parents");
+            assert_eq!(dec.classification, rec.classification, "seed {seed}: classification");
+            assert_eq!(dec.metadata, rec.metadata, "seed {seed}: metadata");
+            assert_eq!(dec.signature, rec.signature, "seed {seed}: signature");
+            assert_eq!(dec.sphincs_signature, rec.sphincs_signature, "seed {seed}: sphincs_signature");
+            assert_eq!(dec.zk_proof, rec.zk_proof, "seed {seed}: zk_proof");
+            assert_eq!(dec.itc_stamp, rec.itc_stamp, "seed {seed}: itc_stamp");
+            assert_eq!(dec.zone_refs, rec.zone_refs, "seed {seed}: zone_refs");
+            assert_eq!(dec.creator_sphincs_pk, rec.creator_sphincs_pk, "seed {seed}: creator_sphincs_pk");
+            assert_eq!(dec.sig_algorithm, rec.sig_algorithm, "seed {seed}: sig_algorithm");
+            assert_eq!(dec.sphincs_algorithm, rec.sphincs_algorithm, "seed {seed}: sphincs_algorithm");
+            assert_eq!(dec.zone, rec.zone, "seed {seed}: zone");
+            if version >= 5 {
+                assert_eq!(dec.nonce, rec.nonce, "seed {seed}: nonce");
+            }
+            if version >= 6 {
+                assert_eq!(dec.network_id, rec.network_id, "seed {seed}: network_id");
+            }
+
+            // ── INV-NOPANIC: hostile bytes must never panic the decoder ──
+            // A single-bit flip, a truncation, and a pure-random buffer per iter.
+            let mut flipped = b1.clone();
+            if !flipped.is_empty() {
+                let idx = rng.below(flipped.len() as u64) as usize;
+                let bit = rng.below(8) as u8;
+                flipped[idx] ^= 1u8 << bit;
+                let _ = ValidationRecord::from_bytes(&flipped);
+            }
+            let _ = ValidationRecord::from_bytes(&b1[..b1.len() / 2]);
+            let random_buf = rng.bytes_upto(160);
+            let _ = ValidationRecord::from_bytes(&random_buf);
+        }
+        assert_eq!(idempotent, ITERATIONS, "every record must survive the round trip");
+        eprintln!("wire property sweep OK: {ITERATIONS} records, versions 4..=7, 0 divergences");
+    }
 }

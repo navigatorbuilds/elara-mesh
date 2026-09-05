@@ -182,7 +182,7 @@ answer you think you got. Payloads that assert presence (`state_hash`,
 `pending_first_seal`, `exists:true`) and witness-less legacy bare-root responses
 are input errors (exit 2), each routed with guidance — never graded as absence.
 
-## 7. Receipts — *the whole chain in one file*
+## 7. Proof envelopes — *the whole chain in one file*
 
 ```bash
 elara-verify --receipt receipt.bin \
@@ -190,7 +190,7 @@ elara-verify --receipt receipt.bin \
 ```
 
 `--receipt` takes a `.elara-receipt` **v1 envelope** — one JSON file bundling
-the evidence legs of §§1–6 — or, as a degenerate receipt, a bare record
+the evidence legs of §§1–6 — or, as a degenerate envelope, a bare record
 (canonical wire bytes from `/record/<id>/wire`, or a raw record JSON), which
 grades exactly like `elara-verify <record>`.
 
@@ -201,10 +201,10 @@ the flags read, verbatim; `lineage` is reserved. Every leg runs through the
 **identical verifier** its flag uses, and the cross-leg bindings are re-derived
 cryptographically — no envelope field can assert a binding.
 
-What a receipt can never do is vouch for itself: **trust pins stay on your
+What a proof envelope can never do is vouch for itself: **trust pins stay on your
 side of the command line.** `--trusted-anchor`, `--expected-hash`,
 `--expect-root`, `--expect-identity` compose with `--receipt` exactly as with
-flags, and their absence grades `⚠` PARTIAL, exactly as with flags (a receipt
+flags, and their absence grades `⚠` PARTIAL, exactly as with flags (an envelope
 carrying a seal but given no `--trusted-anchor` reports the seal as UNGRADED —
 honestly, never silently). `producer` is displayed but never trusted. Legs this
 verifier does not recognize are disclosed and **cap the verdict at PARTIAL** —
@@ -215,7 +215,7 @@ an old verifier cannot check, so it must under-claim, never under-check.
 
 The same envelope verifies **in a browser**: the hosted verify page's
 `verify_receipt_offline` export runs the identical shared
-`verify_core::grade` sequence compiled to wasm (paste the receipt, paste the
+`verify_core::grade` sequence compiled to wasm (paste the envelope, paste the
 pins), so the browser verdict cannot drift from the CLI's. `.ots` existed-by
 sidecars remain CLI-only and surface there as an honest `⚠`. Both surfaces
 lead with the same gates-driven one-line **headline** (also in `--json` as

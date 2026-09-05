@@ -20,11 +20,11 @@
 (*                              Byzantine stake stays < 1/3. (4.1)          *)
 (*                                                                         *)
 (* REFINEMENT MAP (TLA+ operator  <->  Rust function, file:line):          *)
-(*   CorrQ          <-> ConsensusState::correlation_weighted_q  consensus.rs:2829 *)
-(*   IndependenceQ  <-> ConsensusState::independence_q          consensus.rs:2862 *)
-(*   EffStakeQ      <-> ConsensusState::effective_stake_q       consensus.rs:2884 *)
-(*   DiverseSettled <-> ConsensusState::diverse_threshold_met_q consensus.rs:2906 *)
-(*                      reached via   is_settled_diverse        consensus.rs:2583 *)
+(*   CorrQ          <-> ConsensusState::correlation_weighted_q  consensus.rs:3020 *)
+(*   IndependenceQ  <-> ConsensusState::independence_q          consensus.rs:3053 *)
+(*   EffStakeQ      <-> ConsensusState::effective_stake_q       consensus.rs:3075 *)
+(*   DiverseSettled <-> ConsensusState::diverse_threshold_met_q consensus.rs:3097 *)
+(*                      reached via   is_settled_diverse        consensus.rs:2774 *)
 (*   AttestHonest   <-> honest add_attestation (single, non-equivocating)   *)
 (*   AttestByz      <-> Byzantine equivocation (attests conflicting records)*)
 (*                                                                         *)
@@ -63,7 +63,7 @@ vars == << attest >>
 TypeOK == attest \in [Records -> SUBSET Witnesses]
 
 (***************************************************************************)
-(* Fixed-point constants - mirror src/network/consensus.rs:132-138.        *)
+(* Fixed-point constants: ALPHA_Q / BETA_Q / GAMMA_Q at consensus.rs:159-165. *)
 (* Scaled to 1000ths (not 1e9ths) — a deliberate model reduction: TLC       *)
 (* uses 32-bit ints, so the 1e9 scale of SETTLEMENT_Q would overflow. The   *)
 (* settlement decision depends only on the RATIOS (Alpha:Beta:Gamma:Q =     *)
@@ -82,7 +82,7 @@ ASSUME AlphaQ + BetaQ + GammaQ = Q
 (* Diversity math - deterministic integer mirror of the `_q` path.         *)
 (***************************************************************************)
 
-\* correlation_weighted_q(a, b, gamma_q)   consensus.rs:2829.
+\* correlation_weighted_q(a, b, gamma_q)   consensus.rs:3020.
 \* (All profiles are known in the model; the unknown-profile -> ALPHA+BETA  *)
 \*  branch is not exercised here.)                                          *)
 CorrQ(a, b) ==
@@ -97,11 +97,11 @@ CorrSumQ(a, S) ==
     ELSE LET m == CHOOSE e \in S : TRUE
          IN (IF m = a THEN 0 ELSE CorrQ(a, m)) + CorrSumQ(a, S \ {m})
 
-\* independence_q(a, S)   consensus.rs:2862 :  d_q = Q^2 \div (Q + corr_sum).
+\* independence_q(a, S)   consensus.rs:3053 :  d_q = Q^2 \div (Q + corr_sum).
 \* `\div` is integer floor division, matching Rust's u128 `/`.
 IndependenceQ(a, S) == (Q * Q) \div (Q + CorrSumQ(a, S))
 
-\* effective_stake_q(S)   consensus.rs:2884 : Sum over w in S of stake[w]*d_q(w,S).
+\* effective_stake_q(S)   consensus.rs:3075 : Sum over w in S of stake[w]*d_q(w,S).
 \* Independence is always computed against the FULL attesting set `Full`.
 RECURSIVE EffStakeQOver(_, _)
 EffStakeQOver(Rem, Full) ==
@@ -120,8 +120,8 @@ RawStakeOf(S) ==
 TotalStake == RawStakeOf(Witnesses)
 Eligible   == TotalStake          \* creator_stake = 0 abstraction
 
-\* diverse_threshold_met_q(eff_q, eligible)   consensus.rs:2906 :
-\* settle iff  3*eff_q >= 2*eligible*Q.   Reached via is_settled_diverse:2583.
+\* diverse_threshold_met_q(eff_q, eligible)   consensus.rs:3097 :
+\* settle iff  3*eff_q >= 2*eligible*Q.   Reached via is_settled_diverse (:2774).
 DiverseSettled(r) == EffStakeQ(attest[r]) * 3 >= Eligible * 2 * Q
 
 (***************************************************************************)

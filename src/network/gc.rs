@@ -127,7 +127,8 @@ pub fn gc_pass(
 
     for record in &all_records {
         // Never prune epoch seals — they're the integrity backbone
-        if record.metadata.contains_key(super::epoch::EPOCH_OP_KEY) {
+        // R1 (2026-09-02): KNOWN value, in sync with gc_scan_and_delete (rocks.rs).
+        if super::epoch::is_known_epoch_op_record(record) {
             continue;
         }
 
@@ -230,7 +231,8 @@ pub fn gc_pass_rocks_with(
     let mut to_delete: Vec<String> = Vec::new();
 
     for record in &all_records {
-        if record.metadata.contains_key(super::epoch::EPOCH_OP_KEY) {
+        // R1 (2026-09-02): KNOWN value, in sync with gc_scan_and_delete (rocks.rs).
+        if super::epoch::is_known_epoch_op_record(record) {
             continue;
         }
         if record.metadata.contains_key(crate::accounting::types::BEAT_OP_KEY) {
@@ -306,8 +308,263 @@ pub(crate) fn effective_disk_cap(disk_cap: u64, exempt: u64) -> u64 {
     disk_cap.saturating_sub(exempt).max(MIN_COMPRESSIBLE_CAP)
 }
 
+/// Scrape-path refresh budget for [`refresh_seal_floor_gauges`]: the
+/// `/metrics` handler walks the RAM epoch maps at most once per this many
+/// seconds (the GC cycle walks unconditionally).
+pub const SEAL_FLOOR_GAUGES_MAX_AGE_SECS: u64 = 60;
+
+/// R1 (2026-09-02): refresh the seal-floor health gauges
+/// (`gc_seal_floor_zones`, `gc_zones_without_seal_floor`,
+/// `gc_seal_floor_lag_epochs_max`) from the RAM epoch state and stamp
+/// `gc_seal_floor_gauges_unix_ts`. Among zones with a live tip: floored = a
+/// super-seal is registered (a Gap-3 pruning floor exists); without a floor
+/// = none ever registered (R1 residue classes A/C — every seal there is
+/// GC-immortal until a floor appears); the two sum to `latest_epoch.len()`.
+/// Lag = tip − latest super-seal END, max over floored zones — healthy
+/// < 2×SUPER_SEAL_INTERVAL; growing without bound = the floor is frozen
+/// while the zone keeps sealing (super-seal minting has no retry between
+/// boundaries, R1 verdict S1-R1).
+///
+/// Called from the `/metrics` scrape with `max_age_secs =
+/// SEAL_FLOOR_GAUGES_MAX_AGE_SECS` (cache hit → no walk, returns false) and
+/// from every GC cycle with 0 (always walks). The scrape path is what keeps
+/// the gauges truthful during the first `gc_interval_secs` after boot and
+/// on nodes running with the GC loop disabled (`gc_interval_secs = 0`):
+/// before the same-day fix they sat at their 0/0/0 init value in both
+/// windows, which reads as "healthy" (authority-seed deploy 2026-09-02 11:47 CEST:
+/// 0/0/0 for the first 5 min, then 1/0/8 at the first cycle). Concurrent
+/// callers race on the stamp; the loser skips the walk.
+///
+/// SCALE: O(zones) hash lookups under ONE read acquisition of the epoch
+/// state — no record scan, no I/O, profile-independent (archive included,
+/// unlike the scan-derived GC counters, which stay 0 there). ~1M lookups
+/// per minute at the 1M-zone target (tens of ms); if that ever shows in
+/// scrape latency, maintain the three values incrementally at
+/// register_seal/register_super_seal instead.
+pub fn refresh_seal_floor_gauges(state: &NodeState, max_age_secs: u64) -> bool {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+        .max(1);
+    let last = state.gc_seal_floor_gauges_unix_ts.load(Relaxed);
+    if max_age_secs > 0 && last != 0 && now.saturating_sub(last) < max_age_secs {
+        return false;
+    }
+    // Claim the refresh so concurrent scrapes do not all walk the maps; the
+    // loser reads the values the winner is about to store.
+    if state
+        .gc_seal_floor_gauges_unix_ts
+        .compare_exchange(last, now, Relaxed, Relaxed)
+        .is_err()
+    {
+        return false;
+    }
+    let (floored, without_floor, lag_max) = {
+        use crate::network::RwLockRecover;
+        let epoch = state.epoch.read_recover();
+        let mut floored: u64 = 0;
+        let mut without_floor: u64 = 0;
+        let mut lag_max: u64 = 0;
+        for (zone, tip) in epoch.latest_epoch.iter() {
+            match epoch.latest_super_seal.get(zone) {
+                Some((end_epoch, _, _, _)) => {
+                    floored += 1;
+                    lag_max = lag_max.max(tip.saturating_sub(*end_epoch));
+                }
+                None => without_floor += 1,
+            }
+        }
+        (floored, without_floor, lag_max)
+    };
+    state.gc_seal_floor_zones.store(floored, Relaxed);
+    state
+        .gc_zones_without_seal_floor
+        .store(without_floor, Relaxed);
+    state.gc_seal_floor_lag_epochs_max.store(lag_max, Relaxed);
+    true
+}
+
+/// Gap 3: how many super-seal intervals below the latest super-seal the seal
+/// pruning floor sits (`floor = end_epoch − 2 × SUPER_SEAL_INTERVAL`).
+pub const SEAL_FLOOR_SAFETY_MARGIN_INTERVALS: u64 = 2;
+
+/// Gap 3 (Protocol §11.8): the per-zone SEAL pruning floor, derived from the
+/// latest super-seal per zone as `end_epoch − SEAL_FLOOR_SAFETY_MARGIN_INTERVALS
+/// × SUPER_SEAL_INTERVAL` (saturating). Zones without a super-seal are absent
+/// (no seal floor → time-based retention only). Reads the epoch lock with
+/// `read_recover`: a poisoned lock must not skip the floor. ONE derivation for
+/// both callers — `gc_loop` and the `/admin/gc` route — so the formula cannot
+/// drift (R1-X4, 2026-09-02: `routes/admin.rs` carried a verbatim copy).
+pub fn seal_pruning_floor_map(
+    state: &NodeState,
+) -> std::collections::HashMap<crate::ZoneId, u64> {
+    seal_pruning_floor_map_bounded(state).0
+}
+
+/// R1-X1: how many suppressed zones the once-per-cycle floor log line names
+/// (the count is always logged in full; the sample bounds the line length).
+pub const SUPPRESSED_FLOOR_LOG_SAMPLE: usize = 8;
+
+/// R1-X1 (2026-09-02, Layer B): the seal-floor derivation with the per-zone
+/// TIP BOUND. A super-seal pointer whose `end_epoch` is ahead of the zone's
+/// own tip (`latest_epoch`) cannot have been derived from seals this node
+/// holds — until the ingest bound lands (Commit 3), any registered proposer
+/// can push such a pointer through `register_super_seal` (pure newest-wins)
+/// and, unbounded, drag the floor to `end − 128` = above every real seal =
+/// prune the zone's entire un-super-sealed seal history. Such a zone is
+/// SUPPRESSED: it gets NO floor this cycle. Not a floor clamped at the tip —
+/// a clamped floor lands on a real seal and hands the record arm
+/// (`record_pruning_floor_ts_map` → epoch-prune of finalized record bodies)
+/// a deletion authority the unbounded code never had (the unbounded floor
+/// misses the point read and yields NO record floor). Retention is
+/// recoverable disk pressure; deletion is not. Zones whose pointer has NO
+/// tip at all (a super-seal ingested for a zone this node never sealed) are
+/// suppressed the same way — nothing of that zone is prunable anyway, and
+/// the pointer is otherwise invisible to every seal-floor gauge. Returns the
+/// map and the number of suppressed zones; the count is folded into
+/// `gc_seal_floor_suppressed_total`, stored as the
+/// `gc_seal_floor_suppressed_zones` gauge, and logged ONCE per cycle with a
+/// bounded sample — never per zone under the held lock. WARN-level
+/// observability until Commit 3: a node catching up after downtime registers
+/// current super-seals ahead of its tip legitimately; the ingest bound makes
+/// `end > tip` unreachable and promotes this to a must-stay-0 canary. Still
+/// one rocks-free pass over `latest_super_seal` under `read_recover`.
+pub fn seal_pruning_floor_map_bounded(
+    state: &NodeState,
+) -> (std::collections::HashMap<crate::ZoneId, u64>, u64) {
+    use crate::network::RwLockRecover;
+    let epoch = state.epoch.read_recover();
+    let safety_margin =
+        SEAL_FLOOR_SAFETY_MARGIN_INTERVALS.saturating_mul(super::epoch::SUPER_SEAL_INTERVAL);
+    let mut suppressed: u64 = 0;
+    // Bounded sample for the once-per-cycle log line — never a per-zone
+    // `warn!` under the held epoch read lock: a catching-up node at 1M zones
+    // would otherwise hold the lock (and the tokio worker driving `gc_loop`)
+    // for 1M synchronous log calls per GC cycle.
+    let mut sample: Vec<(crate::ZoneId, u64, Option<u64>)> = Vec::new();
+    let map = epoch
+        .latest_super_seal
+        .iter()
+        .filter_map(|(zone, (end_epoch, _, _, _))| {
+            let tip = epoch.latest_epoch.get(zone).copied();
+            match tip {
+                Some(t) if *end_epoch <= t => {
+                    Some((zone.clone(), end_epoch.saturating_sub(safety_margin)))
+                }
+                _ => {
+                    suppressed += 1;
+                    if sample.len() < SUPPRESSED_FLOOR_LOG_SAMPLE {
+                        sample.push((zone.clone(), *end_epoch, tip));
+                    }
+                    None
+                }
+            }
+        })
+        .collect();
+    drop(epoch);
+    state.gc_seal_floor_suppressed_zones.store(suppressed, Relaxed);
+    if suppressed > 0 {
+        state.gc_seal_floor_suppressed_total.fetch_add(suppressed, Relaxed);
+        let shown = sample
+            .iter()
+            .map(|(zone, end, tip)| match tip {
+                Some(t) => format!("zone={zone} end_epoch={end} tip={t}"),
+                None => format!("zone={zone} end_epoch={end} tip=none"),
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        warn!(
+            "R1-X1: {} super-seal pointer(s) without a bounding tip — seal floors suppressed \
+             (ahead of the zone tip, or a zone with no local tip; showing {} of {}): {}",
+            suppressed,
+            sample.len(),
+            suppressed,
+            shown
+        );
+    }
+    (map, suppressed)
+}
+
+/// Tier 3.4 (Protocol §11.8): the per-zone RECORD pruning floor — the
+/// TIMESTAMP (not epoch) of the seal record at `(zone, floor_epoch)`. Finalized
+/// non-seal records older than it in the same zone are covered by a super-seal
+/// Merkle root and prunable EVEN IF they have not aged out of the time-based
+/// retention window — the seal preserves verifiability. Empty when (a) the
+/// operator config is off, (b) the Archive profile (which intentionally keeps
+/// every record on disk for historical query), or (c) the zone has no
+/// super-seal / no seal at the floor epoch — each branch falls back to the
+/// time-based retention. One rocks point read per super-sealed zone. Shared by
+/// `gc_loop` and `/admin/gc` (R1-X4, 2026-09-02).
+pub fn record_pruning_floor_ts_map(
+    state: &NodeState,
+    seal_pruning_floor: &std::collections::HashMap<crate::ZoneId, u64>,
+) -> std::collections::HashMap<crate::ZoneId, f64> {
+    let epoch_pruning_active =
+        state.config.epoch_pruning_enabled && state.config.node_profile != "archive";
+    if !epoch_pruning_active {
+        return std::collections::HashMap::new();
+    }
+    seal_pruning_floor
+        .iter()
+        .filter_map(|(zone, floor_epoch)| {
+            state
+                .rocks
+                .seal_timestamp_at_zone_epoch(*floor_epoch, zone.path())
+                .map(|ts| (zone.clone(), ts))
+        })
+        .collect()
+}
+
 /// Background GC loop. Runs periodically when gc_interval_secs > 0.
 #[cfg(feature = "node-core")]
+/// R14-b: zone-index rows examined by the reconcile walk per GC cycle. 5000
+/// bloom-filtered point reads ≈ a few ms; at the default 300 s interval a
+/// 10M-row index completes a pass in ~1 week, a 71k-row one (the authority seed) in ~75 min.
+pub const ZONE_IDX_RECONCILE_ROWS_PER_CYCLE: usize = 5_000;
+
+/// R14-b: run one [`ZONE_IDX_RECONCILE_ROWS_PER_CYCLE`]-bounded step of the
+/// zone-index reconcile walk, resuming from the persisted cursor, and fold the
+/// outcome into the `zone_idx_*` counters. Storage errors are logged and skip
+/// the step; the next cycle retries from the same cursor.
+async fn reconcile_zone_index_step(state: &Arc<NodeState>) {
+    let state2 = state.clone();
+    let stepped = tokio::task::spawn_blocking(move || {
+        let cursor = state2.rocks.load_zone_idx_reconcile_cursor();
+        let chunk = state2.rocks.reconcile_zone_index_chunk(
+            cursor.as_deref(),
+            ZONE_IDX_RECONCILE_ROWS_PER_CYCLE,
+        )?;
+        state2
+            .rocks
+            .save_zone_idx_reconcile_cursor(chunk.next_cursor.as_deref())?;
+        Ok::<_, crate::errors::ElaraError>(chunk)
+    })
+    .await;
+    match stepped {
+        Ok(Ok(chunk)) => {
+            state
+                .zone_idx_reconcile_rows_scanned_total
+                .fetch_add(chunk.scanned as u64, Relaxed);
+            state
+                .zone_idx_ghosts_pruned_total
+                .fetch_add(chunk.ghosts_deleted as u64, Relaxed);
+            if chunk.ghosts_deleted > 0 || chunk.reput > 0 {
+                info!(
+                    "zone-index reconcile: scanned={} ghosts_deleted={} reput={}",
+                    chunk.scanned, chunk.ghosts_deleted, chunk.reput
+                );
+            }
+            if chunk.next_cursor.is_none() {
+                state.zone_idx_reconcile_passes_total.fetch_add(1, Relaxed);
+                debug!("zone-index reconcile: pass complete (scanned={})", chunk.scanned);
+            }
+        }
+        Ok(Err(e)) => warn!("zone-index reconcile step failed: {e}"),
+        Err(e) => warn!("zone-index reconcile spawn_blocking failed: {e}"),
+    }
+}
+
 pub async fn gc_loop(
     state: Arc<NodeState>,
     mut shutdown: tokio::sync::watch::Receiver<()>,
@@ -427,56 +684,32 @@ pub async fn gc_loop(
         // abandoned (never got witnessed) and safe to prune.
         let stale_cutoff = now - (retention_secs * 2.0);
 
+        // R1 (2026-09-02): seal-floor health gauges — unconditional walk
+        // each cycle. The /metrics scrape refreshes them on demand too, so
+        // they are truthful before the first cycle and with the loop off.
+        refresh_seal_floor_gauges(&state, 0);
+
         // Gap 3: per-zone seal pruning floor — derived from the latest
         // super-seal end_epoch minus 2× the super-seal interval. Seals
         // older than this floor have a covering super-seal AND are far
         // enough behind the head that lagging light clients have already
         // had at least one super-seal worth of grace to fetch them.
-        // Archive nodes intentionally compute the floor too — but with
-        // their effectively-infinite retention, the standard
-        // `record.timestamp < retention_cutoff` gate keeps seals on disk
-        // forever even when they're prunable by the super-seal rule.
-        let seal_pruning_floor: std::collections::HashMap<crate::ZoneId, u64> = {
-            use crate::network::RwLockRecover;
-            let epoch = state.epoch.read_recover();
-            const SAFETY_MARGIN_INTERVALS: u64 = 2;
-            let safety_margin =
-                SAFETY_MARGIN_INTERVALS.saturating_mul(super::epoch::SUPER_SEAL_INTERVAL);
-            epoch
-                .latest_super_seal
-                .iter()
-                .map(|(zone, (end_epoch, _, _, _))| {
-                    (zone.clone(), end_epoch.saturating_sub(safety_margin))
-                })
-                .collect()
-        };
-
-        // Tier 3.4 (Protocol §11.8): per-zone record pruning floor — TIMESTAMP
-        // (not epoch) below which finalized non-seal records are covered by a
-        // super-seal Merkle root. Computed by looking up the seal record at
-        // `(zone, floor_epoch)` and reading its timestamp. Records older than
-        // this in the same zone are prunable EVEN IF they haven't aged out the
-        // time-based retention window — the seal preserves verifiability.
-        //
-        // Disabled when (a) operator config off, (b) Archive profile (which
-        // intentionally keeps all records on disk for historical query), or
-        // (c) zone has no super-seal yet. Each branch falls back to the
-        // existing time-based retention.
-        let epoch_pruning_active = state.config.epoch_pruning_enabled
-            && state.config.node_profile != "archive";
-        let record_pruning_floor_ts: std::collections::HashMap<crate::ZoneId, f64> = if epoch_pruning_active {
-            seal_pruning_floor
-                .iter()
-                .filter_map(|(zone, floor_epoch)| {
-                    state
-                        .rocks
-                        .seal_timestamp_at_zone_epoch(*floor_epoch, zone.path())
-                        .map(|ts| (zone.clone(), ts))
-                })
-                .collect()
-        } else {
-            std::collections::HashMap::new()
-        };
+        // Archive nodes compute the floor too, and `is_prunable_seal_record`
+        // has no profile check — but on archive the floor is INERT in
+        // practice: `gc_scan_and_delete` walks the timestamp index
+        // oldest-first and breaks at the first key with `ts > scan_until`,
+        // and archive retention (~1000 y) puts `scan_until` before every
+        // real timestamp, so no record is ever examined (R1 verdict F4,
+        // 2026-09-02; authority seed: gc_last_cycle_duration_ms 0, every gc counter
+        // 0). The T-F10 F1 danger — an archive pruning finalized seals
+        // below the floor — is LATENT: it needs the disk-cap shrink path
+        // to compress retention first. When it does fire (T-F10-MULTIZONE
+        // F1): a zone whose epoch-0..floor seals are gone cannot be
+        // re-seeded from CF_EPOCHS once its RAM tip is lost.
+        let seal_pruning_floor = seal_pruning_floor_map(&state);
+        // Tier 3.4 (Protocol §11.8): per-zone record pruning floor (TIMESTAMP);
+        // empty on operator-off / Archive — see `record_pruning_floor_ts_map`.
+        let record_pruning_floor_ts = record_pruning_floor_ts_map(&state, &seal_pruning_floor);
 
         let result = {
             let state2 = state.clone();
@@ -625,6 +858,14 @@ pub async fn gc_loop(
         let dur_ms = cycle_start.elapsed().as_millis().min(u64::MAX as u128) as u64;
         state.gc_last_cycle_duration_ms.store(dur_ms, Relaxed);
         state.gc_last_cycle_unix_ts.store(now as u64, Relaxed);
+
+        // R14-b (2026-09-02): one bounded step of the zone-index reconcile
+        // walk per cycle — sweeps the ghost rows the pre-R14 delete path
+        // leaked (no record behind them, unreachable by any record-driven
+        // delete). O(ZONE_IDX_RECONCILE_ROWS_PER_CYCLE) per cycle, cursor
+        // persisted, so it heals a node with millions of rows over many
+        // cycles without ever scanning the whole index at once.
+        reconcile_zone_index_step(&state).await;
 
         // Bloat fix: if `gc_scan_and_delete` hit
         // `MAX_GC_SCAN_PER_CYCLE` we have more eligible records on disk than
@@ -987,11 +1228,15 @@ mod tests {
         assert_eq!(storage.count().unwrap(), 2);
     }
 
-    /// Twin coverage: the LIVE node prunes via `gc_pass_rocks_with`, NOT the
-    /// in-memory `gc_pass`. A revocation carrier silently pruned on this path
-    /// would leave a revoked mandate replayable as valid (its only proof of
-    /// revocation is gone). The in-memory twin's test above is not sufficient —
-    /// this exercises the path that actually runs in production.
+    /// Twin coverage: `gc_pass_rocks_with` is the rocks-backed twin of the
+    /// in-memory `gc_pass`; the LIVE node's retention path is
+    /// `gc_scan_and_delete` (rocks.rs, run by `gc_loop`), which enforces the
+    /// same exemption set — both twins have only test callers (R1 verdict
+    /// 2026-09-02; the earlier claim that this twin IS the live path was
+    /// wrong). A revocation carrier silently pruned on this path would leave
+    /// a revoked mandate replayable as valid (its only proof of revocation
+    /// is gone). The in-memory twin's test above is not sufficient — this
+    /// exercises the rocks-backed exemption logic.
     #[cfg(feature = "node-core")]
     #[test]
     fn test_gc_rocks_never_prunes_mandate_or_revocation_carriers() {
@@ -1307,7 +1552,59 @@ mod tests {
             .expect("gc scan");
 
         assert_eq!(result.seal_pruned, 0);
-        assert!(storage.get(&seal.id).is_ok(), "no super-seal for this zone — keep");
+        assert!(
+            storage.get(&seal.id).is_ok(),
+            "no super-seal for this zone — keep"
+        );
+    }
+
+    /// R1 (2026-09-02, verdict F3): an UNKNOWN `epoch_op` value must not
+    /// confer GC immortality — the record takes the ordinary stale path.
+    /// A KNOWN non-seal op (super-seal) stays exempt (control).
+    #[test]
+    fn gc_unknown_epoch_op_value_is_not_immortal() {
+        let id = test_identity();
+        let (mut storage, _dir) = test_engine();
+        let mut dag = DagIndex::new();
+
+        let mut junk = BTreeMap::new();
+        junk.insert("epoch_op".into(), serde_json::json!("junk"));
+        let junk_rec = insert_seal_like(&mut storage, &mut dag, &id, 100.0, junk);
+
+        let mut ss = BTreeMap::new();
+        ss.insert("epoch_op".into(), serde_json::json!("super_seal"));
+        ss.insert("super_seal_zone".into(), serde_json::json!("z1"));
+        ss.insert("super_seal_start_epoch".into(), serde_json::json!(0));
+        ss.insert("super_seal_end_epoch".into(), serde_json::json!(63));
+        let ss_rec = insert_seal_like(&mut storage, &mut dag, &id, 100.0, ss);
+
+        // Nothing finalized: both are older than the stale cutoff (1000).
+        let floor: std::collections::HashMap<crate::ZoneId, u64> = Default::default();
+        let result = storage
+            .gc_scan_and_delete(
+                500.0,
+                1000.0,
+                &|_| false,
+                &|_| false,
+                &floor,
+                &Default::default(),
+                None,
+            )
+            .expect("gc scan");
+
+        assert_eq!(
+            result.stale_pruned, 1,
+            "the junk epoch_op record is stale-pruned"
+        );
+        assert_eq!(result.seal_pruned, 0);
+        assert!(
+            storage.get(&junk_rec.id).is_err(),
+            "unknown epoch_op value is not immortal"
+        );
+        assert!(
+            storage.get(&ss_rec.id).is_ok(),
+            "known non-seal epoch op stays exempt"
+        );
     }
 
     #[test]
@@ -2144,5 +2441,64 @@ mod tests {
             is_expired(&rec_neg, 0.0),
             "negative expires_at + now=0 is expired"
         );
+    }
+
+    /// R1-X1 (2026-09-02, Layer B): a super-seal pointer without a bounding
+    /// tip yields NO seal floor — never a floor clamped at the tip. Three
+    /// zones: honest (end == tip → floor end−128, unchanged), poisoned (end =
+    /// tip+5000 → absent, suppressed), tipless (pointer but no `latest_epoch`
+    /// entry → absent, suppressed). The record-prune arm is pinned
+    /// structurally, not here: `record_pruning_floor_ts_map` iterates the
+    /// seal-floor map's keys, so a suppressed zone never reaches it (the
+    /// final-verify B-REC case); exercising that arm needs a rocks-backed
+    /// seal lookup this in-memory fixture never writes, and a `contains_key`
+    /// assertion on it would be vacuous (rust-reviewer W2, 2026-09-02).
+    #[tokio::test]
+    async fn r1x1_seal_floor_suppressed_without_bounding_tip() {
+        use crate::network::epoch::SUPER_SEAL_INTERVAL;
+        use std::sync::atomic::Ordering::Relaxed;
+        let state = crate::network::state::build_test_node_state();
+        let honest = crate::ZoneId::new("r1x1/honest");
+        let poisoned = crate::ZoneId::new("r1x1/poisoned");
+        let tipless = crate::ZoneId::new("r1x1/tipless");
+        {
+            let mut ep = state.epoch.write().expect("epoch write");
+            ep.latest_epoch.insert(honest.clone(), 1_024);
+            ep.latest_epoch.insert(poisoned.clone(), 1_024);
+            for (z, end) in [(&honest, 1_024u64), (&poisoned, 6_024), (&tipless, 7_000)] {
+                assert!(ep.register_super_seal(
+                    z.clone(),
+                    end,
+                    format!("ss-{end}"),
+                    [0u8; 32],
+                    [0u8; 32]
+                ));
+            }
+        }
+        let margin = SEAL_FLOOR_SAFETY_MARGIN_INTERVALS * SUPER_SEAL_INTERVAL; // 128
+        let (floor, suppressed) = seal_pruning_floor_map_bounded(&state);
+        assert_eq!(suppressed, 2, "the poisoned and the tipless zone are suppressed");
+        assert_eq!(
+            floor.get(&honest),
+            Some(&(1_024 - margin)),
+            "honest floor = end − margin, unchanged"
+        );
+        assert_eq!(floor.get(&poisoned), None, "pointer ahead of the tip: NO floor, never tip − margin");
+        assert_eq!(floor.get(&tipless), None, "tipless zone gets no floor");
+        assert_eq!(state.gc_seal_floor_suppressed_total.load(Relaxed), 2);
+        assert_eq!(state.gc_seal_floor_suppressed_zones.load(Relaxed), 2);
+        // The plain wrapper is the same map; a second derivation counts the
+        // still-unbounded zones again (one event per GC cycle, never deduped)
+        // while the gauge stays at the per-cycle count.
+        assert_eq!(seal_pruning_floor_map(&state), floor);
+        assert_eq!(state.gc_seal_floor_suppressed_total.load(Relaxed), 4);
+        assert_eq!(state.gc_seal_floor_suppressed_zones.load(Relaxed), 2);
+        // Once the seal at `end` arrives the tip catches up and the zone is
+        // bounded again: the gauge clears by itself.
+        state.epoch.write().expect("epoch write").latest_epoch.insert(poisoned.clone(), 6_024);
+        let (floor2, suppressed2) = seal_pruning_floor_map_bounded(&state);
+        assert_eq!(suppressed2, 1, "only the tipless zone remains suppressed");
+        assert_eq!(floor2.get(&poisoned), Some(&(6_024 - margin)));
+        assert_eq!(state.gc_seal_floor_suppressed_zones.load(Relaxed), 1);
     }
 }

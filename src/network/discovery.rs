@@ -724,6 +724,7 @@ pub async fn heartbeat_loop(
 pub async fn pex_loop(
     state: Arc<NodeState>,
     mut shutdown: watch::Receiver<()>,
+    hb: Arc<super::supervision::LoopStatus>,
 ) {
     let interval_secs = state.config.pex_interval_secs;
     if interval_secs == 0 {
@@ -742,6 +743,9 @@ pub async fn pex_loop(
                 return;
             }
         }
+        // C5-B3 (audit 2026-08-30): without this, LoopStatus::state stays
+        // Running forever and hang detection is silently OFF for this loop.
+        hb.heartbeat();
 
         // Stage 6 cooperative scheduler (Protocol §11.10).
         super::system_load::coop_yield_if_busy(&state.system_load).await;
@@ -1178,6 +1182,7 @@ fn parse_host_port_from_url(addr: &str) -> (String, u16) {
 pub async fn seed_reconnect_loop(
     state: Arc<NodeState>,
     mut shutdown: watch::Receiver<()>,
+    hb: Arc<super::supervision::LoopStatus>,
 ) {
     use std::collections::HashMap;
     use std::sync::atomic::Ordering::Relaxed;
@@ -1200,6 +1205,8 @@ pub async fn seed_reconnect_loop(
                 return;
             }
         }
+        // C5-B3 (audit 2026-08-30): heartbeat per tick — see pex_loop note.
+        hb.heartbeat();
 
         // Stage 6 cooperative scheduler (Protocol §11.10): extra backoff
         // when host is saturated. Reconnect tries a TCP/PQ handshake per

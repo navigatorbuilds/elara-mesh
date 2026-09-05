@@ -425,7 +425,11 @@ async fn activate_node(node: &mut SimNode) {
 
     // Seed reconnect
     let (tx, rx) = watch::channel(()); node.shutdown_txs.push(tx);
-    tokio::spawn(discovery::seed_reconnect_loop(node.state.clone(), rx));
+    tokio::spawn(discovery::seed_reconnect_loop(
+        node.state.clone(),
+        rx,
+        node.state.loop_registry.register("seed_reconnect", 240),
+    ));
 
     // Gossip pull
     let (tx, rx) = watch::channel(()); node.shutdown_txs.push(tx);
@@ -1505,9 +1509,9 @@ async fn scenario_byzantine_double_sign(cli: &Cli) -> Result<()> {
     let slash_count = {
         use elara_runtime::network::LockRecover;
         let monitor = genesis.state.slashing.lock_recover();
-        monitor.tracked_seals()
+        monitor.slashed_offense_count()
     };
-    info!("Slashing monitor: {slash_count} seal entries tracked");
+    info!("Slashing monitor: {slash_count} offense entries (F2: detection is durable, no RAM seal window)");
 
     for n in &nodes { shutdown_node(n).await; }
     cleanup_dirs(&dirs);

@@ -13,7 +13,7 @@
 //!   @spec Protocol §11.12
 //!   @spec Protocol §7.5
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -215,6 +215,64 @@ pub const EPOCH_OP_GLOBAL_SEAL: &str = "global_seal";
 /// from the latest checkpoint instead of genesis.
 pub const EPOCH_OP_SUPER_SEAL: &str = "super_seal";
 
+/// Per-zone epoch seal (`epoch_op == "seal"`) — the only `epoch_op` value the
+/// Gap-3 seal-pruning floor ever applies to.
+pub const EPOCH_OP_SEAL: &str = "seal";
+/// Zone-count transition marker (legacy singleton broadcast; the M-of-N
+/// `TransitionSeal` lives in its own column families and carries no
+/// `epoch_op`).
+pub const EPOCH_OP_ZONE_TRANSITION: &str = "zone_transition";
+
+/// Every `epoch_op` value this node version produces or interprets.
+///
+/// R1 (2026-09-02, internal design notes
+/// finding F3): the `epoch_op` KEY alone used to confer two privileges — the
+/// zone-filter bypass at ingest (`is_global_op`) and GC immortality
+/// (`gc_scan_and_delete` + `cleanup_orphan_records` skip every `epoch_op`
+/// record that is not a floor-prunable seal) — while every consumer ignores
+/// unknown values (`extract_epoch_seal` → `Ok(None)`). `{"epoch_op":"junk"}`
+/// was therefore a permanent, network-wide record anyone could mint. Those
+/// privilege points now key on [`is_known_epoch_op_record`]; an unknown value
+/// is an ordinary record (zone-scoped, normal retention). Consensus-side
+/// presence checks (Merkle exclusion in `merkle.rs`, seal-loop candidate
+/// filters) are deliberately NOT changed — altering which records enter the
+/// epoch tree is hard-fork-class; filed as residual R1-X2.
+///
+/// Guard: `build_invariants::epoch_ops::known_epoch_ops_cover_every_producer`
+/// scans the production sources and fails if any writer inserts a value
+/// missing from this list.
+/// Network note (Opus diff-read S3, 2026-09-02): `ingest::is_global_op`
+/// also gates the DAM-3D cross-zone-parents hard reject, so a record with
+/// an UNKNOWN value AND cross-zone parents is now rejected outright on
+/// mainnet config (`allow_cross_zone_parents = false`) where the old
+/// key-presence check let it through. Adding a sixth value is therefore an
+/// all-nodes-upgrade-FIRST operation (a mixed fleet: upgraded nodes reject,
+/// old nodes store). No seal-root divergence either way — `merkle.rs`
+/// excludes every `epoch_op`-keyed record from roots by key presence on
+/// both versions (residual R1-X2 keeps that check as is).
+pub const KNOWN_EPOCH_OPS: [&str; 5] = [
+    EPOCH_OP_SEAL,
+    EPOCH_OP_SUPER_SEAL,
+    EPOCH_OP_GLOBAL_SEAL,
+    EPOCH_OP_ZONE_TRANSITION,
+    crate::network::zone_subscription::EPOCH_OP_ZONE_SUBSCRIPTION,
+];
+
+/// `true` for exactly the values in [`KNOWN_EPOCH_OPS`].
+pub fn is_known_epoch_op(value: &str) -> bool {
+    KNOWN_EPOCH_OPS.contains(&value)
+}
+
+/// `true` when `rec` carries an `epoch_op` whose value this node version
+/// knows. A missing key, a non-string value, or an unknown value is NOT an
+/// epoch op for privilege purposes (zone-filter bypass, GC immortality).
+pub fn is_known_epoch_op_record(rec: &ValidationRecord) -> bool {
+    rec.metadata
+        .get(EPOCH_OP_KEY)
+        .and_then(|v| v.as_str())
+        .is_some_and(is_known_epoch_op)
+}
+
 /// Gap 3: epochs between super-seals per zone.
 /// At 60s epoch interval, a super-seal fires every 64 × 60s ≈ 64m.
 /// At 1440 seals/day per zone, that's ~22 super-seals/day per zone —
@@ -225,29 +283,52 @@ pub const SUPER_SEAL_INTERVAL: u64 = 64;
 
 /// Minimum adaptive epoch duration: 5 seconds. Lowered 30s → 15s → 5s.
 ///
-/// ADVISORY / DESIGN-STAGE (fusion-audited 2026-07-21, verdict C): the per-zone
-/// adaptive interval is COMPUTED and DISPLAYED but does NOT currently gate
-/// sealing. `epoch_seal_loop` ticks at the fixed `config.epoch_seal_interval_secs`
-/// (default 60s) and evaluates every active zone each tick; `should_propose_seal`
-/// gates on AlreadySealed / bootstrap / VRF-rank only — never on this interval.
-/// So this FLOOR is currently unreachable (no code consults the computed interval
-/// for cadence). Once wired, 5s would activate only when a zone exceeds 20 rec/s
-/// (100 records / 5s); at testnet volume (<<1 rec/s) the formula returns hour-long
-/// intervals. RTT headroom for a 5s floor is proven (PQ Dilithium3 handshake ≈2ms
-/// + data ≈5ms, 5-member consensus <200ms). Wiring is deferred to the multi-staker
-/// + >20 rec/s transition (design-stage; fusion-resolved 2026-07-21, verdict C).
+/// FLAG-GATED, NOT UNWIRED (corrected 2026-09-04 — this block described the
+/// pre-NL-1 world and had gone stale against the code it documents).
+///
+/// The per-zone adaptive interval is COMPUTED and DISPLAYED always, and it GATES
+/// SEALING when `config.use_adaptive_seal_gate` is true. That gate shipped
+/// 2026-09-01 (NL-1 Step 2: `57f986eb` flag surface, `0fdee3d7` gate) and is
+/// merge-dark — the flag defaults to FALSE, so the production path is
+/// byte-for-byte the pre-NL-1 behavior.
+///
+/// Precisely, per configuration:
+/// - flag OFF (default): `epoch_seal_loop` ticks at the fixed
+///   `config.epoch_seal_interval_secs` (default 60s) and evaluates every active
+///   zone each tick; `should_propose_seal` gates on AlreadySealed / bootstrap /
+///   VRF-rank only. This FLOOR is then unreachable — nothing consults the
+///   computed interval for cadence.
+/// - flag ON: the loop wraps that decision in `gate_adaptive_seal`, pre-checking
+///   `zone_adaptive_seal_due` (`now - latest_seal_end[zone] >= interval[zone]`)
+///   and yielding `NoneReason::AdaptiveIntervalPending` when the zone is not yet
+///   due. This FLOOR is then live. Note `should_propose_seal` ITSELF still never
+///   consults the interval — the gate is applied by its CALLER, so reading that
+///   function alone will wrongly suggest the floor is dead code.
+///
+/// 5s activates only when a zone exceeds 20 rec/s (100 records / 5s); at testnet
+/// volume (<<1 rec/s) the formula returns hour-long intervals. RTT headroom for a
+/// 5s floor is proven (PQ Dilithium3 handshake ≈2ms + data ≈5ms, 5-member
+/// consensus <200ms).
+///
+/// What remains deferred is the FLAG FLIP, not the wiring: Step 3 is an authority-seed-solo
+/// canary gated on VERDICT-C (≥2 staked nodes · sustained >20 rec/s ·
+/// `elara_adaptive_interval_floor_pinned_zones` > 0 · outer-tick cost addressed).
+/// None held at the 2026-09-04 check (floor_pinned=0, zone_count=1). The flip is
+/// restart-only, never mid-epoch — a mid-epoch cadence change is a
+/// self-equivocation hazard that `AlreadySealed` guards but does not fully close.
 pub const MIN_ADAPTIVE_EPOCH_SECS: f64 = 5.0;
 
 /// Maximum adaptive epoch duration: 60 seconds = 1 minute (quiet zone).
 ///
-/// ADVISORY / DESIGN-STAGE: like the floor, this cap is folded into the computed
-/// per-zone adaptive interval but does NOT currently gate sealing (see
-/// MIN_ADAPTIVE_EPOCH_SECS). Quiet zones today seal at the fixed
+/// FLAG-GATED, NOT UNWIRED (corrected 2026-09-04): like the floor, this cap is
+/// folded into the computed per-zone adaptive interval, and it gates sealing only
+/// when `config.use_adaptive_seal_gate` is true (default false — see
+/// MIN_ADAPTIVE_EPOCH_SECS for the per-configuration breakdown). Under the
+/// default-off production path, quiet zones seal at the fixed
 /// `config.epoch_seal_interval_secs` (default 60s) — which happens to EQUAL this
 /// cap, so observed quiet-zone cadence coincidentally matches 60s, but it is the
-/// fixed tick driving it, not the adaptive formula. Once the per-zone gate is
-/// wired, the formula returns ≥ MAX for zero-traffic zones so a quiet zone would
-/// seal at this cap. Cap = quiet-zone P99 finality target; was 120s → tightened
+/// fixed tick driving it, not the adaptive formula. With the gate ENABLED, the
+/// formula returns ≥ MAX for zero-traffic zones, so a quiet zone seals at this cap. Cap = quiet-zone P99 finality target; was 120s → tightened
 /// to 60s to push median wait toward P50 ≈ 30s ONCE WIRED. Going below needs
 /// either (a) sub-second seal/attestation RTT proven on canary hardware, or
 /// (b) optimistic-Sealed UX; both are gap #8 follow-ups.
@@ -337,6 +418,14 @@ pub struct EpochState {
     /// `epoch_seal_interval_secs`); wiring is a design-stage item. Once wired,
     /// high-activity zones would seal faster and quiet zones slower.
     pub zone_adaptive_interval: HashMap<ZoneId, f64>,
+    /// Highest epoch number already folded into `zone_activity_rate` per zone
+    /// (2026-08-29 seal-gate verdict, step 1): the EMA is order-sensitive, and
+    /// a lex-min canonical flip re-enters `apply_canonical_seal` for the SAME
+    /// epoch — without this guard that epoch folds twice and nodes diverge on
+    /// arrival order. Runtime-only, deliberately NOT snapshotted: after a
+    /// restart the restore recomputes intervals from the persisted rates and
+    /// the first canonical seal per zone re-folds exactly once.
+    pub last_activity_epoch: HashMap<ZoneId, u64>,
     /// Prediction evaluation results from previous epoch (recurrence wiring).
     /// zone → (epoch_number, accuracy, correct_count, wrong_count).
     /// Nodes use this to inform their next epoch's predictions.
@@ -358,13 +447,20 @@ pub struct EpochState {
     /// Tuple: `(epoch_number, zone, seal_id, account_smt_root, sealed_at)`.
     /// Scale note: one slot, O(1) update. Does NOT grow with zone count.
     pub latest_sealed_account: Option<(u64, ZoneId, String, [u8; 32], f64)>,
-    /// Gap 3: Rolling buffer of recent seal hashes per zone, capped at
-    /// `SUPER_SEAL_INTERVAL`. Pushed on every `register_seal`. When the buffer
-    /// reaches `SUPER_SEAL_INTERVAL`, the seal loop calls `create_super_seal`
-    /// with its contents, then `clear_recent_seal_hashes` resets it. Bounded
-    /// at 64 × 32 B ≈ 2 KB per active zone — scales to 1M zones when each
-    /// node only serves a handful.
-    pub recent_seal_hashes: HashMap<ZoneId, std::collections::VecDeque<[u8; 32]>>,
+    /// Gap 3: Rolling window of recent seal hashes per zone, keyed by epoch
+    /// and bounded to the `SUPER_SEAL_INTERVAL` epochs `[latest-63, latest]`.
+    /// One entry per epoch — the canonical (lex-min `record_hash`) seal, the
+    /// same rule `repopulate_recent_seal_hashes` applies at boot (R1-X1 M1).
+    /// Every canonical `apply_canonical_seal` upserts its epoch and prunes
+    /// below the window floor; `should_create_super_seal` fires only when all
+    /// 64 window epochs are present. Pre-M1 this was a push-per-register
+    /// `VecDeque`: a same-epoch dual-proposer replacement or a boot
+    /// re-register pushed twice, a fast-forward left a hole, and 64 entries
+    /// could span more (or fewer) epochs than the super-seal they minted
+    /// claimed. Never cleared by `register_super_seal` — the window advances
+    /// with the tip. Bounded at 64 × (8 + 32) B ≈ 2.5 KB per active zone —
+    /// scales to 1M zones when each node only serves a handful.
+    pub recent_seal_hashes: HashMap<ZoneId, std::collections::BTreeMap<u64, [u8; 32]>>,
     /// Gap 3: Latest super-seal per zone. `(end_epoch, record_id, record_hash, committee_hash)`.
     /// Light clients sync from the latest super-seal rather than replaying
     /// individual seals. Updated by `register_super_seal`. One slot per
@@ -378,6 +474,18 @@ pub struct EpochState {
     /// but the max moves only on forward progress. Exposed as
     /// `elara_super_seal_max_end_epoch`. 0 until the first super-seal lands.
     pub super_seal_max_end_epoch: u64,
+    /// R1-X1 (2026-09-02, Layer C): restored super-seal pointers DROPPED by
+    /// `from_snapshot` because their `end_epoch` was ahead of the zone's own
+    /// snapshot tip (`latest_epoch`). Transient boot-time diagnostic — never
+    /// persisted to the snapshot form, zero from `new()`. Surfaced as
+    /// `elara_super_seal_restore_dropped_total` (WARN-level until the ingest
+    /// bound of Commit 3 makes `end > tip` unreachable).
+    pub super_seal_restore_dropped: u64,
+    /// R1-X1 (2026-09-02, Layer C): restored pointers KEPT for zones with NO snapshot
+    /// tip — they cannot be judged, are excluded from the max-gauge
+    /// derivation, and get no GC floor. Transient, never persisted. Surfaced
+    /// as `elara_super_seal_restore_tipless_kept_total`.
+    pub super_seal_restore_tipless_kept: u64,
     /// §11.6 Timestamp gaming defense: end timestamp of the latest seal per zone.
     /// Used to enforce monotonicity — seal N's start must be >= seal N-1's end.
     /// Prevents backdating attacks where an attacker creates seals covering
@@ -963,12 +1071,47 @@ impl EpochState {
                 (*end_epoch, record_id.clone(), record_hash, committee_hash),
             );
         }
+        // R1-X1 (2026-09-02, Layer C): a restored pointer whose end_epoch is
+        // AHEAD of the zone's own snapshot tip cannot have been derived from
+        // seals this node holds — it is either a poisoned pointer (a forged
+        // far-future super-seal ingested before the ingest bound existed) or
+        // a snapshot written out of order. Dropping it HERE covers every
+        // restore path (four production call sites: the JSON restore via
+        // `snapshot::epoch_state`, sync.rs, elara_node.rs Branch A/B). The
+        // comparator is self-consistent: `to_snapshot` writes the tip and the
+        // pointer from the same state in the same call, and the boot-time
+        // `rebuild_latest_epoch_from_cf_epochs` only RAISES tips. Pointers
+        // for zones WITHOUT a snapshot tip are kept (a node that ingested a
+        // super-seal before its first local seal of that zone; the tipless
+        // round-trip fixture in the tests) but counted, excluded from the max
+        // gauge below, and given no GC floor by `gc::seal_pruning_floor_map`.
+        let mut super_seal_restore_dropped: u64 = 0;
+        let mut super_seal_restore_tipless_kept: u64 = 0;
+        super_seal_map.retain(|zone, (end_epoch, ..)| match snap.latest_epoch.get(zone) {
+            Some(tip) if *end_epoch > *tip => {
+                super_seal_restore_dropped += 1;
+                warn!(
+                    "R1-X1: dropping restored super-seal pointer ahead of the zone tip: \
+                     zone={} end_epoch={} tip={}",
+                    zone, end_epoch, tip
+                );
+                false
+            }
+            Some(_) => true,
+            None => {
+                super_seal_restore_tipless_kept += 1;
+                true
+            }
+        });
         // Derive super_seal_max_end_epoch O(1) from the restored
         // map so the gauge reads correctly immediately on boot, without
-        // waiting for the next runtime register_super_seal.
+        // waiting for the next runtime register_super_seal. R1-X1: tipless
+        // pointers are excluded — a pointer with no tip to bound it must not
+        // pin the cross-zone gauge.
         let super_seal_max_end_epoch = super_seal_map
-            .values()
-            .map(|(e, _, _, _)| *e)
+            .iter()
+            .filter(|(zone, _)| snap.latest_epoch.contains_key(*zone))
+            .map(|(_, (e, _, _, _))| *e)
             .max()
             .unwrap_or(0);
 
@@ -997,13 +1140,23 @@ impl EpochState {
             latest_seal_hash: hash_map,
             latest_vrf_output: vrf_map,
             zone_activity_rate: snap.zone_activity_rate.clone(),
-            zone_adaptive_interval: HashMap::new(), // recomputed from activity rates
+            // Recomputed from the restored rates BELOW (the old comment claimed
+            // this and nothing did it — every restart silently blanked the map
+            // until each zone's next canonical seal; 2026-08-29 verdict, step 1).
+            zone_adaptive_interval: snap
+                .zone_activity_rate
+                .iter()
+                .map(|(z, &r)| (z.clone(), Self::adaptive_interval_for_rate(r)))
+                .collect(),
+            last_activity_epoch: HashMap::new(), // runtime dedup; first post-restart seal re-folds once
             prediction_recurrence: HashMap::new(), // rebuilt from evaluation
             epoch_start_ts: HashMap::new(), // rebuilt at first register_seal after restart
             latest_sealed_account,
             recent_seal_hashes: HashMap::new(), // rebuilt from recent seals at startup
             latest_super_seal: super_seal_map,
             super_seal_max_end_epoch,
+            super_seal_restore_dropped,
+            super_seal_restore_tipless_kept,
             latest_seal_end: HashMap::new(), // rebuilt at first register_seal after restart
             vrf_history,
             // PARTITION-MERGE Phase B: orphan_siblings is in-memory only —
@@ -1032,12 +1185,15 @@ impl EpochState {
             latest_vrf_output: HashMap::new(),
             zone_activity_rate: HashMap::new(),
             zone_adaptive_interval: HashMap::new(),
+            last_activity_epoch: HashMap::new(),
             prediction_recurrence: HashMap::new(),
             epoch_start_ts: HashMap::new(),
             latest_sealed_account: None,
             recent_seal_hashes: HashMap::new(),
             latest_super_seal: HashMap::new(),
             super_seal_max_end_epoch: 0,
+            super_seal_restore_dropped: 0,
+            super_seal_restore_tipless_kept: 0,
             latest_seal_end: HashMap::new(),
             vrf_history: HashMap::new(),
             orphan_siblings: HashMap::new(),
@@ -1261,6 +1417,8 @@ impl EpochState {
                 self.latest_seal_hash.remove(z);
                 self.latest_vrf_output.remove(z);
                 self.zone_activity_rate.remove(z);
+                self.zone_adaptive_interval.remove(z); // step-0b: was never pruned — unbounded at scale + stale-interval inheritance on zone re-creation
+                self.last_activity_epoch.remove(z);
                 self.epoch_start_ts.remove(z);
                 self.latest_seal_end.remove(z);
                 self.vrf_history.remove(z);
@@ -1522,7 +1680,7 @@ impl EpochState {
     /// Touches: `latest_epoch`, `latest_seal_id`, `latest_seal_hash`,
     /// `latest_vrf_output` + VRF history ring, `epoch_start_ts`,
     /// `latest_sealed_account` (if seal carries SMT root), `latest_seal_end`,
-    /// adaptive activity counters, and the rolling super-seal buffer.
+    /// adaptive activity counters, and the epoch-keyed super-seal window.
     ///
     /// Returns `false` (state untouched) when the seal contradicts a
     /// `PINNED_CHAIN_ANCHORS` entry — the §E re-genesis fence. This is the
@@ -1611,24 +1769,36 @@ impl EpochState {
 
         // Update adaptive epoch timing
         let duration = seal.end - seal.start;
-        self.update_activity(&seal.zone, seal.record_count, duration);
+        self.update_activity(&seal.zone, seal.record_count, duration, seal.epoch_number);
 
-        // Gap 3: Push seal hash into the rolling super-seal buffer.
-        // Bounded at SUPER_SEAL_INTERVAL — oldest is popped when the
-        // buffer is full. Seal-loop calls `should_create_super_seal`
-        // to detect when to roll an aggregate.
+        // Gap 3 / R1-X1 M1: upsert this epoch's canonical hash into the
+        // super-seal window (lex-min per epoch — the same rule
+        // `repopulate_recent_seal_hashes` applies at boot and `upsert_vrf_ring`
+        // applies to the jury ring: a pure function of the seal SET, so a
+        // weight-reconcile winner with a lex-larger hash does not replace it),
+        // then prune to the SUPER_SEAL_INTERVAL epochs ending at the new tip.
+        // Seal-loop calls `should_create_super_seal` to detect when to roll an
+        // aggregate. O(log 64) per seal; the prune pops only what left the window.
         let buf = self.recent_seal_hashes.entry(seal.zone.clone()).or_default();
-        if buf.len() >= SUPER_SEAL_INTERVAL as usize {
-            buf.pop_front();
-        }
-        buf.push_back(record_hash);
+        buf.entry(seal.epoch_number)
+            .and_modify(|existing| {
+                if record_hash < *existing {
+                    *existing = record_hash;
+                }
+            })
+            .or_insert(record_hash);
+        prune_seal_window(buf, seal.epoch_number);
         true
     }
 
-    /// Gap 3: True if the zone's rolling buffer has exactly `SUPER_SEAL_INTERVAL`
-    /// seals queued AND the latest sealed epoch is a super-seal boundary
-    /// (`epoch_number % SUPER_SEAL_INTERVAL == 0`). Cheap check; caller uses
-    /// this to decide whether to roll a super-seal record this tick.
+    /// Gap 3: True if the latest sealed epoch is a super-seal boundary
+    /// (`epoch_number % SUPER_SEAL_INTERVAL == 0`) AND the zone's window holds
+    /// the canonical seal of EVERY epoch in `[latest-63, latest]` — R1-X1 M1:
+    /// 64 distinct consecutive epochs ending at the tip, not merely 64
+    /// entries. A window with a hole (B7 fast-forward, a seal this node never
+    /// ingested) refuses the mint; `super_seal_window_status` says why. Cheap
+    /// check; caller uses this to decide whether to roll a super-seal record
+    /// this tick.
     pub fn should_create_super_seal(&self, zone: &ZoneId) -> bool {
         let latest = match self.latest_epoch.get(zone) {
             Some(&e) if e > 0 => e,
@@ -1643,27 +1813,84 @@ impl EpochState {
                 return false;
             }
         }
-        match self.recent_seal_hashes.get(zone) {
-            Some(buf) => buf.len() as u64 == SUPER_SEAL_INTERVAL,
-            None => false,
-        }
+        self.super_seal_window_complete(zone, latest)
     }
 
-    /// Gap 3: Snapshot the rolling buffer for super-seal construction.
-    /// Returns `None` if the buffer isn't full (i.e. we haven't accumulated
-    /// enough seals yet — possible after node restart before backfill).
+    /// R1-X1 M1: `true` when the zone's window holds exactly the
+    /// `SUPER_SEAL_INTERVAL` epochs `[tip-63, tip]`. Keys are distinct, so
+    /// `len == 64` with the first key at the floor and the last at the tip is
+    /// equivalent to "every epoch present" — three O(log n) reads, no scan.
+    fn super_seal_window_complete(&self, zone: &ZoneId, tip: u64) -> bool {
+        let Some(buf) = self.recent_seal_hashes.get(zone) else {
+            return false;
+        };
+        let floor = tip.saturating_sub(SUPER_SEAL_INTERVAL - 1);
+        buf.len() as u64 == SUPER_SEAL_INTERVAL
+            && buf.first_key_value().map(|(k, _)| *k) == Some(floor)
+            && buf.last_key_value().map(|(k, _)| *k) == Some(tip)
+    }
+
+    /// R1-X1 M1: window diagnostics for the boundary INFO line and the
+    /// `super_seal_buffer_noncontiguous_total` counter. `present` = entries
+    /// in the window; `holes` = epochs absent BETWEEN the oldest buffered
+    /// epoch and the tip (a still-filling contiguous head after boot or a
+    /// ≥64-epoch jump is short, not holed); `complete` = mint-eligible.
+    pub fn super_seal_window_status(&self, zone: &ZoneId) -> SealWindowStatus {
+        let tip = self.latest_epoch.get(zone).copied().unwrap_or(0);
+        let Some(buf) = self.recent_seal_hashes.get(zone) else {
+            return SealWindowStatus { present: 0, holes: 0, complete: false };
+        };
+        let present = buf.len() as u64;
+        let holes = match buf.first_key_value() {
+            Some((&first, _)) if first <= tip => {
+                tip.saturating_sub(first).saturating_add(1).saturating_sub(present)
+            }
+            _ => 0,
+        };
+        SealWindowStatus { present, holes, complete: self.super_seal_window_complete(zone, tip) }
+    }
+
+    /// Gap 3: Snapshot the window for super-seal construction — the 64
+    /// canonical hashes of `[latest-63, latest]` in epoch order. Returns
+    /// `None` unless the window is complete (R1-X1 M1: every epoch present,
+    /// not merely 64 entries — possible after a restart before backfill, or
+    /// after a fast-forward / ingest hole until 64 consecutive seals land).
     pub fn snapshot_recent_seal_hashes(&self, zone: &ZoneId) -> Option<Vec<[u8; 32]>> {
-        let buf = self.recent_seal_hashes.get(zone)?;
-        if (buf.len() as u64) < SUPER_SEAL_INTERVAL {
+        let tip = self.latest_epoch.get(zone).copied()?;
+        if !self.super_seal_window_complete(zone, tip) {
             return None;
         }
-        Some(buf.iter().copied().collect())
+        Some(self.recent_seal_hashes.get(zone)?.values().copied().collect())
+    }
+
+    /// R1-X1 Commit 3: everything `ingest::admit_super_seal` needs from the
+    /// epoch state for `zone`, captured under ONE read lock so the rocks
+    /// derivation (A4/A5) runs OUTSIDE it (verdict F6). Pure: no I/O, no
+    /// mutation, bounded by the 64-entry window; a reversed range yields an
+    /// empty window instead of panicking.
+    pub fn super_seal_admission_view(&self, zone: &ZoneId, start: u64, end: u64) -> SuperSealAdmissionView {
+        let window = if start > end {
+            std::collections::BTreeMap::new()
+        } else {
+            self.recent_seal_hashes
+                .get(zone)
+                .map(|w| w.range(start..=end).map(|(e, h)| (*e, *h)).collect())
+                .unwrap_or_default()
+        };
+        SuperSealAdmissionView {
+            tip: self.latest_epoch.get(zone).copied(),
+            pointer: self
+                .latest_super_seal
+                .get(zone)
+                .map(|(end_epoch, _, record_hash, _)| (*end_epoch, *record_hash)),
+            window,
+        }
     }
 
     /// Gap 3: Record that a super-seal has been written for `zone`, covering
     /// epochs ending at `end_epoch`. Does NOT clear `recent_seal_hashes` —
-    /// the rolling-window semantics mean each new seal pops the oldest and
-    /// pushes itself, so the buffer naturally moves forward.
+    /// each new canonical seal upserts its epoch and prunes below the window
+    /// floor, so the window naturally moves forward.
     ///
     /// Returns `true` when the registration replaced (or installed) the
     /// per-zone latest pointer (i.e. `end_epoch` exceeded any prior entry for
@@ -1820,29 +2047,45 @@ impl EpochState {
     ///
     /// Uses exponential moving average (EMA) to smooth activity rate.
     /// Computes adaptive interval: zones with high activity seal faster.
-    pub fn update_activity(&mut self, zone: &ZoneId, record_count: u64, epoch_duration_secs: f64) {
+    pub fn update_activity(
+        &mut self,
+        zone: &ZoneId,
+        record_count: u64,
+        epoch_duration_secs: f64,
+        epoch_number: u64,
+    ) {
         if epoch_duration_secs <= 0.0 {
             return;
         }
+        // Epoch-indexed fold (2026-08-29 verdict, step 1): one fold per
+        // canonical epoch, no matter how many times canonicalization revisits
+        // it (lex-min flips re-enter apply_canonical_seal; the ≥2-seal boot
+        // sweep re-registers tip seals). Keeps the EMA a deterministic
+        // function of the canonical seal SEQUENCE, not of arrival order.
+        if self.last_activity_epoch.get(zone).is_some_and(|&last| last >= epoch_number) {
+            return;
+        }
+        self.last_activity_epoch.insert(zone.clone(), epoch_number);
 
         let current_rate = record_count as f64 / epoch_duration_secs;
         let prev_rate = self.zone_activity_rate.get(zone).copied().unwrap_or(current_rate);
         let ema = ACTIVITY_EMA_ALPHA * current_rate + (1.0 - ACTIVITY_EMA_ALPHA) * prev_rate;
         self.zone_activity_rate.insert(zone.clone(), ema);
+        self.zone_adaptive_interval
+            .insert(zone.clone(), Self::adaptive_interval_for_rate(ema));
+    }
 
-        // Compute adaptive interval:
-        // If ema * default_interval >> TARGET_RECORDS_PER_EPOCH → seal faster
-        // If ema * default_interval << TARGET_RECORDS_PER_EPOCH → seal slower
-        //
-        // interval = TARGET_RECORDS_PER_EPOCH / max(ema, epsilon)
-        // Clamped to [MIN_ADAPTIVE_EPOCH_SECS, MAX_ADAPTIVE_EPOCH_SECS]
-        let interval = if ema > 1e-9 {
+    /// The adaptive-interval formula, shared by the live fold and the
+    /// snapshot-restore recompute so the two can never drift:
+    /// `TARGET_RECORDS_PER_EPOCH / ema`, clamped to the [MIN, MAX] band;
+    /// no-signal rates pin to the quiet-zone ceiling.
+    pub fn adaptive_interval_for_rate(ema: f64) -> f64 {
+        if ema > 1e-9 {
             (TARGET_RECORDS_PER_EPOCH / ema)
                 .clamp(MIN_ADAPTIVE_EPOCH_SECS, MAX_ADAPTIVE_EPOCH_SECS)
         } else {
             MAX_ADAPTIVE_EPOCH_SECS
-        };
-        self.zone_adaptive_interval.insert(zone.clone(), interval);
+        }
     }
 
     /// Get the adaptive epoch interval for a zone (seconds).
@@ -2001,6 +2244,51 @@ impl EpochState {
 impl Default for EpochState {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// R1-X1 M1: diagnostics for one zone's super-seal window — see
+/// [`EpochState::super_seal_window_status`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SealWindowStatus {
+    /// Entries currently buffered (≤ `SUPER_SEAL_INTERVAL`).
+    pub present: u64,
+    /// Epochs absent between the oldest buffered epoch and the tip.
+    pub holes: u64,
+    /// Every epoch of `[tip-63, tip]` is present — mint-eligible.
+    pub complete: bool,
+}
+
+/// R1-X1 Commit 3: the epoch-state facts super-seal admission reads under one
+/// lock (`EpochState::super_seal_admission_view`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SuperSealAdmissionView {
+    /// Local zone tip (`latest_epoch`); None = this node never sealed the zone.
+    pub tip: Option<u64>,
+    /// Local super-seal pointer `(end_epoch, record_hash)`; None = no pointer.
+    pub pointer: Option<(u64, [u8; 32])>,
+    /// Canonical seal hashes the RAM window holds inside `[start, end]`.
+    pub window: std::collections::BTreeMap<u64, [u8; 32]>,
+}
+
+/// R1-X1 M1: keep only the `SUPER_SEAL_INTERVAL` epochs `[tip-63, tip]` of a
+/// per-zone seal window. Entries above `tip` are dropped too — the register
+/// family only ever moves the tip forward, so any such entry is a stale
+/// "future" left by a wholesale tip install and must not survive into a
+/// later window. Amortised O(1) per seal: each entry is popped at most once.
+fn prune_seal_window(buf: &mut std::collections::BTreeMap<u64, [u8; 32]>, tip: u64) {
+    let floor = tip.saturating_sub(SUPER_SEAL_INTERVAL - 1);
+    while let Some((&first, _)) = buf.first_key_value() {
+        if first >= floor {
+            break;
+        }
+        buf.pop_first();
+    }
+    while let Some((&last, _)) = buf.last_key_value() {
+        if last <= tip {
+            break;
+        }
+        buf.pop_last();
     }
 }
 
@@ -3367,6 +3655,40 @@ pub struct RankCheck<'a> {
     pub base_timeout_ms: u64,
 }
 
+/// R1-X1-V (2026-09-02): the verifier's staked-anchor id set, consulted by the
+/// non-genesis catch-up (fast-forward) arm of `verify_epoch_seal_inner`.
+/// REQUIRED (not `Option`) so no call site can forget it: the only constructor
+/// without ledger context is [`SealStakeView::empty`], which is the STRICT
+/// view — every non-genesis fast-forward defers. Production passes the
+/// `staked_set` half of `NodeState::staked_anchor_view_with_set` — the
+/// proposer's own `>0` set (sub-`MIN_STAKE` slash residue included, LIVENESS-1
+/// symmetry) — so proposer and verifier agree on membership by construction.
+#[derive(Clone, Copy)]
+pub struct SealStakeView<'a> {
+    /// Identity hashes of every anchor with `ledger.staked > 0`.
+    pub staked: &'a HashSet<String>,
+}
+
+impl SealStakeView<'static> {
+    /// The strict view (no staked anchors known): tests, historical replay and
+    /// any caller without ledger context. Defers every non-genesis
+    /// fast-forward; genesis and the sequential / partition-merge arms are
+    /// unaffected.
+    pub fn empty() -> Self {
+        static EMPTY: std::sync::OnceLock<HashSet<String>> = std::sync::OnceLock::new();
+        SealStakeView { staked: EMPTY.get_or_init(HashSet::new) }
+    }
+}
+
+impl SealStakeView<'_> {
+    /// `true` iff the set is out of the bootstrap regime
+    /// (`>= aggregator::BOOTSTRAP_MIN_STAKERS`, where non-genesis proposals are
+    /// possible at all) AND contains `creator`.
+    pub fn admits_fastforward(&self, creator: &str) -> bool {
+        self.staked.len() >= super::aggregator::BOOTSTRAP_MIN_STAKERS && self.staked.contains(creator)
+    }
+}
+
 /// Verify that an epoch seal's declared `aggregator_rank` is consistent with
 /// the creator's VRF-stake rank and the exponential-backoff schedule.
 ///
@@ -3415,7 +3737,7 @@ pub fn verify_aggregator_rank(
     // 2. Bootstrap carve-out — matches `aggregator::proposer_rank`.
     //    Fewer than 3 stakers ⇒ only genesis authority may propose, only at
     //    rank 0. Every other case fails.
-    if stakers.len() < 3 {
+    if stakers.len() < super::aggregator::BOOTSTRAP_MIN_STAKERS {
         if creator != genesis_authority {
             return Err(ElaraError::Ledger(format!(
                 "epoch seal from non-genesis creator {} rejected during bootstrap \
@@ -3504,11 +3826,12 @@ pub fn verify_epoch_seal(
     genesis_authority: &str,
     vrf_pk: Option<&crate::crypto::vrf::VrfPublicKey>,
     rank_check: Option<&RankCheck<'_>>,
+    stake_view: SealStakeView<'_>,
 ) -> Result<ParsedEpochSeal> {
     // Default ingest path: run full verification including the merkle
     // recomputation. The async ingest path takes the `_no_merkle` variant
     // to avoid a 30-70s RocksDB range scan on the Tokio worker thread.
-    verify_epoch_seal_inner(record, storage, epoch_state, genesis_authority, vrf_pk, rank_check, true)
+    verify_epoch_seal_inner(record, storage, epoch_state, genesis_authority, vrf_pk, rank_check, stake_view, true)
 }
 
 /// Variant of [`verify_epoch_seal`] that skips the inline
@@ -3525,10 +3848,15 @@ pub fn verify_epoch_seal_no_merkle(
     genesis_authority: &str,
     vrf_pk: Option<&crate::crypto::vrf::VrfPublicKey>,
     rank_check: Option<&RankCheck<'_>>,
+    stake_view: SealStakeView<'_>,
 ) -> Result<ParsedEpochSeal> {
-    verify_epoch_seal_inner(record, storage, epoch_state, genesis_authority, vrf_pk, rank_check, false)
+    verify_epoch_seal_inner(record, storage, epoch_state, genesis_authority, vrf_pk, rank_check, stake_view, false)
 }
 
+// R1-X1-V (2026-09-02): the 8th parameter is the required stake view; the two
+// `pub` wrappers above keep the callable surface at 7. House style for this
+// lint (38 prior sites) is the local allow, not a parameter struct.
+#[allow(clippy::too_many_arguments)]
 fn verify_epoch_seal_inner(
     record: &ValidationRecord,
     storage: &dyn Storage,
@@ -3536,6 +3864,7 @@ fn verify_epoch_seal_inner(
     genesis_authority: &str,
     vrf_pk: Option<&crate::crypto::vrf::VrfPublicKey>,
     rank_check: Option<&RankCheck<'_>>,
+    stake_view: SealStakeView<'_>,
     recompute_merkle: bool,
 ) -> Result<ParsedEpochSeal> {
     // 1. Check creator is an authorized anchor
@@ -3629,6 +3958,50 @@ fn verify_epoch_seal_inner(
                      (proposer key not registered) — deferring fast-forward for \
                      zone {} epoch {}",
                     &creator[..creator.len().min(16)], seal.zone, seal.epoch_number
+                )));
+            }
+            // R1-X1-V (2026-09-02): a verifiable VRF proof proves AUTHORSHIP,
+            // not eligibility — the registration's `node_type` is self-declared
+            // by the record, so any key-holder could register as an "anchor"
+            // and, once its registration synced, fast-forward this node's tip
+            // with a seal the sequential arm would have rejected at the rank
+            // check (skipped here: "historical stake context is lost"). Require
+            // the creator to be admissible by OUR staked-anchor set — the
+            // proposer's own `>0` set (`NodeState::staked_anchor_view_with_set`,
+            // LIVENESS-1 symmetry), out of the bootstrap regime (mirrors the
+            // `< BOOTSTRAP_MIN_STAKERS` genesis-only carve-out of
+            // `aggregator::proposer_rank` / `verify_aggregator_rank`, where no
+            // honest non-genesis seal can exist). Membership is the strongest
+            // predicate that is both computable on this arm and stable across a
+            // catch-up window (rank moves on every stake mutation; membership
+            // only on join / leave / full slash). Genesis is exempt at this
+            // call site, never inside the view. Why this adds no deferral
+            // window beyond B7: the same registration record populates the VRF
+            // registry and the anchor CF, anchors are never evicted, so
+            // `vrf_verifiable ⇒ anchor-CF member` already held — the ONLY new
+            // requirement is `ledger.staked > 0`, snapshot-delivered state a
+            // fresh joiner holds. DEFER (retryable), never reject: an honest
+            // joiner's ledger view catches up and the retry verifies; a forged
+            // seal never becomes admissible and ages out of the retry buffer.
+            // The marker must never contain "VRF" (the ingest VRF arm keys on
+            // that substring).
+            if !stake_view.admits_fastforward(&creator) {
+                let bootstrap = stake_view.staked.len() < super::aggregator::BOOTSTRAP_MIN_STAKERS;
+                tracing::info!(
+                    "epoch catch-up: deferring non-genesis seal from {} for zone {} epoch {} — creator not admissible by the local staked-anchor set (staked={}, need >= {} incl. creator{})",
+                    &creator[..creator.len().min(16)], seal.zone, seal.epoch_number,
+                    stake_view.staked.len(), super::aggregator::BOOTSTRAP_MIN_STAKERS,
+                    if bootstrap { "; bootstrap regime: genesis-only" } else { "" }
+                );
+                return Err(ElaraError::Ledger(format!(
+                    "non-genesis catch-up seal from {} is stake-unverifiable \
+                     (creator not admissible by the local staked-anchor set: \
+                     staked={}, need >= {} incl. creator{}) — deferring \
+                     fast-forward for zone {} epoch {}",
+                    &creator[..creator.len().min(16)], stake_view.staked.len(),
+                    super::aggregator::BOOTSTRAP_MIN_STAKERS,
+                    if bootstrap { "; bootstrap regime: genesis-only" } else { "" },
+                    seal.zone, seal.epoch_number
                 )));
             }
         }
@@ -4357,9 +4730,9 @@ pub fn verify_super_seal_coverage(
 // ─── Rebuild epoch state from storage ──────────────────────────────────────
 
 /// Scan storage for epoch seal records and rebuild the epoch state.
-/// **Test-only.** Production boot uses snapshot replay + per-zone CF_EPOCHS
-/// reverse-scan via `restore_latest_seals_from_storage`, which is bounded
-/// to one prefix scan per zone. The materializing form here issues
+/// **Test-only.** Production boot uses snapshot replay + the per-zone CF_EPOCHS
+/// reverse-scan `rebuild_latest_epoch_from_cf_epochs` (plus the T-F10 tick
+/// heal), which is bounded to one prefix scan per zone. The materializing form here issues
 /// `storage.query(None, None, None, None, usize::MAX)` over CF_RECORDS,
 /// which OOMs at production scale (10M+ records × 8 KB ≈ 80 GB heap).
 #[cfg(test)]
@@ -4747,9 +5120,14 @@ fn canonical_account_root_at(
 /// `active_zones * SUPER_SEAL_INTERVAL * 4`, plus per-zone seal-window floor
 /// short-circuit (`epoch < min_floor` stops the scan). For an anchor serving
 /// 4 testnet zones this is ≤1024 iterations. For a 100-zone anchor: ≤25600.
-/// At 1M zones per Protocol §11.12, each anchor serves only its assigned
-/// subset (`active_zones` reflects that subset, not the global count), so
-/// the scan stays bounded in practice.
+/// At 1M zones per Protocol §11.12 the bound is NOT a per-anchor subset:
+/// epoch ops bypass zone-subscription filtering (`ingest.rs` `is_global_op`),
+/// so every node stores every zone's seals and `active_zones` is the global
+/// count of zones this node has sealed or ingested seals for. The scan stays
+/// bounded because it is per-zone-WINDOW-capped (64 × 4 iterations per active
+/// zone plus the floor short-circuit), not because zones are partitioned —
+/// corrected by R1-X1 Commit 3 (2026-09-02); the R1-X1 brief carries the
+/// matching hygiene line.
 ///
 /// **Canonicalization:** CF_EPOCHS can carry multiple competing seals at the
 /// same `(zone, epoch)` from partition-merge or dual-proposer races. This
@@ -4764,7 +5142,7 @@ pub fn repopulate_recent_seal_hashes(
     state: &mut EpochState,
     storage: &crate::storage::rocks::StorageEngine,
 ) {
-    use std::collections::{BTreeMap, HashSet, VecDeque};
+    use std::collections::{BTreeMap, HashSet};
 
     let active_zones: HashSet<ZoneId> = state.latest_epoch.keys().cloned().collect();
     if active_zones.is_empty() {
@@ -4783,7 +5161,7 @@ pub fn repopulate_recent_seal_hashes(
         .saturating_sub(SUPER_SEAL_INTERVAL - 1);
 
     // Per-zone accumulator: epoch -> lex-min record_hash observed so far.
-    // BTreeMap so the final drain is already chronological.
+    // BTreeMap — it becomes the zone's window itself (R1-X1 M1).
     let mut per_zone: std::collections::HashMap<ZoneId, BTreeMap<u64, [u8; 32]>> =
         std::collections::HashMap::new();
 
@@ -4855,8 +5233,10 @@ pub fn repopulate_recent_seal_hashes(
     for (zone, map) in per_zone {
         if !map.is_empty() {
             total_entries += map.len();
-            let queue: VecDeque<[u8; 32]> = map.values().copied().collect();
-            state.recent_seal_hashes.insert(zone, queue);
+            // R1-X1 M1: the window IS this epoch→lex-min map — the same shape
+            // the live `apply_canonical_seal` upsert maintains, already
+            // filtered to `[latest-63, latest]` by the scan above.
+            state.recent_seal_hashes.insert(zone, map);
             populated_zones += 1;
         }
     }
@@ -5029,7 +5409,10 @@ pub fn rebuild_latest_epoch_from_cf_epochs(
             };
             let seal = match extract_epoch_seal(&record) {
                 Ok(Some(s)) => s,
-                _ => continue, // super-seal or non-seal epoch-indexed record — skip
+                // Not a per-zone seal. DISC-5 keys are written only for
+                // `epoch_op == "seal"` (ingest `disc5_epoch_key`), so this arm
+                // is unreachable via production writers today — kept defensive.
+                _ => continue,
             };
             state.register_seal(&seal, rid, record.record_hash());
             registered += 1;
@@ -5046,15 +5429,250 @@ pub fn rebuild_latest_epoch_from_cf_epochs(
     }
 
     if advanced_zones > 0 {
-        // `apply_canonical_seal` maintains `total_epochs_total` per seal, but a
-        // fast-forward past skipped epochs would undercount — recount from the
-        // corrected tips (O(zones), idempotent).
+        // `apply_canonical_seal` keeps `total_epochs_total` exact for strict
+        // advances (delta = new − old, or new + 1 for a fresh zone), so this
+        // recount is belt-and-braces for callers that write `latest_epoch`
+        // directly (the boot merge in elara_node.rs) — O(zones), idempotent,
+        // restart-only.
         state.recount_total_epochs();
         info!(
             "F-10: latest_epoch recovered from CF_EPOCHS — {advanced_zones} zone(s) advanced \
              past a stale periodic snapshot (scan_iters={iters} hit_cap={hit_cap})"
         );
     }
+}
+
+/// T-F10-MULTIZONE (Layer 3, 2026-09-02): per-tick walk cap for the
+/// durable-tip heal — 4 × `SUPER_SEAL_INTERVAL`, the same shape as the
+/// rebuild cap above. A walk that hits the cap has NOT probed the epoch
+/// after the last one it read, so the caller must skip that tick's proposal
+/// (see [`DurableHealOutcome::hit_cap`]); the walk resumes next tick.
+pub const DURABLE_HEAL_WALK_CAP: u64 = 256;
+
+/// Sibling-count at ONE epoch above which the seal loop logs a warning (the
+/// deliberate no-sibling-cap ruling's canary — see the design verdict).
+pub const DURABLE_HEAL_SIBLINGS_WARN: u64 = 32;
+
+/// One self-produced durable seal found by [`collect_self_durable_seals`].
+pub struct DurableSealCandidate {
+    pub epoch: u64,
+    pub seal: ParsedEpochSeal,
+    pub record_id: String,
+    pub record_hash: [u8; 32],
+}
+
+/// Result of one durable-tip heal pass for one zone.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct DurableHealOutcome {
+    /// Epoch groups whose registration advanced `latest_epoch[zone]` to at
+    /// least that epoch.
+    pub healed_epochs: u64,
+    /// A self-produced seal was refused by `apply_canonical_seal` (the §E
+    /// chain-anchor fence pins a DIFFERENT hash at that epoch). The heal
+    /// stopped there; the caller must not propose this tick — proposing at
+    /// the fence epoch would equivocate against our own durable seal.
+    pub failed: bool,
+    /// The walk stopped on the cap: the epoch after the last probed one is
+    /// unprobed and may hold a self-produced seal, so the caller must not
+    /// propose this tick; the walk resumes next tick from the new tip.
+    pub hit_cap: bool,
+    /// DISC-5 sibling records dereferenced during the walk.
+    pub siblings_read: u64,
+    /// Siblings whose DISC-5 index row and stored payload disagreed during
+    /// the walk: the record was missing/unreadable, its seal payload did not
+    /// parse, or the payload's zone/epoch differed from the index key.
+    /// Steady state 0 — non-zero means index/record divergence in the
+    /// durable store (F2 residual R4 canary). Foreign-creator siblings are
+    /// normal at a shared epoch and are NOT counted here.
+    pub siblings_divergent: u64,
+}
+
+/// Result of the Phase-R DISC-5 walk (`collect_self_durable_seals`).
+#[derive(Default)]
+pub struct DurableSealWalk {
+    /// Own seals at consecutive epochs from `start`, ascending by epoch.
+    pub candidates: Vec<DurableSealCandidate>,
+    /// The walk stopped on `cap` with the next epoch unprobed.
+    pub hit_cap: bool,
+    /// DISC-5 sibling records dereferenced.
+    pub siblings_read: u64,
+    /// Siblings whose index row and payload disagreed
+    /// (see `DurableHealOutcome::siblings_divergent`).
+    pub siblings_divergent: u64,
+}
+
+/// Phase R of the T-F10-MULTIZONE heal — NO epoch lock held. Walk DISC-5
+/// from `start` upward and collect every seal at consecutive epochs that
+/// THIS node produced (`creator_identity_hash == self_identity_hash`). The
+/// walk stops at the first epoch holding no self-produced seal (an empty
+/// slot, or foreign-only siblings) or after `cap` probed epochs.
+///
+/// Why producer-restricted: CF_EPOCHS is written in the record's Phase-2
+/// batch (`ingest.rs`, `disc5_epoch_key`) BEFORE the C2 chain-link gate, so
+/// a stored foreign seal may be one this node REJECTED as a tip update.
+/// Adopting it here would fork our parent hash off every honest peer's;
+/// declining on it would freeze the zone. Our own seals need no such check:
+/// an own seal at (zone, e) is exactly what Phase 5 would have registered,
+/// and registering it is what stops this node from proposing (zone, e) a
+/// second time (equivocation → 25% self-slash).
+///
+/// Cost: one seek per probed epoch plus one `get_record` per sibling at each
+/// probed epoch; steady state = one seek miss at `next_epoch`. No per-epoch
+/// sibling cap on purpose — a capped read could hide our own seal behind
+/// foreign siblings whose ids sort first, and treating a cap-hit as
+/// "unknown" would let ≥cap stored siblings freeze the zone on every honest
+/// node. Sibling admission is NOT reliably gated today (a seal that omits its
+/// VRF fields passes ingest's lenient accept arm — queue item RF-1), but the
+/// amplification is one-shot per planted epoch ONCE the tip moves past it:
+/// the walk breaks at the first epoch with no own seal and the loop proposes
+/// there. While the zone stays stuck at that epoch (our proposal never lands)
+/// the same pile is re-read every tick — bounded by the cap, off the executor
+/// thread (the seal loop runs this on the blocking pool), and visible through
+/// `siblings_read` + its warn.
+///
+/// Returns the walk: candidates ascending by epoch, `hit_cap`, and the two
+/// sibling counters (`siblings_read`, `siblings_divergent`). A divergent
+/// sibling is one whose index row and stored payload disagree; it is skipped
+/// AND counted so the operator can see it on /metrics (F2 residual R4).
+pub fn collect_self_durable_seals(
+    storage: &crate::storage::rocks::StorageEngine,
+    self_identity_hash: &str,
+    zone: &ZoneId,
+    start: u64,
+    cap: u64,
+) -> DurableSealWalk {
+    let mut walk = DurableSealWalk::default();
+    let mut epoch = start;
+    let mut probed = 0u64;
+    while probed < cap {
+        let ids = storage.seal_record_ids_at_zone_epoch(epoch, zone.path());
+        if ids.is_empty() {
+            return walk;
+        }
+        let mut found_own = false;
+        for rid in &ids {
+            walk.siblings_read = walk.siblings_read.saturating_add(1);
+            let record = match storage.get_record(rid) {
+                Ok(Some(r)) => r,
+                _ => {
+                    // The DISC-5 index row points at a record the store
+                    // cannot return: index/record divergence.
+                    walk.siblings_divergent = walk.siblings_divergent.saturating_add(1);
+                    continue;
+                }
+            };
+            if creator_identity_hash(&record) != self_identity_hash {
+                // A foreign creator's seal at this epoch — normal, not divergence.
+                continue;
+            }
+            let seal = match extract_epoch_seal(&record) {
+                Ok(Some(s)) => s,
+                _ => {
+                    // Indexed as a seal, but the payload does not parse as one.
+                    walk.siblings_divergent = walk.siblings_divergent.saturating_add(1);
+                    continue;
+                }
+            };
+            if seal.zone != *zone || seal.epoch_number != epoch {
+                // Defensive: index key and payload disagree.
+                walk.siblings_divergent = walk.siblings_divergent.saturating_add(1);
+                continue;
+            }
+            walk.candidates.push(DurableSealCandidate {
+                epoch,
+                seal,
+                record_id: rid.clone(),
+                record_hash: record.record_hash(),
+            });
+            found_own = true;
+        }
+        if !found_own {
+            return walk;
+        }
+        probed += 1;
+        epoch = match epoch.checked_add(1) {
+            Some(e) => e,
+            None => return walk,
+        };
+    }
+    walk.hit_cap = true;
+    walk
+}
+
+/// Phase W of the T-F10-MULTIZONE heal — the caller holds the epoch WRITE
+/// lock. Registers `candidates` (ascending epoch, as collected) in per-epoch
+/// groups, strictly advancing only: a group at epoch `e` is skipped when
+/// `latest_epoch[zone]` already reached `e` (ingest raced ahead between
+/// Phase R and this call), so the heal never adjudicates a same-epoch
+/// collision it did not create. After a group the tip must be ≥ `e`; if it
+/// is not, `apply_canonical_seal`'s §E fence refused our own seal — the heal
+/// stops with `failed = true`. Never calls `recount_total_epochs`:
+/// `apply_canonical_seal` keeps `total_epochs_total` exact for strict
+/// advances, and a post-crash tick may heal many zones (a recount per heal
+/// would be O(zones²)).
+pub fn apply_durable_tip_heal(
+    epoch: &mut EpochState,
+    zone: &ZoneId,
+    candidates: &[DurableSealCandidate],
+) -> DurableHealOutcome {
+    let mut outcome = DurableHealOutcome::default();
+    let mut i = 0usize;
+    while i < candidates.len() {
+        let e = candidates[i].epoch;
+        let mut group_end = i;
+        while group_end < candidates.len() && candidates[group_end].epoch == e {
+            group_end += 1;
+        }
+        let before = epoch.latest_epoch.get(zone).copied();
+        if before.is_some_and(|tip| tip >= e) {
+            i = group_end;
+            continue;
+        }
+        for c in &candidates[i..group_end] {
+            epoch.register_seal(&c.seal, &c.record_id, c.record_hash);
+        }
+        let after = epoch.latest_epoch.get(zone).copied();
+        if after.is_some_and(|tip| tip >= e) {
+            outcome.healed_epochs += 1;
+        } else {
+            outcome.failed = true;
+            break;
+        }
+        i = group_end;
+    }
+    outcome
+}
+
+/// T-F10-MULTIZONE durable-tip heal for one zone, called by `epoch_seal_loop`
+/// BEFORE it reads `next_epoch` for the proposal. Read lock → Phase R
+/// (storage only, no lock) → write lock only when there is something to
+/// register → Phase W. Synchronous end to end; no `.await` in between.
+#[cfg(feature = "node-core")]
+pub fn heal_zone_tip_from_durable_seals(
+    state: &super::state::NodeState,
+    zone: &ZoneId,
+) -> DurableHealOutcome {
+    let start = {
+        let epoch = state.epoch.read_recover();
+        epoch.next_epoch(zone)
+    };
+    let walk = collect_self_durable_seals(
+        &state.rocks,
+        &state.identity.identity_hash,
+        zone,
+        start,
+        DURABLE_HEAL_WALK_CAP,
+    );
+    let mut outcome = if walk.candidates.is_empty() {
+        DurableHealOutcome::default()
+    } else {
+        let mut epoch = state.epoch.write_recover();
+        apply_durable_tip_heal(&mut epoch, zone, &walk.candidates)
+    };
+    outcome.hit_cap = walk.hit_cap;
+    outcome.siblings_read = walk.siblings_read;
+    outcome.siblings_divergent = walk.siblings_divergent;
+    outcome
 }
 
 /// Rebuild epoch state from a pre-loaded record slice (single-pass startup).
@@ -5202,6 +5820,19 @@ pub(crate) enum NoneReason {
     /// means the lower ranks are absent/byzantine and the timeout schedule
     /// has not yet reached this rank.
     RankTooHighForElapsed { our_rank: u8, allowed: u8 },
+    /// NL-1 adaptive seal-gate (Step 2). Our identity IS the rank-elected
+    /// per-zone proposer, but the zone is not yet due under its adaptive
+    /// cadence (`now - latest_seal_end[zone] < adaptive_interval[zone]`), so we
+    /// hold this tick instead of sealing on every eligible tick. ONLY
+    /// constructed by the gated pre-check when `cfg.use_adaptive_seal_gate` is
+    /// true (merge-dark; default-false = this variant is never produced). A
+    /// zone with no `latest_seal_end` entry (cold-start / never-sealed) is
+    /// treated as immediately due, so this never fires on a freshly-restarted
+    /// node's first eligible tick. Self-clearing as the interval elapses;
+    /// sustained non-zero with the flag on simply means the zone's
+    /// traffic-derived cadence is slower than the tick interval — the intended
+    /// steady state, NOT a stall (contrast `NotInTopRanks` / `RankTooHighForElapsed`).
+    AdaptiveIntervalPending,
 }
 
 /// Determine if this node should propose an epoch seal for a given zone.
@@ -5390,6 +6021,84 @@ async fn should_propose_seal(
     SealProposal::None(NoneReason::NotInTopRanks)
 }
 
+/// NL-1 adaptive seal-gate (Step 2) — per-zone cadence due-check.
+///
+/// Returns `true` when `zone` is due for a seal under its adaptive cadence:
+/// `now - latest_seal_end[zone] >= adaptive_interval[zone]` (fallback interval
+/// = the fixed `epoch_seal_interval_secs`).
+///
+/// COLD-START (verdict correction i — the permanent-stall trap): `latest_seal_end`
+/// on [`EpochState`] is NOT snapshot-restored — it is empty after a
+/// snapshot-bootstrap and only repopulated when a seal registers via
+/// `apply_canonical_seal`. A naive `now - latest_seal_end >= interval` on an
+/// empty map would read "not due" forever → never seal → never populate →
+/// the restarted node stalls forever. Fix: a zone with NO entry is treated as
+/// **immediately due**, so a booted-from-snapshot node proposes on its first
+/// eligible tick and the map self-heals from the first seal onward. (Seeding the
+/// map to `now` at boot instead would DELAY the first post-restart seal by a
+/// full interval and contradict the first-eligible-tick liveness requirement —
+/// so the no-entry fallback, not a boot prime, is the load-bearing fix. The
+/// full-record boot replay already seeds the map via `register_seal`; this
+/// covers the snapshot-bootstrap path it does not touch.)
+#[cfg(feature = "node-core")]
+fn zone_adaptive_seal_due(
+    epoch: &EpochState,
+    zone: &ZoneId,
+    now: f64,
+    fallback_interval_secs: f64,
+) -> bool {
+    match epoch.latest_seal_end.get(zone) {
+        // Cold-start / never-sealed zone → immediately due (see docs above).
+        None => true,
+        Some(&last_end) => now - last_end >= epoch.adaptive_interval(zone, fallback_interval_secs),
+    }
+}
+
+/// NL-1 adaptive seal-gate (Step 2) — proposal gate.
+///
+/// Merge-dark decision filter applied to `should_propose_seal`'s result. When
+/// `flag_on` is false this is the identity function (`proposal` returned
+/// verbatim), so the flag-off path is byte-for-byte unchanged. When on, it
+/// rewrites ONLY a `PerZone` proposal to `None(AdaptiveIntervalPending)` when
+/// the zone is not yet `due` — holding the seal until the adaptive cadence
+/// elapses.
+///
+/// ESCALATION BYPASS (verdict correction ii — never gate the anti-stall path):
+/// only `PerZone` is rewritten. `GlobalEscalate` (the stuck-zone cross-zone
+/// bailout) and every `None(_)` reason pass through untouched. By construction
+/// `should_propose_seal` returns `GlobalEscalate` — never `PerZone` — whenever
+/// the escalation decision fires, so a stuck zone can never be held by this gate.
+#[cfg(feature = "node-core")]
+fn gate_adaptive_seal(proposal: SealProposal, flag_on: bool, due: bool) -> SealProposal {
+    if flag_on && !due && matches!(proposal, SealProposal::PerZone(_)) {
+        SealProposal::None(NoneReason::AdaptiveIntervalPending)
+    } else {
+        proposal
+    }
+}
+
+/// NL-1 adaptive seal-gate (Step 2) — per-zone window START selection
+/// (verdict correction iii).
+///
+/// With the flag ON, anchor this seal's window start to the zone's own last
+/// sealed end (`prev_end`) so a slower-than-tick adaptive cadence seals the
+/// FULL gap since the previous seal — not just the last `interval_secs`, which
+/// would leak records sealed between `prev_end` and `start` out of every
+/// window. Returns `prev_end` ONLY when it is a usable, non-degenerate
+/// boundary — positive AND strictly before this window's `end`
+/// (`0 < prev_end < end`); a missing entry (`None`), a zero sentinel, or an
+/// inverted boundary (`prev_end >= end`, which would produce a
+/// zero-or-negative-width window) falls back to the shared tick `start`. Pure
+/// over its inputs so the branch is unit-testable without a live epoch/config;
+/// the flag guard stays at the call site (flag-off = `start`, byte-identical).
+#[cfg(feature = "node-core")]
+fn adaptive_seal_window_start(prev_end: Option<f64>, start: f64, end: f64) -> f64 {
+    match prev_end {
+        Some(pe) if pe > 0.0 && pe < end => pe,
+        _ => start,
+    }
+}
+
 /// GENESIS ZONE BOOTSTRAP (fresh-chain liveness).
 ///
 /// Zone discovery in `epoch_seal_loop` has exactly two sources: records whose
@@ -5500,25 +6209,26 @@ pub async fn epoch_seal_loop(
     {
         let mut epoch = state.epoch.write_recover();
         // Supervised-restart recovery (F-10): before canonicalizing, re-derive
-        // each TRACKED zone's tip from the durable CF_EPOCHS index. This closes
-        // the re-propose/self-slash window for any zone that already has a
-        // `latest_epoch` entry — which is every zone that exists on a
-        // single-zone fleet, so restart is fully safe at the current scale.
+        // each TRACKED zone's tip from the durable CF_EPOCHS index — the cheap
+        // bulk catch-up for zones that already have a `latest_epoch` entry.
         //
-        // SCOPED RESIDUAL (multi-zone only, UNREACHABLE at zone_count==1):
-        // `rebuild_latest_epoch_from_cf_epochs` deliberately skips zones ABSENT
-        // from `latest_epoch` (its per-entry `None => untracked, no re-propose
-        // risk` guard, pinned by `f10_rebuild_multizone_only_advances_lagging_tips`).
-        // At boot that is sound — `latest_epoch` is snapshot-seeded first. On a
-        // live-task restart it leaves a hole: a brand-new zone's FIRST seal
-        // (epoch 0, e.g. right after a Gap-4 split) whose `register_seal` was
-        // skipped by a panic in the durable-write→register_seal window stays
-        // untracked, so `should_propose_seal` reads `already_sealed=false`
-        // (epoch.rs:5011) and re-proposes epoch 0 → 25% equivocation self-slash.
-        // The fix (a producer-aware durable `already_sealed` guard, or a
-        // self-produced-seal re-seed of untracked tips) is a documented
-        // multi-zone prerequisite — see the loop-supervision memory. Idempotent
-        // + bounded reverse-scan; a no-op once tracked tips match durable.
+        // KNOWN HOLES of this boot pass (T-F10-MULTIZONE, 2026-09-02): it
+        // deliberately skips zones ABSENT from `latest_epoch` (its per-entry
+        // `None => untracked` guard, pinned by
+        // `f10_rebuild_multizone_only_advances_lagging_tips`), so it cannot
+        // re-seed (H1) a brand-new zone's epoch-0 seal whose `register_seal`
+        // was skipped by a panic in the durable-write→register window, (H2) a
+        // zone the periodic snapshots never captured before an unclean exit,
+        // or (H3) a zone whose RAM tip `prune_stale_zones` dropped at a merge
+        // and a later re-split re-added. In each, `should_propose_seal` would
+        // read `already_sealed=false` (its `already_sealed` derivation and the
+        // `NoneReason::AlreadySealed` gate) and re-propose an epoch this node
+        // already sealed → equivocation → 25% self-slash. Those are closed at
+        // TICK time by the Layer-3 heal (`heal_zone_tip_from_durable_seals`,
+        // run by `epoch_seal_loop` before every `next_epoch` read). Residual:
+        // a zone whose early seals were GC-pruned below its super-seal floor
+        // (queue item F1) is out of reach of both passes. Idempotent + bounded
+        // reverse-scan; a no-op once tracked tips match durable.
         rebuild_latest_epoch_from_cf_epochs(&mut epoch, &state.rocks);
         canonicalize_latest_seals(&mut epoch, &state.rocks);
     }
@@ -5955,6 +6665,8 @@ pub async fn epoch_seal_loop(
         let mut tick_none_bootstrap: u32 = 0;
         let mut tick_none_not_in_top: u32 = 0;
         let mut tick_none_rank_too_high: u32 = 0;
+        let mut tick_none_adaptive_pending: u32 = 0;
+        let mut tick_durable_heals: u64 = 0;
         let mut tick_none_summary: Vec<String> = Vec::new();
 
         for zone in zones_to_seal {
@@ -5965,12 +6677,118 @@ pub async fn epoch_seal_loop(
             // Re-stamping per zone bounds the inter-heartbeat gap to one zone's
             // work, independent of zone count.
             hb.heartbeat();
+            // T-F10-MULTIZONE (Layer 3): before reading `next_epoch`, re-seed
+            // this zone's tip from any self-produced seal that is durable in
+            // CF_EPOCHS but missing from RAM (crash between the Phase-2 write
+            // and `register_seal`; snapshot lag at an unclean exit; a
+            // merge→prune→re-split cycle that dropped the tip). Proposing an
+            // epoch we already sealed = equivocation = 25% self-slash, so a
+            // fence refusal or a cap-hit skips this tick's proposal instead.
+            // RocksDB reads (one seek miss in steady state; up to 256 seeks
+            // plus one `get_record` per DISC-5 sibling after a crash or against
+            // a planted sibling pile) run on the blocking pool like the other
+            // RocksDB-heavy work in this loop, so a slow heal costs this task
+            // latency, never the executor thread. A join failure (a panic
+            // inside the heal) is treated like a fence refusal: no proposal.
+            let heal = {
+                let st = Arc::clone(&state);
+                let z = zone.clone();
+                match tokio::task::spawn_blocking(move || heal_zone_tip_from_durable_seals(&st, &z))
+                    .await
+                {
+                    Ok(h) => h,
+                    Err(e) => {
+                        state
+                            .seal_loop_durable_tip_heal_failed_total
+                            .fetch_add(1, Ordering::Relaxed);
+                        warn!(
+                            zone = %zone.path(),
+                            "T-F10 durable-tip heal task failed: {e} — skipping this tick's proposal (must-stay-0 counter bumped)"
+                        );
+                        continue;
+                    }
+                }
+            };
+            if heal.siblings_read > 0 {
+                state
+                    .seal_loop_durable_heal_siblings_read_total
+                    .fetch_add(heal.siblings_read, Ordering::Relaxed);
+                if heal.siblings_read > DURABLE_HEAL_SIBLINGS_WARN.saturating_mul(heal.healed_epochs.max(1)) {
+                    warn!(
+                        zone = %zone.path(),
+                        siblings_read = heal.siblings_read,
+                        healed_epochs = heal.healed_epochs,
+                        "T-F10 durable-tip heal dereferenced an unusual number of DISC-5 siblings — stored foreign seals piling up at this node's next_epoch"
+                    );
+                }
+            }
+            if heal.siblings_divergent > 0 {
+                state
+                    .seal_loop_durable_heal_siblings_divergent_total
+                    .fetch_add(heal.siblings_divergent, Ordering::Relaxed);
+                warn!(
+                    zone = %zone.path(),
+                    siblings_divergent = heal.siblings_divergent,
+                    siblings_read = heal.siblings_read,
+                    "T-F10 durable-tip heal hit DISC-5 index/record divergence — an index row pointed at a missing, unparseable, or mis-keyed seal (F2 residual R4 canary; steady state 0)"
+                );
+            }
+            if heal.healed_epochs > 0 {
+                state
+                    .seal_loop_durable_tip_heals_total
+                    .fetch_add(heal.healed_epochs, Ordering::Relaxed);
+                tick_durable_heals += heal.healed_epochs;
+                info!(
+                    zone = %zone.path(),
+                    healed_epochs = heal.healed_epochs,
+                    hit_cap = heal.hit_cap,
+                    "T-F10 durable-tip heal registered self-produced seal(s) from CF_EPOCHS"
+                );
+            }
+            if heal.failed {
+                state
+                    .seal_loop_durable_tip_heal_failed_total
+                    .fetch_add(1, Ordering::Relaxed);
+                warn!(
+                    zone = %zone.path(),
+                    "T-F10 durable-tip heal: own durable seal refused by the chain-anchor fence — skipping this tick's proposal (must-stay-0 counter bumped; stale pre-re-genesis node? wipe + virgin re-join)"
+                );
+                continue;
+            }
+            if heal.hit_cap {
+                if heal.healed_epochs == 0 {
+                    // Only reachable when a concurrent writer raced every
+                    // candidate group ahead of Phase W; benign, but say so.
+                    debug!(
+                        zone = %zone.path(),
+                        "T-F10 durable-tip heal hit the walk cap without registering anything — retrying next tick"
+                    );
+                }
+                continue;
+            }
             // Check if this node should propose for this zone/epoch
             let epoch_number = {
                 let epoch = state.epoch.read_recover();
                 epoch.next_epoch(&zone)
             };
-            let our_rank = match should_propose_seal(&state, &zone, epoch_number).await {
+            // NL-1 adaptive seal-gate (Step 2, merge-dark). Evaluate the
+            // proposal, then — only when the flag is on — hold a would-be
+            // PerZone seal until the zone is due under its adaptive cadence.
+            // Flag-off = `gate_adaptive_seal` identity, so the seal-proposal
+            // decision is byte-for-byte unchanged. GlobalEscalate + every None
+            // reason pass through untouched (correction ii — never gate the
+            // anti-stall path).
+            let proposal = should_propose_seal(&state, &zone, epoch_number).await;
+            let proposal = if state.config.use_adaptive_seal_gate {
+                let due = {
+                    let epoch = state.epoch.read_recover();
+                    zone_adaptive_seal_due(&epoch, &zone, now, interval_secs as f64)
+                };
+                gate_adaptive_seal(proposal, true, due)
+            } else {
+                proposal
+            };
+            let our_rank = match proposal {
                 SealProposal::PerZone(r) => {
                     // Stage 3c.3 adversarial hook: if this rank is muted on
                     // this node (sim-only, never set in production), sit
@@ -6020,6 +6838,13 @@ pub async fn epoch_seal_loop(
                                 .seal_loop_proposals_none_rank_too_high_total
                                 .fetch_add(1, Ordering::Relaxed);
                             format!("rank_too_high(r={our_rank},allowed={allowed})")
+                        },
+                        NoneReason::AdaptiveIntervalPending => {
+                            tick_none_adaptive_pending += 1;
+                            state
+                                .seal_loop_proposals_none_adaptive_pending_total
+                                .fetch_add(1, Ordering::Relaxed);
+                            "adaptive_interval_pending".to_string()
                         },
                     };
                     if tick_none_summary.len() < 8 {
@@ -6291,7 +7116,29 @@ pub async fn epoch_seal_loop(
                 let state2 = state.clone();
                 let identity = state.identity.clone();
                 let vrf_sk = state.vrf_secret_key.clone();
-                let s = start;
+                // NL-1 adaptive seal-gate (Step 2, correction iii — per-zone
+                // window). With the flag ON, anchor this seal's window START to
+                // the zone's own last sealed end so a slower-than-tick adaptive
+                // cadence seals the FULL gap since the previous seal, not just
+                // the last `interval_secs` (the shared-tick-window would leak
+                // records sealed between prev_end and start). This keeps the
+                // window contiguous (start == prev_end silences the §11.6
+                // start<prev_end warning) and stays proposer↔witness symmetric —
+                // every window consumer scans [seal.start, seal.end] from the
+                // seal record itself, capped by MAX_SEAL_RECORDS. Guard: only
+                // move the start EARLIER (0 < prev_end < end); a missing entry,
+                // a zero, or an inverted/degenerate boundary falls back to the
+                // shared tick window. Flag-off = byte-identical (s = start).
+                let s = if state.config.use_adaptive_seal_gate {
+                    let epoch = state.epoch.read_recover();
+                    adaptive_seal_window_start(
+                        epoch.latest_seal_end.get(&zone).copied(),
+                        start,
+                        end,
+                    )
+                } else {
+                    start
+                };
                 let e = end;
                 let z = zone.clone();
                 let rocks = state.rocks.clone();
@@ -6422,17 +7269,32 @@ pub async fn epoch_seal_loop(
                         }
                     };
                     if at_boundary {
-                        // Read the buffer depth WITHOUT mutating it (super_snapshot
-                        // path above already drained `should_create_super_seal` if
-                        // the gate passed; this is the post-decision diagnostic).
+                        // Read the window WITHOUT mutating it (super_snapshot
+                        // path above already ran `should_create_super_seal`;
+                        // this is the post-decision diagnostic).
                         // read_recover: poison-consistency with the reads above.
-                        let buf_depth = state.epoch.read_recover()
-                            .recent_seal_hashes.get(&parsed.zone).map(|b| b.len())
-                            .unwrap_or(0);
+                        let (window, boundary_open) = {
+                            let e = state.epoch.read_recover();
+                            let open = e
+                                .latest_super_seal
+                                .get(&parsed.zone)
+                                .is_none_or(|(end, _, _, _)| *end < parsed.epoch_number);
+                            (e.super_seal_window_status(&parsed.zone), open)
+                        };
                         let gate_passed = super_snapshot.is_some();
+                        // R1-X1 M1: an open boundary refused on an INCOMPLETE
+                        // (non-empty) window — a fast-forward / ingest hole or
+                        // a snapshot-bootstrap start inside the window. Not a
+                        // boundary a peer's super-seal already covers.
+                        if boundary_open && !gate_passed && window.present > 0 && !window.complete {
+                            state
+                                .super_seal_buffer_noncontiguous_total
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
                         info!(
-                            "super-seal boundary eval: zone={} epoch={} buffer={}/{} gate_passed={}",
-                            parsed.zone, parsed.epoch_number, buf_depth, SUPER_SEAL_INTERVAL, gate_passed,
+                            "super-seal boundary eval: zone={} epoch={} buffer={}/{} holes={} gate_passed={}",
+                            parsed.zone, parsed.epoch_number, window.present, SUPER_SEAL_INTERVAL,
+                            window.holes, gate_passed,
                         );
                     }
                     if let Some((hashes, prev_hash, end_epoch)) = super_snapshot {
@@ -6936,15 +7798,33 @@ pub async fn epoch_seal_loop(
                     // pattern as the timeout refund). Coarse cadence — these are
                     // rare and 30d-aged, so a per-epoch scan would be wasted work;
                     // the monotone guard keeps it to one batch per chosen epoch.
-                    const REAP_CHECK_INTERVAL_EPOCHS: u64 = 100;
-                    if xzone_is_genesis_authority
-                        && parsed.epoch_number % REAP_CHECK_INTERVAL_EPOCHS == 0
-                    {
+                    // Step 0a (2026-08-29 verdict): the trigger is WALL-CLOCK, not
+                    // `epoch_number % 100` — a modulo of one zone's counter fires at
+                    // that zone's cadence (a floor-pinned zone would check 12x too
+                    // often, a quiet-capped fleet could skip checks entirely under
+                    // variable cadence). 6000s = 100 x today's 60s tick → identical
+                    // cadence now, honest cadence later. The epoch watermark below
+                    // stays as the restart-safe same-batch dedup.
+                    const REAP_CHECK_INTERVAL_SECS: u64 = 6_000;
+                    let reap_prev_ts = state
+                        .last_xzone_reap_emit_ts
+                        .load(std::sync::atomic::Ordering::SeqCst);
+                    let reap_due = reap_prev_ts == 0
+                        || (now as u64).saturating_sub(reap_prev_ts) >= REAP_CHECK_INTERVAL_SECS;
+                    if xzone_is_genesis_authority && reap_due {
                         let epoch_no = parsed.epoch_number;
                         let prev = state
                             .last_xzone_reap_emit_epoch
                             .fetch_max(epoch_no, std::sync::atomic::Ordering::SeqCst);
                         if epoch_no > prev {
+                            // C1adj (audit 2026-08-30): stamp INSIDE the dedup
+                            // branch, mirroring the idle-decay twin — storing
+                            // unconditionally burned the 6000s budget on seals
+                            // the epoch watermark then rejected (per-zone epoch
+                            // numbers vs a global watermark), starving the reap.
+                            state
+                                .last_xzone_reap_emit_ts
+                                .store(now as u64, std::sync::atomic::Ordering::SeqCst);
                             let batch_opt = state.ledger.try_read().ok().and_then(|ledger| {
                                 ledger.cross_zone.compute_stale_reap_batch(
                                     now,
@@ -7022,7 +7902,33 @@ pub async fn epoch_seal_loop(
                         let prev = state
                             .last_idle_decay_emit_epoch
                             .fetch_max(epoch_no, std::sync::atomic::Ordering::SeqCst);
-                        if epoch_no > prev {
+                        // Step 0a (2026-08-29 verdict): wall-clock spacing floor —
+                        // the epoch watermark above stays the restart-safe dedup,
+                        // but epoch NUMBERS advance per-zone once cadence varies,
+                        // so a floor-pinned zone must never drive charge cadence.
+                        // 30s floor = half today's uniform 60s tick → a no-op at
+                        // current cadence, a cap under adaptive cadence.
+                        const IDLE_DECAY_MIN_EMIT_SPACING_SECS: u64 = 30;
+                        let prev_ts = state
+                            .last_idle_decay_emit_ts
+                            .load(std::sync::atomic::Ordering::SeqCst);
+                        let now_secs = now as u64;
+                        let spacing_ok =
+                            prev_ts == 0 || now_secs.saturating_sub(prev_ts) >= IDLE_DECAY_MIN_EMIT_SPACING_SECS;
+                        if epoch_no > prev && spacing_ok {
+                            state
+                                .last_idle_decay_emit_ts
+                                .store(now_secs, std::sync::atomic::Ordering::SeqCst);
+                            // Charge duration = true time since the LAST emit, not
+                            // the sealing zone's own window (which stops proxying
+                            // global elapsed time under variable cadence). At
+                            // today's uniform cadence prev_ts is ~one tick ago, so
+                            // this equals the old epoch_duration. Bounded [1s, 1h].
+                            let charge_duration = if prev_ts > 0 {
+                                (now - prev_ts as f64).clamp(1.0, 3600.0)
+                            } else {
+                                epoch_duration
+                            };
                             // First seal of this epoch number — compute under a read
                             // lock (pure, no mutation) and emit only if some exchange
                             // owes a fee. The record then debits via the apply path.
@@ -7031,7 +7937,7 @@ pub async fn epoch_seal_loop(
                                     parsed.zone.path(),
                                     epoch_no,
                                     now,
-                                    epoch_duration,
+                                    charge_duration,
                                 )
                             });
                             if let Some(batch) = batch_opt {
@@ -7145,9 +8051,11 @@ pub async fn epoch_seal_loop(
         // Per-tick summary log. ONE line/tick (~1/min at base
         // 60s interval) regardless of zone count — mainnet-safe at 1M zones
         // since we cap the `none_zones=[...]` list at 8 entries. Operators
-        // read this alongside the 9 counters to disambiguate stall mode.
-        // The four reason-tagged breakdowns answer the *which gate*
-        // question without journal-diving.
+        // read this alongside the seal_loop counter family (incl. the T-F10
+        // durable-heal trio) to disambiguate stall mode.
+        // The five reason-tagged breakdowns answer the *which gate*
+        // question without journal-diving. (`none_adaptive_pending` is the
+        // NL-1 Step 2 gate — stays 0 while `use_adaptive_seal_gate` is off.)
         info!(
             ticks_total = state.seal_loop_ticks_total.load(Ordering::Relaxed),
             per_zone = tick_per_zone,
@@ -7158,6 +8066,8 @@ pub async fn epoch_seal_loop(
             none_bootstrap = tick_none_bootstrap,
             none_not_in_top = tick_none_not_in_top,
             none_rank_too_high = tick_none_rank_too_high,
+            none_adaptive_pending = tick_none_adaptive_pending,
+            durable_heals = tick_durable_heals,
             none_zones = %tick_none_summary.join(","),
             "OPS-188 seal_loop tick summary"
         );
@@ -7187,6 +8097,194 @@ mod tests {
     use crate::record::Classification;
     use crate::storage::rocks::StorageEngine;
     use crate::storage::Storage;
+
+    /// NL-1 adaptive seal-gate (Step 2) — verdict correction (i), the
+    /// permanent-stall trap. A node booted from a state snapshot has an EMPTY
+    /// `latest_seal_end` (epoch.rs:1023, `from_snapshot`: "rebuilt at first
+    /// register_seal after restart"), EVEN for zones sealed before the restart.
+    /// A naive `now - latest_seal_end >= interval` on the empty map would read
+    /// "not due" forever → never seal → never repopulate → the restarted node
+    /// stalls that zone permanently. This pins the fix: an absent entry is
+    /// treated as immediately due, so the node proposes on its first eligible
+    /// tick and the map self-heals from the first seal onward.
+    #[cfg(feature = "node-core")]
+    #[test]
+    fn nl1_adaptive_gate_cold_start_snapshot_boot_is_immediately_due_and_not_held() {
+        let zone = ZoneId::new("z0");
+
+        // A zone that WAS sealed before the restart...
+        let mut pre = EpochState::new();
+        pre.latest_seal_end.insert(zone.clone(), 500.0);
+        assert_eq!(
+            pre.latest_seal_end.get(&zone).copied(),
+            Some(500.0),
+            "precondition: zone is sealed pre-restart"
+        );
+
+        // ...loses its latest_seal_end across a snapshot boot (the trap).
+        let booted = EpochState::from_snapshot(&pre.to_snapshot());
+        assert!(
+            booted.latest_seal_end.is_empty(),
+            "snapshot boot drops latest_seal_end (epoch.rs:1023) — the cold-start trap"
+        );
+
+        // The fix: an absent entry is immediately due, even though `now` sits
+        // only 1s past the pre-restart seal end (< the 60s interval).
+        let now = 501.0_f64;
+        let interval = 60.0_f64;
+        let due = zone_adaptive_seal_due(&booted, &zone, now, interval);
+        assert!(due, "cold-start: empty latest_seal_end must be immediately due");
+
+        // End-to-end: a would-be PerZone proposer is NOT held on its first
+        // eligible tick after a snapshot boot (flag ON, due=true).
+        assert_eq!(
+            gate_adaptive_seal(SealProposal::PerZone(0), true, due),
+            SealProposal::PerZone(0),
+            "a booted-from-snapshot node must propose on its first eligible tick, not stall"
+        );
+    }
+
+    /// NL-1 adaptive seal-gate (Step 2) — verdict correction (ii), the
+    /// escalation-bypass guarantee. The gate rewrites ONLY `PerZone`; the
+    /// stuck-zone anti-stall path (`GlobalEscalate`) passes through untouched,
+    /// so cadence throttling can never suppress the mechanism that unwedges a
+    /// stalled zone. (Reinforced structurally by `should_propose_seal`, which
+    /// returns `GlobalEscalate` — never `PerZone` — whenever the escalation
+    /// decision fires; the gate only ever SEES a PerZone on the non-stuck path.)
+    #[cfg(feature = "node-core")]
+    #[test]
+    fn nl1_adaptive_gate_never_holds_escalation_even_when_not_due() {
+        let zone = ZoneId::new("stuck");
+        // Flag ON, zone NOT due — the exact condition under which a PerZone
+        // WOULD be held. GlobalEscalate must still pass through unchanged.
+        assert_eq!(
+            gate_adaptive_seal(SealProposal::GlobalEscalate(zone.clone()), true, false),
+            SealProposal::GlobalEscalate(zone.clone()),
+            "correction (ii): a stuck zone must still escalate even when not due"
+        );
+        // Prove the gate is actually ACTIVE under these exact args (not
+        // vacuously passing everything): a PerZone under the same (on, not-due)
+        // IS held.
+        assert_eq!(
+            gate_adaptive_seal(SealProposal::PerZone(0), true, false),
+            SealProposal::None(NoneReason::AdaptiveIntervalPending),
+            "gate must actively hold a not-due PerZone (proves the escalation test isn't vacuous)"
+        );
+    }
+
+    /// NL-1 adaptive seal-gate (Step 2) — the merge-dark contract: flag-OFF is
+    /// the identity (byte-for-byte unchanged proposal), a DUE zone passes,
+    /// `None(_)` reasons are never rewritten, and the due-check arithmetic on a
+    /// populated zone uses the fallback interval when no per-zone override is set.
+    #[cfg(feature = "node-core")]
+    #[test]
+    fn nl1_adaptive_gate_flag_off_identity_and_due_arithmetic() {
+        // Flag OFF: no proposal is ever rewritten, whatever `due` says.
+        for due in [true, false] {
+            assert_eq!(
+                gate_adaptive_seal(SealProposal::PerZone(3), false, due),
+                SealProposal::PerZone(3),
+                "flag-off must be byte-identical (never gate)"
+            );
+        }
+        // Flag ON, DUE: PerZone passes.
+        assert_eq!(
+            gate_adaptive_seal(SealProposal::PerZone(3), true, true),
+            SealProposal::PerZone(3),
+            "a due PerZone must pass"
+        );
+        // Flag ON, not due: a None reason is NOT rewritten (only PerZone is).
+        assert_eq!(
+            gate_adaptive_seal(SealProposal::None(NoneReason::AlreadySealed), true, false),
+            SealProposal::None(NoneReason::AlreadySealed),
+            "None(_) reasons pass through untouched"
+        );
+
+        // Due-check arithmetic on a populated zone, fallback interval (no
+        // per-zone adaptive override → uses fallback_interval_secs).
+        let zone = ZoneId::new("z0");
+        let mut ep = EpochState::new();
+        ep.latest_seal_end.insert(zone.clone(), 1000.0);
+        let interval = 60.0_f64;
+        assert!(
+            !zone_adaptive_seal_due(&ep, &zone, 1030.0, interval),
+            "30s since last seal < 60s interval → NOT due"
+        );
+        assert!(
+            zone_adaptive_seal_due(&ep, &zone, 1060.0, interval),
+            "exactly 60s since last seal → due (>= boundary)"
+        );
+        assert!(
+            zone_adaptive_seal_due(&ep, &zone, 5000.0, interval),
+            "well past interval → due"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "node-core")]
+    fn nl1_adaptive_window_start_uses_prev_end_only_when_contiguous_and_positive() {
+        // correction (iii): with the flag ON, the seal window START is anchored
+        // to the zone's own last sealed end (prev_end) so the FULL gap since the
+        // previous seal is covered — but ONLY when prev_end is a usable,
+        // non-degenerate boundary (0 < prev_end < end). Every other case falls
+        // back to the shared tick `start`. This pins the exact branch the call
+        // site (epoch.rs, the seal_result block) runs under the flag; the helper
+        // is pure so the flag guard itself stays byte-identical when off.
+        let start = 40.0_f64;
+        let end = 100.0_f64;
+
+        // Contiguous previous seal (0 < prev_end < end): steady state, prev_end
+        // == the previous seal's end → anchor start to it.
+        assert_eq!(
+            adaptive_seal_window_start(Some(50.0), start, end),
+            50.0,
+            "0 < prev_end < end → anchor start to prev_end (contiguity)"
+        );
+        // prev_end EARLIER than the tick start → still used: widens the window
+        // back to cover records sealed between prev_end and start — the leak the
+        // correction closes.
+        assert_eq!(
+            adaptive_seal_window_start(Some(30.0), start, end),
+            30.0,
+            "prev_end before tick start → widen back to prev_end (no gap leak)"
+        );
+        // No entry (cold-start / never-sealed zone) → shared tick start.
+        assert_eq!(
+            adaptive_seal_window_start(None, start, end),
+            start,
+            "missing entry → fall back to tick start"
+        );
+        // Zero sentinel (unset latest_seal_end) → shared tick start, never 0.
+        assert_eq!(
+            adaptive_seal_window_start(Some(0.0), start, end),
+            start,
+            "prev_end == 0 sentinel → fall back to tick start"
+        );
+        // Negative (defensive; must never occur) → shared tick start.
+        assert_eq!(
+            adaptive_seal_window_start(Some(-5.0), start, end),
+            start,
+            "negative prev_end → fall back to tick start"
+        );
+        // prev_end == end (zero-width window) → reject → start.
+        assert_eq!(
+            adaptive_seal_window_start(Some(end), start, end),
+            start,
+            "prev_end == end → degenerate window, fall back to tick start"
+        );
+        // prev_end > end (inverted window) → reject → start.
+        assert_eq!(
+            adaptive_seal_window_start(Some(120.0), start, end),
+            start,
+            "prev_end > end → inverted window, fall back to tick start"
+        );
+        // Just below end → still a valid boundary → use it.
+        assert_eq!(
+            adaptive_seal_window_start(Some(99.999), start, end),
+            99.999,
+            "prev_end just below end → valid boundary, use prev_end"
+        );
+    }
 
     #[test]
     fn active_zone_max_epoch_is_live_active_zone_tip() {
@@ -7955,8 +9053,8 @@ mod tests {
 
     /// Helper: write a regular epoch seal record (no Gap-1 root) at
     /// (epoch, zone). Returns the record so callers can grab the hash.
-    fn write_test_seal(
-        engine: &mut StorageEngine,
+    /// Build (and sign) a per-zone seal record without storing it.
+    fn build_test_seal_record(
         identity: &Identity,
         zone: &str,
         epoch: u64,
@@ -7993,6 +9091,17 @@ mod tests {
         record.zone = Some(ZoneId::new(zone));
         let signable = record.signable_bytes();
         record.signature = Some(identity.sign(&signable).unwrap());
+        record
+    }
+
+    fn write_test_seal(
+        engine: &mut StorageEngine,
+        identity: &Identity,
+        zone: &str,
+        epoch: u64,
+        content_salt: &[u8],
+    ) -> ValidationRecord {
+        let record = build_test_seal_record(identity, zone, epoch, content_salt);
         engine.insert(&record).unwrap();
         let key = disc5_index_key(epoch, zone, &record.id);
         engine
@@ -8192,7 +9301,7 @@ mod tests {
         let want: Vec<[u8; 32]> = (window_start..=79)
             .map(|e| *expected_hashes_by_epoch.get(&e).unwrap())
             .collect();
-        let got: Vec<[u8; 32]> = buf.iter().copied().collect();
+        let got: Vec<[u8; 32]> = buf.values().copied().collect();
         assert_eq!(got, want, "buffer must be chronologically ordered (oldest→newest)");
 
         // Functional check: with latest=79, the next anchor seal at epoch 80
@@ -8296,7 +9405,11 @@ mod tests {
 
         let buf = state.recent_seal_hashes.get(&ZoneId::new(zone)).unwrap();
         assert_eq!(buf.len(), 1, "one canonical entry per epoch, not two");
-        assert_eq!(buf[0], want_winner, "lex-min record_hash wins (matches register_seal)");
+        assert_eq!(
+            buf.values().next().copied(),
+            Some(want_winner),
+            "lex-min record_hash wins (matches register_seal)"
+        );
     }
 
     #[test]
@@ -8317,6 +9430,392 @@ mod tests {
         empty_rid.extend_from_slice(b"/zone");
         empty_rid.push(0u8);
         assert!(parse_disc5_index_key(&empty_rid).is_none());
+    }
+
+    // ── T-F10-MULTIZONE (Layer 3, 2026-09-02): tick-time durable-tip heal ──
+    // Design + verdict: internal design notes.
+
+    /// Mirror of `heal_zone_tip_from_durable_seals` over a bare `EpochState`
+    /// (the NodeState-level wrapper has its own test below).
+    fn run_heal(
+        engine: &StorageEngine,
+        state: &mut EpochState,
+        self_hash: &str,
+        zone: &str,
+        cap: u64,
+    ) -> DurableHealOutcome {
+        let zone = ZoneId::new(zone);
+        let start = state.next_epoch(&zone);
+        let walk = collect_self_durable_seals(engine, self_hash, &zone, start, cap);
+        let mut out = if walk.candidates.is_empty() {
+            DurableHealOutcome::default()
+        } else {
+            apply_durable_tip_heal(state, &zone, &walk.candidates)
+        };
+        out.hit_cap = walk.hit_cap;
+        out.siblings_read = walk.siblings_read;
+        out.siblings_divergent = walk.siblings_divergent;
+        out
+    }
+
+    #[test]
+    fn f10_heal_untracked_zone_epoch0_from_self_seal() {
+        // H1: our epoch-0 seal is durable, RAM never registered it.
+        let (mut engine, _dir) = test_engine();
+        let me = test_identity();
+        let zone = "/zone/h1";
+        let rec = write_test_seal(&mut engine, &me, zone, 0, b"own");
+        let mut state = EpochState::new();
+        let z = ZoneId::new(zone);
+        assert_eq!(state.next_epoch(&z), 0, "untracked zone: the naive loop would propose 0");
+        let out = run_heal(&engine, &mut state, &me.identity_hash, zone, DURABLE_HEAL_WALK_CAP);
+        assert_eq!(
+            out,
+            DurableHealOutcome {
+                healed_epochs: 1,
+                failed: false,
+                hit_cap: false,
+                siblings_read: 1,
+                siblings_divergent: 0
+            }
+        );
+        assert_eq!(state.latest_epoch.get(&z).copied(), Some(0));
+        assert_eq!(state.latest_seal_hash.get(&z).copied(), Some(rec.record_hash()));
+        assert_eq!(state.next_epoch(&z), 1, "the loop must now propose 1, never re-propose 0");
+    }
+
+    #[test]
+    fn f10_heal_ignores_foreign_creator_seal() {
+        let (mut engine, _dir) = test_engine();
+        let me = test_identity();
+        let other = test_identity();
+        let zone = "/zone/h2";
+        write_test_seal(&mut engine, &other, zone, 0, b"foreign");
+        let mut state = EpochState::new();
+        let out = run_heal(&engine, &mut state, &me.identity_hash, zone, DURABLE_HEAL_WALK_CAP);
+        assert_eq!(out.healed_epochs, 0);
+        assert!(!out.failed && !out.hit_cap);
+        assert_eq!(out.siblings_read, 1, "the foreign sibling was dereferenced and skipped");
+        let z = ZoneId::new(zone);
+        assert!(
+            !state.latest_epoch.contains_key(&z),
+            "a foreign seal never seeds our tip — it may be one C2 rejected as a tip update"
+        );
+        assert!(!state.latest_seal_hash.contains_key(&z));
+    }
+
+    #[test]
+    fn f10_heal_walk_converges_multi_epoch_one_tick() {
+        let (mut engine, _dir) = test_engine();
+        let me = test_identity();
+        let zone = "/zone/h3";
+        let mut last = None;
+        for e in 0..=5u64 {
+            last = Some(write_test_seal(&mut engine, &me, zone, e, b"own").record_hash());
+        }
+        let mut state = EpochState::new();
+        let out = run_heal(&engine, &mut state, &me.identity_hash, zone, DURABLE_HEAL_WALK_CAP);
+        assert_eq!(out.healed_epochs, 6);
+        assert!(!out.failed && !out.hit_cap);
+        assert_eq!(out.siblings_read, 6);
+        let z = ZoneId::new(zone);
+        assert_eq!(state.latest_epoch.get(&z).copied(), Some(5));
+        assert_eq!(state.latest_seal_hash.get(&z).copied(), last);
+        assert_eq!(state.next_epoch(&z), 6);
+        assert_eq!(
+            state.total_epochs_total, 6,
+            "apply_canonical_seal keeps the total exact — no recount per heal"
+        );
+    }
+
+    #[test]
+    fn f10_heal_walk_stops_at_first_epoch_without_self_seal() {
+        let (mut engine, _dir) = test_engine();
+        let me = test_identity();
+        let other = test_identity();
+        let zone = "/zone/h4";
+        write_test_seal(&mut engine, &me, zone, 0, b"own");
+        write_test_seal(&mut engine, &me, zone, 1, b"own");
+        write_test_seal(&mut engine, &other, zone, 2, b"foreign-only");
+        write_test_seal(&mut engine, &me, zone, 3, b"own-beyond-gap");
+        let mut state = EpochState::new();
+        let out = run_heal(&engine, &mut state, &me.identity_hash, zone, DURABLE_HEAL_WALK_CAP);
+        assert_eq!(out.healed_epochs, 2);
+        assert!(!out.hit_cap, "a natural stop is not a cap hit — the loop may propose");
+        assert!(!out.failed);
+        assert_eq!(out.siblings_read, 3);
+        let z = ZoneId::new(zone);
+        assert_eq!(state.latest_epoch.get(&z).copied(), Some(1));
+        assert_eq!(
+            state.next_epoch(&z),
+            2,
+            "epoch 2 holds only a foreign seal: whether it is our parent is the loop's C2 \
+             chain-link decision, never the heal's"
+        );
+    }
+
+    #[test]
+    fn f10_heal_walk_respects_cap_and_resumes_next_tick() {
+        let (mut engine, _dir) = test_engine();
+        let me = test_identity();
+        let zone = "/zone/h5";
+        for e in 0..=9u64 {
+            write_test_seal(&mut engine, &me, zone, e, b"own");
+        }
+        let mut state = EpochState::new();
+        let z = ZoneId::new(zone);
+        let t1 = run_heal(&engine, &mut state, &me.identity_hash, zone, 4);
+        assert_eq!((t1.healed_epochs, t1.hit_cap, t1.failed), (4, true, false));
+        assert_eq!(state.next_epoch(&z), 4, "cap hit: epoch 4 is unprobed, the loop must not propose");
+        let t2 = run_heal(&engine, &mut state, &me.identity_hash, zone, 4);
+        assert_eq!((t2.healed_epochs, t2.hit_cap), (4, true));
+        assert_eq!(state.next_epoch(&z), 8);
+        let t3 = run_heal(&engine, &mut state, &me.identity_hash, zone, 4);
+        assert_eq!(
+            (t3.healed_epochs, t3.hit_cap),
+            (2, false),
+            "8 and 9 found, 10 empty → natural stop under the cap"
+        );
+        assert_eq!(state.next_epoch(&z), 10);
+        assert_eq!(t1.siblings_read + t2.siblings_read + t3.siblings_read, 10);
+    }
+
+    #[test]
+    fn f10_heal_noop_when_tip_current() {
+        let (mut engine, _dir) = test_engine();
+        let me = test_identity();
+        let zone = "/zone/h6";
+        for e in 0..=2u64 {
+            write_test_seal(&mut engine, &me, zone, e, b"own");
+        }
+        let mut state = EpochState::new();
+        let z = ZoneId::new(zone);
+        let first = run_heal(&engine, &mut state, &me.identity_hash, zone, DURABLE_HEAL_WALK_CAP);
+        assert_eq!(first.healed_epochs, 3);
+        let tip = state.latest_epoch.get(&z).copied();
+        let hash = state.latest_seal_hash.get(&z).copied();
+        let again = run_heal(&engine, &mut state, &me.identity_hash, zone, DURABLE_HEAL_WALK_CAP);
+        assert_eq!(
+            again,
+            DurableHealOutcome::default(),
+            "steady state = one seek miss at next_epoch: no sibling reads, no writes"
+        );
+        assert_eq!(state.latest_epoch.get(&z).copied(), tip);
+        assert_eq!(state.latest_seal_hash.get(&z).copied(), hash);
+    }
+
+    #[test]
+    fn f10_heal_merge_resplit_no_repropose_when_history_not_gc_pruned() {
+        // H3: a merge drops the RAM tip via prune_stale_zones; a later re-split
+        // re-adds the zone with NO tip, so should_propose_seal would read
+        // already_sealed=false at epoch 0 and re-propose an epoch this node
+        // already sealed. Scoped closure: holds while the zone's epoch-0..tip
+        // seals are still on disk — see the next test for the GC-pruned gap.
+        let (mut engine, _dir) = test_engine();
+        let me = test_identity();
+        let zone = "7"; // natural-zone numeric path: prune_stale_zones keys on it
+        for e in 0..=3u64 {
+            write_test_seal(&mut engine, &me, zone, e, b"own");
+        }
+        let mut state = EpochState::new();
+        let z = ZoneId::new(zone);
+        let before = run_heal(&engine, &mut state, &me.identity_hash, zone, DURABLE_HEAL_WALK_CAP);
+        assert_eq!(before.healed_epochs, 4);
+        assert_eq!(state.next_epoch(&z), 4);
+        // merge 8 → 4 zones: zone "7" is dropped from every RAM map
+        state.prune_stale_zones(4);
+        assert!(!state.latest_epoch.contains_key(&z), "prune must drop the tip for this test to bite");
+        assert_eq!(state.next_epoch(&z), 0, "the naive loop would now propose epoch 0 again");
+        // re-split 4 → 8: the zone is back in zones_to_seal; the heal runs first
+        let after = run_heal(&engine, &mut state, &me.identity_hash, zone, DURABLE_HEAL_WALK_CAP);
+        assert_eq!(after.healed_epochs, 4);
+        assert!(!after.failed && !after.hit_cap);
+        assert_eq!(state.next_epoch(&z), 4, "tip re-seeded from durable self seals: 0..=3 are never re-proposed");
+    }
+
+    #[test]
+    fn f10_heal_gc_pruned_history_gap_is_documented() {
+        // F1 (OPEN, queue item): once seal GC pruned epochs below the zone's
+        // super-seal floor, an untracked zone's walk starts at 0, finds
+        // nothing, and cannot re-seed. This pins the gap the Layer-3 heal
+        // deliberately does NOT close; the fix is a durable per-zone
+        // last-known-epoch, not a wider walk.
+        let (mut engine, _dir) = test_engine();
+        let me = test_identity();
+        let zone = "/zone/h7b";
+        for e in 3..=5u64 {
+            write_test_seal(&mut engine, &me, zone, e, b"own-survivor");
+        }
+        let mut state = EpochState::new();
+        let out = run_heal(&engine, &mut state, &me.identity_hash, zone, DURABLE_HEAL_WALK_CAP);
+        assert_eq!(
+            out,
+            DurableHealOutcome::default(),
+            "epoch 0 is empty (pruned): the heal finds nothing and the tip stays untracked"
+        );
+        assert!(!state.latest_epoch.contains_key(&ZoneId::new(zone)));
+    }
+
+    #[test]
+    fn f10_heal_registers_all_own_siblings_lex_min() {
+        let (mut engine, _dir) = test_engine();
+        let me = test_identity();
+        let zone = "/zone/h8";
+        let a = write_test_seal(&mut engine, &me, zone, 0, b"sibling-a").record_hash();
+        let b = write_test_seal(&mut engine, &me, zone, 0, b"sibling-b").record_hash();
+        assert_ne!(a, b);
+        let mut state = EpochState::new();
+        let out = run_heal(&engine, &mut state, &me.identity_hash, zone, DURABLE_HEAL_WALK_CAP);
+        assert_eq!(out.healed_epochs, 1, "one epoch group, two candidates");
+        assert_eq!(out.siblings_read, 2);
+        let z = ZoneId::new(zone);
+        assert_eq!(state.latest_epoch.get(&z).copied(), Some(0));
+        assert_eq!(
+            state.latest_seal_hash.get(&z).copied(),
+            Some(a.min(b)),
+            "register_seal's equal-epoch lex-min rule decides, independent of DISC-5 iteration order"
+        );
+    }
+
+    #[test]
+    fn f10_heal_fence_refusal_stops_and_reports_failed() {
+        // R1: an own durable seal at a pinned epoch with a DIFFERENT hash is
+        // refused by apply_canonical_seal's §E fence. The heal must stop there
+        // with failed=true (the loop then skips its proposal — proposing at
+        // the fence epoch would equivocate against our own durable seal) and
+        // leave the tip exactly where the last accepted group put it.
+        let (mut engine, _dir) = test_engine();
+        let me = test_identity();
+        let zone = "0"; // fence_test_table() pins ("0", FENCE_TEST_PIN_EPOCH)
+        for e in 0..=FENCE_TEST_PIN_EPOCH {
+            write_test_seal(&mut engine, &me, zone, e, b"own");
+        }
+        let mut state = EpochState::new();
+        state.chain_anchor_override = fence_test_table();
+        let z = ZoneId::new(zone);
+        let out = run_heal(&engine, &mut state, &me.identity_hash, zone, DURABLE_HEAL_WALK_CAP);
+        assert!(out.failed, "own seal at the pinned epoch carries a non-pinned hash → refusal must surface");
+        assert_eq!(out.healed_epochs, FENCE_TEST_PIN_EPOCH, "every epoch below the pin healed first");
+        assert_eq!(state.latest_epoch.get(&z).copied(), Some(FENCE_TEST_PIN_EPOCH - 1));
+        assert_eq!(state.next_epoch(&z), FENCE_TEST_PIN_EPOCH);
+        // next tick: same refusal, no progress, still failed — the loop keeps declining
+        let again = run_heal(&engine, &mut state, &me.identity_hash, zone, DURABLE_HEAL_WALK_CAP);
+        assert!(again.failed);
+        assert_eq!(again.healed_epochs, 0);
+        assert_eq!(state.latest_epoch.get(&z).copied(), Some(FENCE_TEST_PIN_EPOCH - 1));
+    }
+
+    #[test]
+    fn f2_r4_heal_walk_counts_index_record_divergence_not_foreign_siblings() {
+        // F2 residual R4: a DISC-5 index row that points at a record the
+        // store cannot return is index/record divergence — skipped AND
+        // counted. A foreign creator's seal at the same epoch is normal and
+        // must NOT be counted. Locks the counter's semantics.
+        let (mut engine, _dir) = test_engine();
+        let me = test_identity();
+        let other = test_identity();
+        assert_ne!(me.identity_hash, other.identity_hash);
+        let zone = "/zone/r4";
+        let z = ZoneId::new(zone);
+        write_test_seal(&mut engine, &me, zone, 0, b"own");
+        write_test_seal(&mut engine, &other, zone, 0, b"foreign");
+        let dangling = disc5_index_key(0, zone, "rec_does_not_exist");
+        engine
+            .put_cf_raw(crate::storage::rocks::CF_EPOCHS, &dangling, &[])
+            .unwrap();
+
+        let walk = collect_self_durable_seals(&engine, &me.identity_hash, &z, 0, DURABLE_HEAL_WALK_CAP);
+        assert_eq!(walk.candidates.len(), 1, "the own seal at epoch 0 is still collected");
+        assert_eq!(walk.candidates[0].epoch, 0);
+        assert!(!walk.hit_cap);
+        assert_eq!(walk.siblings_read, 3);
+        assert_eq!(walk.siblings_divergent, 1, "only the dangling row counts; the foreign seal does not");
+
+        // A slot whose only row is dangling: no own seal → the walk stops
+        // there, and the divergence is still counted.
+        let zone2 = "/zone/r4b";
+        let z2 = ZoneId::new(zone2);
+        let dangling2 = disc5_index_key(5, zone2, "rec_missing_too");
+        engine
+            .put_cf_raw(crate::storage::rocks::CF_EPOCHS, &dangling2, &[])
+            .unwrap();
+        let walk2 = collect_self_durable_seals(&engine, &me.identity_hash, &z2, 5, DURABLE_HEAL_WALK_CAP);
+        assert!(walk2.candidates.is_empty());
+        assert!(!walk2.hit_cap);
+        assert_eq!(walk2.siblings_read, 1);
+        assert_eq!(walk2.siblings_divergent, 1);
+
+        // The outcome plumbing carries the count through the heal.
+        let mut state = EpochState::new();
+        let out = run_heal(&engine, &mut state, &me.identity_hash, zone, DURABLE_HEAL_WALK_CAP);
+        assert_eq!(out.healed_epochs, 1);
+        assert_eq!(out.siblings_read, 3);
+        assert_eq!(out.siblings_divergent, 1);
+        assert!(!out.failed);
+    }
+
+    #[test]
+    fn f10_heal_skips_group_when_tip_raced_ahead() {
+        // Phase R ran lock-free; by Phase W ingest has already registered a
+        // canonical seal at epoch 1. Strict-advance: both stale candidate
+        // groups are skipped and the raced-in tip is left untouched — the
+        // heal never adjudicates a same-epoch collision it did not create.
+        let (mut engine, _dir) = test_engine();
+        let me = test_identity();
+        let zone = "/zone/h10";
+        write_test_seal(&mut engine, &me, zone, 0, b"own");
+        write_test_seal(&mut engine, &me, zone, 1, b"own");
+        let z = ZoneId::new(zone);
+        let DurableSealWalk { candidates, hit_cap, .. } =
+            collect_self_durable_seals(&engine, &me.identity_hash, &z, 0, DURABLE_HEAL_WALK_CAP);
+        assert_eq!(candidates.len(), 2);
+        assert!(!hit_cap);
+        let mut state = EpochState::new();
+        state.latest_epoch.insert(z.clone(), 1);
+        state.latest_seal_hash.insert(z.clone(), [0x11; 32]);
+        let out = apply_durable_tip_heal(&mut state, &z, &candidates);
+        assert_eq!(out.healed_epochs, 0);
+        assert!(!out.failed);
+        assert_eq!(state.latest_epoch.get(&z).copied(), Some(1));
+        assert_eq!(state.latest_seal_hash.get(&z).copied(), Some([0x11; 32]));
+    }
+
+    #[cfg(feature = "node-core")]
+    #[test]
+    fn f10_heal_wrapper_reseeds_untracked_zone_through_node_state() {
+        // The production entry point: the seal record is stored the way
+        // ingest Phase 2 stores it (record + DISC-5 key in one batch), RAM
+        // never saw it, and the wrapper re-seeds the tip under the real locks.
+        let state = crate::network::state::build_test_node_state();
+        let zone = "/zone/h11";
+        let z = ZoneId::new(zone);
+        let record = build_test_seal_record(&state.identity, zone, 0, b"own");
+        let disc5 = disc5_index_key(0, zone, &record.id);
+        state
+            .rocks
+            .put_record_with_pk_zone(
+                &record.id,
+                &record,
+                &creator_identity_hash(&record),
+                &record.creator_public_key,
+                z.to_key_bytes(),
+                None,
+                crate::storage::rocks::RecordSideWrites::disc5(disc5.clone()),
+                None,
+            )
+            .unwrap();
+        assert_eq!(state.epoch.read_recover().next_epoch(&z), 0);
+        let out = heal_zone_tip_from_durable_seals(&state, &z);
+        assert_eq!(out.healed_epochs, 1);
+        assert!(!out.failed && !out.hit_cap);
+        assert_eq!(out.siblings_read, 1);
+        assert_eq!(state.epoch.read_recover().next_epoch(&z), 1);
+        assert_eq!(
+            state.epoch.read_recover().latest_seal_hash.get(&z).copied(),
+            Some(record.record_hash())
+        );
+        let again = heal_zone_tip_from_durable_seals(&state, &z);
+        assert_eq!(again, DurableHealOutcome::default(), "idempotent on the next tick");
     }
 
     fn test_identity() -> Identity {
@@ -9694,7 +11193,7 @@ mod tests {
             .count();
 
         let (record, _) = create_epoch_seal(&identity, &storage, &epoch_state, zone.clone(), 50.0, 200.0, None, None).unwrap();
-        let verified = verify_epoch_seal(&record, &storage, &epoch_state, &genesis, None, None).unwrap();
+        let verified = verify_epoch_seal(&record, &storage, &epoch_state, &genesis, None, None, SealStakeView::empty()).unwrap();
 
         assert_eq!(verified.zone, zone);
         assert_eq!(verified.epoch_number, 0);
@@ -9721,7 +11220,7 @@ mod tests {
         // create_epoch_seal itself may succeed (it just packages metadata),
         // but verify_epoch_seal must reject it
         if let Ok((record, _)) = result {
-            let verified = verify_epoch_seal(&record, &storage, &epoch_state, &genesis, None, None);
+            let verified = verify_epoch_seal(&record, &storage, &epoch_state, &genesis, None, None, SealStakeView::empty());
             assert!(verified.is_err(), "seal with end <= start must be rejected");
             assert!(verified.unwrap_err().to_string().contains("end"));
         }
@@ -9743,7 +11242,7 @@ mod tests {
             &identity, &storage, &epoch_state, zone.clone(),
             50.0, 200.0, None, None,
         ).unwrap();
-        let _verified1 = verify_epoch_seal(&record1, &storage, &epoch_state, &genesis, None, None).unwrap();
+        let _verified1 = verify_epoch_seal(&record1, &storage, &epoch_state, &genesis, None, None, SealStakeView::empty()).unwrap();
         epoch_state.register_seal(&seal1, &record1.id, record1.record_hash());
 
         // Second seal: [200, 400] — start >= previous end, should pass
@@ -9751,7 +11250,7 @@ mod tests {
             &identity, &storage, &epoch_state, zone.clone(),
             200.0, 400.0, None, None,
         ).unwrap();
-        let verified2 = verify_epoch_seal(&record2, &storage, &epoch_state, &genesis, None, None);
+        let verified2 = verify_epoch_seal(&record2, &storage, &epoch_state, &genesis, None, None, SealStakeView::empty());
         assert!(verified2.is_ok(), "sequential seal timestamps should be accepted");
     }
 
@@ -9765,7 +11264,7 @@ mod tests {
 
         // Non-genesis seal without VRF proof should be rejected
         let (record, _) = create_epoch_seal(&identity, &storage, &epoch_state, ZoneId::from_legacy(0), 0.0, 100.0, None, None).unwrap();
-        let result = verify_epoch_seal(&record, &storage, &epoch_state, "wrong_authority", None, None);
+        let result = verify_epoch_seal(&record, &storage, &epoch_state, "wrong_authority", None, None, SealStakeView::empty());
         assert!(result.is_err());
         // Multi-anchor: non-genesis must have VRF proof
         assert!(result.unwrap_err().to_string().contains("VRF proof"));
@@ -9819,7 +11318,7 @@ mod tests {
 
         // Verification should succeed (merkle mismatch is now accepted with a warning
         // to avoid permanent epoch blockage on nodes with divergent record sets).
-        let result = verify_epoch_seal(&record, &storage, &epoch_state, &genesis, None, None);
+        let result = verify_epoch_seal(&record, &storage, &epoch_state, &genesis, None, None, SealStakeView::empty());
         assert!(result.is_ok(), "merkle mismatch should be accepted: {:?}", result);
     }
 
@@ -9866,7 +11365,7 @@ mod tests {
         let signable = record.signable_bytes();
         record.signature = Some(identity.sign(&signable).unwrap());
 
-        let result = verify_epoch_seal(&record, &storage, &epoch_state, &genesis, None, None);
+        let result = verify_epoch_seal(&record, &storage, &epoch_state, &genesis, None, None, SealStakeView::empty());
         // Epoch 5 is within the ±100 partition-merge window from epoch 0, so it's accepted.
         // To test rejection, use an epoch far beyond the window:
         assert!(result.is_ok()); // partition-merge accepts epoch 5
@@ -9939,7 +11438,7 @@ mod tests {
         let signable = record.signable_bytes();
         record.signature = Some(identity.sign(&signable).unwrap());
 
-        let result = verify_epoch_seal(&record, &storage, &epoch_state, &genesis, None, None);
+        let result = verify_epoch_seal(&record, &storage, &epoch_state, &genesis, None, None, SealStakeView::empty());
         // previous_seal mismatch is now a warning (not a rejection) to handle
         // the race condition where concurrent seal arrivals for consecutive epochs
         // read stale epoch state. The Dilithium3 signature authenticates the creator.
@@ -10002,6 +11501,59 @@ mod tests {
         assert_eq!(entry.1, "rec-deadbeef");
         assert_eq!(entry.2, record_hash);
         assert_eq!(entry.3, committee_hash);
+    }
+
+    /// R1-X1 (2026-09-02, Layer C): `from_snapshot` DROPS a restored
+    /// super-seal pointer whose end_epoch is ahead of the zone's own snapshot
+    /// tip and KEEPS pointers at/below the tip and pointers for zones without
+    /// a tip (the tipless round-trip fixture above must keep passing) — the
+    /// kept tipless pointer is counted and EXCLUDED from the max gauge (a
+    /// runtime `register_super_seal` still raises the max for a tipless zone;
+    /// residual R1-X1-TL, closed by Commit 3's zone-unknown DEFER). Both
+    /// counts are transient diagnostics that never ride the snapshot.
+    #[test]
+    fn r1x1_from_snapshot_drops_pointer_ahead_of_tip() {
+        let mut state = EpochState::new();
+        let poisoned = ZoneId::new("r1x1/poisoned");
+        let honest = ZoneId::new("r1x1/honest");
+        let tipless = ZoneId::new("r1x1/tipless");
+        state.latest_epoch.insert(poisoned.clone(), 1_000);
+        state.latest_epoch.insert(honest.clone(), 1_000);
+        let h = sha3_256(b"r1x1");
+        assert!(state.register_super_seal(poisoned.clone(), 5_000, "ss-poisoned".into(), h, h));
+        assert!(state.register_super_seal(honest.clone(), 960, "ss-honest".into(), h, h));
+        assert!(state.register_super_seal(tipless.clone(), 7_000, "ss-tipless".into(), h, h));
+        assert_eq!(state.super_seal_max_end_epoch, 7_000, "runtime max is the raw cross-zone max");
+
+        let snap = state.to_snapshot();
+        let restored = EpochState::from_snapshot(&snap);
+        assert!(
+            !restored.latest_super_seal.contains_key(&poisoned),
+            "pointer ahead of the zone tip (5000 > 1000) must be dropped at restore"
+        );
+        assert_eq!(
+            restored.latest_super_seal.get(&honest).map(|e| e.0),
+            Some(960),
+            "pointer at/below the tip survives"
+        );
+        assert_eq!(
+            restored.latest_super_seal.get(&tipless).map(|e| e.0),
+            Some(7_000),
+            "pointer for a zone without a snapshot tip survives (fresh-node shape)"
+        );
+        assert_eq!(
+            restored.super_seal_max_end_epoch, 960,
+            "max derives from the RETAINED, tip-bounded pointers only"
+        );
+        assert_eq!(restored.super_seal_restore_dropped, 1);
+        assert_eq!(restored.super_seal_restore_tipless_kept, 1);
+        // Transient: neither count rides the snapshot form; a second round
+        // trip of the CLEANED state drops nothing and still sees the tipless
+        // pointer.
+        let again = EpochState::from_snapshot(&restored.to_snapshot());
+        assert_eq!(again.super_seal_restore_dropped, 0);
+        assert_eq!(again.super_seal_restore_tipless_kept, 1);
+        assert_eq!(again.latest_super_seal.len(), 2);
     }
 
     #[test]
@@ -10359,7 +11911,7 @@ mod tests {
 
         // Verify with correct VRF public key — must succeed
         let verified = verify_epoch_seal(
-            &record, &storage, &epoch_state, &genesis, Some(&vrf_pk), None,
+            &record, &storage, &epoch_state, &genesis, Some(&vrf_pk), None, SealStakeView::empty(),
         ).unwrap();
         assert!(verified.vrf_output.is_some());
     }
@@ -10413,7 +11965,7 @@ mod tests {
 
         // Legacy-alpha seal must verify under the 3b.4 fallback path.
         let verified = verify_epoch_seal(
-            &record, &storage, &epoch_state, &genesis, Some(&vrf_pk), None,
+            &record, &storage, &epoch_state, &genesis, Some(&vrf_pk), None, SealStakeView::empty(),
         ).expect("legacy-alpha seal must verify via fallback");
         assert_eq!(
             verified.vrf_output.unwrap(),
@@ -10453,7 +12005,7 @@ mod tests {
         record.metadata.insert("epoch_number".into(), serde_json::json!(5000u64));
 
         // vrf_pk = None → proposer key not registered locally.
-        let res = verify_epoch_seal_no_merkle(&record, &storage, &epoch_state, &genesis, None, None);
+        let res = verify_epoch_seal_no_merkle(&record, &storage, &epoch_state, &genesis, None, None, SealStakeView::empty());
         let msg = res.expect_err("non-genesis fast-forward seal w/o registered VRF key must reject").to_string();
         assert!(msg.contains("VRF-unverifiable"), "expected VRF-unverifiable deferral, got: {msg}");
         // Must be retryable (parked + re-fetched), NOT permanent-cached, so an
@@ -10481,7 +12033,7 @@ mod tests {
         ).unwrap();
         record.metadata.insert("epoch_number".into(), serde_json::json!(5000u64));
 
-        let res = verify_epoch_seal_no_merkle(&record, &storage, &epoch_state, &genesis, None, None);
+        let res = verify_epoch_seal_no_merkle(&record, &storage, &epoch_state, &genesis, None, None, SealStakeView::empty());
         assert!(res.is_ok(), "genesis fast-forward seal must accept without VRF: {:?}", res.err());
     }
 
@@ -10505,7 +12057,7 @@ mod tests {
             &identity, &storage, &epoch_state, zone.clone(), 50.0, 200.0, Some(&vrf_sk), None,
         ).unwrap();
 
-        let res = verify_epoch_seal_no_merkle(&record, &storage, &epoch_state, &genesis, None, None);
+        let res = verify_epoch_seal_no_merkle(&record, &storage, &epoch_state, &genesis, None, None, SealStakeView::empty());
         if let Err(ref e) = res {
             assert!(
                 !e.to_string().contains("VRF-unverifiable"),
@@ -10544,8 +12096,192 @@ mod tests {
         record.metadata.insert("epoch_vrf_output".into(), serde_json::json!(hex::encode(out.as_bytes())));
         record.metadata.insert("epoch_vrf_proof".into(), serde_json::json!(hex::encode(proof.to_bytes())));
 
-        let res = verify_epoch_seal_no_merkle(&record, &storage, &epoch_state, &genesis, Some(&vrf_pk), None);
-        assert!(res.is_ok(), "fast-forward seal with a valid VRF proof must accept: {:?}", res.err());
+        // R1-X1-V (2026-09-02): the fast-forward arm now ALSO requires the
+        // creator to be in the local staked-anchor set, out of the bootstrap
+        // regime — so this over-rejection guard doubles as the R1-X1-V accept
+        // pin: a BOOTSTRAP_MIN_STAKERS-member view that contains the creator.
+        let creator = creator_identity_hash(&record);
+        let staked: HashSet<String> = [
+            creator,
+            "r1x1v-filler-anchor-1".to_string(),
+            "r1x1v-filler-anchor-2".to_string(),
+        ].into_iter().collect();
+        assert!(staked.len() >= crate::network::aggregator::BOOTSTRAP_MIN_STAKERS);
+        let res = verify_epoch_seal_no_merkle(
+            &record, &storage, &epoch_state, &genesis, Some(&vrf_pk), None, SealStakeView { staked: &staked },
+        );
+        assert!(res.is_ok(), "fast-forward seal with a valid VRF proof from a staked anchor must accept: {:?}", res.err());
+    }
+
+    // ── R1-X1-V (2026-09-02): self-declared-anchor fast-forward stake gate ──
+    //
+    // A VRF registration is self-declared (the record's own `node_type`), so a
+    // verifiable VRF proof proves authorship, not eligibility. The fast-forward
+    // arm now also requires the creator to be admissible by the verifier's
+    // staked-anchor set (a member, and the set out of the bootstrap regime).
+    // Fixture = the B7 accept shape: non-genesis seal with a VALID VRF proof,
+    // pushed to a high epoch so it lands on the catch-up arm. The three other
+    // B7 tests pass `SealStakeView::empty()` and thereby pin that genesis
+    // fast-forward and non-genesis sequential seals ignore the view.
+
+    fn r1x1v_fastforward_seal() -> (
+        ValidationRecord,
+        StorageEngine,
+        tempfile::TempDir,
+        EpochState,
+        String,
+        crate::crypto::vrf::VrfPublicKey,
+    ) {
+        use crate::crypto::vrf::{VrfSecretKey, vrf_prove};
+        let identity = test_identity();
+        let genesis = "r1x1v_other_genesis_authority_deadbeef".to_string();
+        let (mut storage, dir) = test_engine();
+        let epoch_state = EpochState::new();
+        insert_test_record(&mut storage, &identity, b"r1x1v-ff", 100.0);
+        let zone = ZoneId::from_legacy(0);
+        let vrf_sk = VrfSecretKey::generate().unwrap();
+        let vrf_pk = vrf_sk.public_key();
+        let (mut record, _) = create_epoch_seal(
+            &identity, &storage, &epoch_state, zone.clone(), 50.0, 200.0, Some(&vrf_sk), None,
+        ).unwrap();
+        let ff_epoch = 5000u64;
+        let beacon = crate::network::aggregator::chained_beacon(&[0u8; 32], ff_epoch, &zone);
+        let (out, proof) = vrf_prove(&vrf_sk, &beacon).unwrap();
+        record.metadata.insert("epoch_number".into(), serde_json::json!(ff_epoch));
+        record.metadata.insert("epoch_vrf_output".into(), serde_json::json!(hex::encode(out.as_bytes())));
+        record.metadata.insert("epoch_vrf_proof".into(), serde_json::json!(hex::encode(proof.to_bytes())));
+        (record, storage, dir, epoch_state, genesis, vrf_pk)
+    }
+
+    #[test]
+    fn r1x1v_nongenesis_fastforward_defers_when_unstaked() {
+        let (record, storage, _dir, epoch_state, genesis, vrf_pk) = r1x1v_fastforward_seal();
+        // VRF-verifiable (full key supplied, B7 passes) but the verifier's
+        // staked-anchor set is EMPTY — the strict default: must DEFER.
+        let res = verify_epoch_seal_no_merkle(
+            &record, &storage, &epoch_state, &genesis, Some(&vrf_pk), None, SealStakeView::empty(),
+        );
+        let msg = res.expect_err("unstaked self-declared anchor must not fast-forward").to_string();
+        assert!(msg.contains("stake-unverifiable"), "expected the R1-X1-V deferral marker, got: {msg}");
+        // The ingest caller's VRF arm keys on the substring "VRF" — the stake
+        // marker must never be shadowed by it.
+        assert!(!msg.contains("VRF"), "stake deferral must carry no VRF substring: {msg}");
+        assert!(
+            crate::network::gossip::is_retryable_ingest_rejection(&msg),
+            "R1-X1-V deferral must classify retryable (parked, never permanent-cached): {msg}"
+        );
+    }
+
+    #[test]
+    fn r1x1v_nongenesis_fastforward_defers_when_not_member() {
+        let (record, storage, _dir, epoch_state, genesis, vrf_pk) = r1x1v_fastforward_seal();
+        // A full (>= BOOTSTRAP_MIN_STAKERS) set that does NOT contain the
+        // creator: membership, not set size alone, is the predicate.
+        let staked: HashSet<String> = (0..crate::network::aggregator::BOOTSTRAP_MIN_STAKERS)
+            .map(|i| format!("r1x1v-stranger-{i}"))
+            .collect();
+        let res = verify_epoch_seal_no_merkle(
+            &record, &storage, &epoch_state, &genesis, Some(&vrf_pk), None, SealStakeView { staked: &staked },
+        );
+        let msg = res.expect_err("non-member self-declared anchor must not fast-forward").to_string();
+        assert!(msg.contains("stake-unverifiable"), "got: {msg}");
+        assert!(!msg.contains("bootstrap regime"), "a full set is not the bootstrap regime: {msg}");
+    }
+
+    #[test]
+    fn r1x1v_nongenesis_fastforward_defers_in_bootstrap_regime() {
+        let (record, storage, _dir, epoch_state, genesis, vrf_pk) = r1x1v_fastforward_seal();
+        // Creator IS staked but the set is below BOOTSTRAP_MIN_STAKERS: under
+        // the carve-out mirrored from `aggregator::proposer_rank` /
+        // `verify_aggregator_rank` only genesis may propose, so a non-genesis
+        // fast-forward seal cannot be honest here — DEFER (never reject).
+        let creator = creator_identity_hash(&record);
+        let staked: HashSet<String> =
+            [creator, "r1x1v-filler-anchor-1".to_string()].into_iter().collect();
+        assert!(staked.len() < crate::network::aggregator::BOOTSTRAP_MIN_STAKERS);
+        let res = verify_epoch_seal_no_merkle(
+            &record, &storage, &epoch_state, &genesis, Some(&vrf_pk), None, SealStakeView { staked: &staked },
+        );
+        let msg = res.expect_err("bootstrap-regime non-genesis fast-forward must defer").to_string();
+        assert!(msg.contains("stake-unverifiable") && msg.contains("bootstrap regime"), "got: {msg}");
+        assert!(crate::network::gossip::is_retryable_ingest_rejection(&msg));
+    }
+
+    #[test]
+    fn r1x1v_b7_vrf_deferral_precedes_stake_gate() {
+        let (record, storage, _dir, epoch_state, genesis, _vrf_pk) = r1x1v_fastforward_seal();
+        // No registered key AND an empty view: B7's VRF-unverifiable deferral
+        // fires FIRST (ordering pin — both arms defer, but the ingest counters
+        // are distinct and keyed on disjoint markers).
+        let res = verify_epoch_seal_no_merkle(
+            &record, &storage, &epoch_state, &genesis, None, None, SealStakeView::empty(),
+        );
+        let msg = res.expect_err("unregistered key must defer").to_string();
+        assert!(msg.contains("VRF-unverifiable") && !msg.contains("stake-unverifiable"), "got: {msg}");
+    }
+
+    #[test]
+    fn r1x1v_partition_merge_nongenesis_unaffected_by_empty_view() {
+        // Scoping pin: the gate lives on the fast-forward arm ONLY. A
+        // non-genesis seal BEHIND our tip within the merge window (partition
+        // merge) must still verify under an EMPTY view — that arm never raises
+        // `latest_epoch` (it cannot wedge the tip) and loses to attestation
+        // weight, exactly as B7 left it.
+        use crate::crypto::vrf::{VrfSecretKey, vrf_prove};
+        let identity = test_identity();
+        let genesis = "r1x1v_other_genesis_authority_deadbeef".to_string();
+        let (mut storage, _dir) = test_engine();
+        let zone = ZoneId::from_legacy(0);
+        // Our tip is epoch 10 (a registered seal); the incoming seal claims 5.
+        let mut epoch_state = EpochState::new();
+        let tip = ParsedEpochSeal {
+            zone: zone.clone(),
+            epoch_number: 10,
+            start: 0.0,
+            end: 40.0,
+            record_count: 0,
+            merkle_root: [0u8; 32],
+            previous_seal_hash: [0u8; 32],
+            vrf_output: None,
+            vrf_proof: None,
+            record_hashes: vec![],
+            zone_balance_total: None,
+            zone_registry_root: None,
+            zone_registry_delta: None,
+            seal_zone_count: None,
+            aggregator_rank: 0,
+            account_smt_root: None,
+            drand_pulse: None,
+            xzone_dest_finality_committees: None,
+            wire_version: crate::wire::CURRENT_SIGNING_VERSION,
+            sparse_merkle_root: None,
+        };
+        epoch_state.register_seal(&tip, "seal-10", sha3_256(b"r1x1v-seal10"));
+        insert_test_record(&mut storage, &identity, b"r1x1v-pm", 100.0);
+
+        let vrf_sk = VrfSecretKey::generate().unwrap();
+        let vrf_pk = vrf_sk.public_key();
+        let (mut record, _) = create_epoch_seal(
+            &identity, &storage, &epoch_state, zone.clone(), 50.0, 200.0, Some(&vrf_sk), None,
+        ).unwrap();
+        // Rewind the claimed epoch to 5 (behind tip 10, gap 5 <= 100 → partition
+        // merge) and recompute the VRF over the beacon the verifier derives
+        // from the seal's own previous_seal_hash.
+        let pm_epoch = 5u64;
+        let prev = epoch_state.previous_seal_hash(&zone);
+        let beacon = crate::network::aggregator::chained_beacon(&prev, pm_epoch, &zone);
+        let (out, proof) = vrf_prove(&vrf_sk, &beacon).unwrap();
+        record.metadata.insert("epoch_number".into(), serde_json::json!(pm_epoch));
+        record.metadata.insert("epoch_vrf_output".into(), serde_json::json!(hex::encode(out.as_bytes())));
+        record.metadata.insert("epoch_vrf_proof".into(), serde_json::json!(hex::encode(proof.to_bytes())));
+
+        let res = verify_epoch_seal_no_merkle(
+            &record, &storage, &epoch_state, &genesis, Some(&vrf_pk), None, SealStakeView::empty(),
+        );
+        if let Err(ref e) = res {
+            assert!(!e.to_string().contains("stake-unverifiable"), "stake gate must not fire on partition-merge: {e}");
+        }
+        assert!(res.is_ok(), "partition-merge non-genesis seal must verify under an empty view: {:?}", res.err());
     }
 
     #[test]
@@ -10567,7 +12303,7 @@ mod tests {
 
         // Verify with WRONG VRF public key — must fail
         let result = verify_epoch_seal(
-            &record, &storage, &epoch_state, &genesis, Some(&wrong_vrf_pk), None,
+            &record, &storage, &epoch_state, &genesis, Some(&wrong_vrf_pk), None, SealStakeView::empty(),
         );
         assert!(result.is_err(), "wrong VRF key must cause verification failure");
     }
@@ -10958,7 +12694,7 @@ mod tests {
         // 1000 records in 300s = 3.33 rec/s
         // interval = TARGET_RECORDS_PER_EPOCH / rate = 100 / 3.33 ≈ 30s
         // (above MIN_ADAPTIVE_EPOCH_SECS=5.0 so no clamp applies)
-        state.update_activity(&zone, 1000, 300.0);
+        state.update_activity(&zone, 1000, 300.0, 10996);
         let interval = state.adaptive_interval(&zone, 300.0);
         assert!(interval <= 30.0 + 0.1, "expected ~30s, got {interval}");
     }
@@ -10970,7 +12706,7 @@ mod tests {
 
         // 2 records in 300s = 0.0067 rec/s
         // interval = 100 / 0.0067 = ~15000s → clamped to MAX_ADAPTIVE_EPOCH_SECS
-        state.update_activity(&zone, 2, 300.0);
+        state.update_activity(&zone, 2, 300.0, 11008);
         let interval = state.adaptive_interval(&zone, 300.0);
         assert!((interval - MAX_ADAPTIVE_EPOCH_SECS).abs() < 0.1,
             "expected ~{MAX_ADAPTIVE_EPOCH_SECS}s, got {interval}");
@@ -10987,7 +12723,7 @@ mod tests {
         // hitting the formula instead of clamp. Updated when MAX
         // dropped 3600 → 120 → 60; the previous "sweet spot" rate of 0.333 rps
         // now exceeds the cap.
-        state.update_activity(&zone, 100, 30.0);
+        state.update_activity(&zone, 100, 30.0, 11025);
         let interval = state.adaptive_interval(&zone, 300.0);
         assert!((interval - 30.0).abs() < 1.0,
             "expected ~30s, got {interval}");
@@ -10999,11 +12735,11 @@ mod tests {
         let zone = ZoneId::new("test");
 
         // First observation: 50 records in 300s
-        state.update_activity(&zone, 50, 300.0);
+        state.update_activity(&zone, 50, 300.0, 11037);
         let rate1 = state.zone_activity_rate[&zone];
 
         // Second observation: 500 records in 300s (spike)
-        state.update_activity(&zone, 500, 300.0);
+        state.update_activity(&zone, 500, 300.0, 11041);
         let rate2 = state.zone_activity_rate[&zone];
 
         // EMA should smooth the spike, not jump fully to it
@@ -11023,7 +12759,7 @@ mod tests {
     fn test_adaptive_zero_duration_ignored() {
         let mut state = EpochState::new();
         let zone = ZoneId::new("test");
-        state.update_activity(&zone, 100, 0.0);
+        state.update_activity(&zone, 100, 0.0, 11061);
         // Should not crash, should not update
         assert!(!state.zone_activity_rate.contains_key(&zone));
     }
@@ -11044,7 +12780,7 @@ mod tests {
         let mut state = EpochState::new();
         let busy = ZoneId::new("busy");
         // 200 rec in 1s → 200 rec/s → interval = 100/200 = 0.5s, clamped up to MIN (5s).
-        state.update_activity(&busy, 200, 1.0);
+        state.update_activity(&busy, 200, 1.0, 11082);
         let s = state.adaptive_interval_summary();
         assert_eq!(s.zones_tracked, 1);
         assert_eq!(s.floor_pinned_zones, 1, "single saturated zone must be floor-pinned");
@@ -11059,11 +12795,11 @@ mod tests {
         let medium = ZoneId::new("medium");
         let idle = ZoneId::new("idle");
         // busy: 200 rec/s → floor (5s)
-        state.update_activity(&busy, 200, 1.0);
+        state.update_activity(&busy, 200, 1.0, 11097);
         // medium: 100 rec in 300s = 0.33 rec/s → ~300s (well below ceil)
-        state.update_activity(&medium, 100, 300.0);
+        state.update_activity(&medium, 100, 300.0, 11099);
         // idle: 1 rec in 300s = 0.0033 rec/s → 30000s, clamped to ceil (MAX_ADAPTIVE_EPOCH_SECS)
-        state.update_activity(&idle, 1, 300.0);
+        state.update_activity(&idle, 1, 300.0, 11101);
 
         let s = state.adaptive_interval_summary();
         assert_eq!(s.zones_tracked, 3);
@@ -11080,8 +12816,8 @@ mod tests {
         let mut state = EpochState::new();
         let zone = ZoneId::new("repeat");
         // Update same zone twice — must still count as 1 in zones_tracked.
-        state.update_activity(&zone, 100, 300.0);
-        state.update_activity(&zone, 50, 300.0);
+        state.update_activity(&zone, 100, 300.0, 11118);
+        state.update_activity(&zone, 50, 300.0, 11119);
         let s = state.adaptive_interval_summary();
         assert_eq!(s.zones_tracked, 1);
     }
@@ -14303,6 +16039,195 @@ mod tests {
         assert!(state.snapshot_recent_seal_hashes(&zone).is_none(), "buffer not full");
     }
 
+    /// R1-X1 M1 fixture: a minimal zone seal at `epoch` plus its record hash
+    /// (`salt` varies the hash for same-epoch rivals).
+    fn m1_seal(zone: &ZoneId, epoch: u64, salt: u8) -> (ParsedEpochSeal, [u8; 32]) {
+        let mut pre = epoch.to_le_bytes().to_vec();
+        pre.push(salt);
+        let h = sha3_256(&pre);
+        let seal = ParsedEpochSeal {
+            zone: zone.clone(),
+            epoch_number: epoch,
+            start: epoch as f64 * 60.0,
+            end: (epoch + 1) as f64 * 60.0,
+            record_count: 1,
+            merkle_root: h,
+            previous_seal_hash: [0u8; 32],
+            vrf_output: None,
+            vrf_proof: None,
+            record_hashes: vec![],
+            zone_balance_total: None,
+            zone_registry_root: None,
+            zone_registry_delta: None,
+            seal_zone_count: None,
+            aggregator_rank: 0,
+            account_smt_root: None,
+            drand_pulse: None,
+            xzone_dest_finality_committees: None,
+            wire_version: crate::wire::CURRENT_SIGNING_VERSION,
+            sparse_merkle_root: None,
+        };
+        (seal, h)
+    }
+
+    #[test]
+    fn r1x1_m1_same_epoch_rivals_keep_one_lex_min_window_entry() {
+        // Pre-M1 the buffer was push-per-register: a same-epoch rival that won
+        // the tip race pushed a 65th hash, evicting epoch 1 — 64 entries over
+        // 63 epochs with the tip twice, and the minted super-seal's
+        // [start, end] claim no longer matched its hash list.
+        let zone = ZoneId::from_legacy(0);
+        let mut state = EpochState::new();
+        for i in 1..=SUPER_SEAL_INTERVAL {
+            let (seal, h) = m1_seal(&zone, i, 0);
+            state.register_seal(&seal, &format!("epoch:0:{i}"), h);
+        }
+        assert!(state.should_create_super_seal(&zone));
+        let before = state.snapshot_recent_seal_hashes(&zone).expect("complete window");
+
+        // Lex-larger rival at the tip loses the tip race: window untouched.
+        let (big, _) = m1_seal(&zone, SUPER_SEAL_INTERVAL, 1);
+        state.register_seal(&big, "epoch:0:64:big", [0xff; 32]);
+        assert_eq!(state.snapshot_recent_seal_hashes(&zone).as_deref(), Some(before.as_slice()));
+
+        // Lex-smaller rival at the tip wins: the tip entry is REPLACED, never
+        // appended.
+        let (small, _) = m1_seal(&zone, SUPER_SEAL_INTERVAL, 2);
+        state.register_seal(&small, "epoch:0:64:small", [0x00; 32]);
+        let after = state.snapshot_recent_seal_hashes(&zone).expect("still complete");
+        assert_eq!(after.len() as u64, SUPER_SEAL_INTERVAL);
+        assert_eq!(after[..63], before[..63], "epochs 1..=63 untouched");
+        assert_eq!(after[63], [0x00; 32], "tip epoch holds the lex-min winner");
+        let win = state.recent_seal_hashes.get(&zone).expect("window");
+        assert_eq!(win.len() as u64, SUPER_SEAL_INTERVAL);
+        assert_eq!(win.keys().next().copied(), Some(1), "epoch 1 still present");
+        assert!(state.should_create_super_seal(&zone));
+
+        // Weight-reconcile path, same epoch: an equal-weight lex-loser is
+        // demoted (no window change) ...
+        let (w_lose, _) = m1_seal(&zone, SUPER_SEAL_INTERVAL, 3);
+        assert!(!state.register_seal_with_reconcile(&w_lose, "epoch:0:64:wl", [0x01; 32], 5, 5));
+        assert_eq!(
+            state.recent_seal_hashes.get(&zone).expect("window")[&SUPER_SEAL_INTERVAL],
+            [0x00; 32]
+        );
+        // ... and a heavier lex-larger winner takes the tip but NOT the window
+        // entry — the window is a pure function of the seal set (lex-min per
+        // epoch, the `upsert_vrf_ring` rule), so every node, including one
+        // that reboots and repopulates from CF_EPOCHS, mints the same
+        // super-seal.
+        let (w_win, _) = m1_seal(&zone, SUPER_SEAL_INTERVAL, 4);
+        assert!(state.register_seal_with_reconcile(&w_win, "epoch:0:64:ww", [0x02; 32], 9, 5));
+        assert_eq!(state.latest_seal_hash.get(&zone).copied(), Some([0x02; 32]));
+        let win = state.recent_seal_hashes.get(&zone).expect("window");
+        assert_eq!(win.len() as u64, SUPER_SEAL_INTERVAL);
+        assert_eq!(win[&SUPER_SEAL_INTERVAL], [0x00; 32]);
+    }
+
+    #[test]
+    fn r1x1_m1_live_window_equals_boot_repopulation() {
+        // A long-running node (live register_seal, rivals in either arrival
+        // order) and a restarted one (repopulate_recent_seal_hashes over the
+        // same CF_EPOCHS) must hold byte-identical windows — otherwise they
+        // would mint different super-seals for the same boundary.
+        let (mut engine, _dir) = test_engine();
+        let identity = test_identity();
+        let zone = "/zone/m1";
+        let zid = ZoneId::new(zone);
+
+        let mut history: Vec<(u64, ValidationRecord)> = Vec::new();
+        for epoch in 30..=128u64 {
+            let a = write_test_seal(&mut engine, &identity, zone, epoch, &epoch.to_be_bytes());
+            if epoch % 17 == 0 {
+                // Dual-proposer rival; even epochs see the rival FIRST.
+                let b = write_test_seal(&mut engine, &identity, zone, epoch, b"rival");
+                if epoch % 2 == 0 {
+                    history.push((epoch, b));
+                    history.push((epoch, a));
+                } else {
+                    history.push((epoch, a));
+                    history.push((epoch, b));
+                }
+            } else {
+                history.push((epoch, a));
+            }
+        }
+
+        let mut live = EpochState::new();
+        for (_, rec) in &history {
+            let seal = extract_epoch_seal(rec).unwrap().expect("test record is a seal");
+            live.register_seal(&seal, &rec.id, rec.record_hash());
+        }
+
+        let mut boot = EpochState::new();
+        boot.latest_epoch.insert(zid.clone(), 128);
+        repopulate_recent_seal_hashes(&mut boot, &engine);
+
+        let live_win = live.recent_seal_hashes.get(&zid).expect("live window");
+        assert_eq!(Some(live_win), boot.recent_seal_hashes.get(&zid), "live == boot");
+        assert_eq!(live_win.len() as u64, SUPER_SEAL_INTERVAL);
+        assert_eq!(live_win.keys().next().copied(), Some(65));
+        assert_eq!(live_win.keys().next_back().copied(), Some(128));
+        assert!(live.should_create_super_seal(&zid) && boot.should_create_super_seal(&zid));
+        assert_eq!(live.snapshot_recent_seal_hashes(&zid), boot.snapshot_recent_seal_hashes(&zid));
+        for e in [68u64, 85, 102, 119] {
+            let lex_min = history
+                .iter()
+                .filter(|(ep, _)| *ep == e)
+                .map(|(_, r)| r.record_hash())
+                .min()
+                .expect("rival pair");
+            assert_eq!(live_win[&e], lex_min, "epoch {e}: lex-min of the rival pair");
+        }
+    }
+
+    #[test]
+    fn r1x1_m1_window_hole_refuses_mint_until_sixty_four_consecutive() {
+        let zone = ZoneId::from_legacy(0);
+        let mut state = EpochState::new();
+        // 1..=60 contiguous, then the node's view jumps to 63 (fast-forward
+        // past 61/62), then the boundary 64.
+        for i in (1..=60u64).chain([63, 64]) {
+            let (seal, h) = m1_seal(&zone, i, 0);
+            state.register_seal(&seal, &format!("epoch:0:{i}"), h);
+        }
+        assert_eq!(
+            state.super_seal_window_status(&zone),
+            SealWindowStatus { present: 62, holes: 2, complete: false }
+        );
+        assert!(!state.should_create_super_seal(&zone), "holed window must not mint");
+        assert!(state.snapshot_recent_seal_hashes(&zone).is_none());
+
+        // Two more seals would have filled the pre-M1 buffer to 64 entries
+        // spanning 66 epochs; post-M1 the window stays holed until the hole
+        // leaves it. 65..=128 → at 128 the window is [65, 128]: complete.
+        for i in 65..=128u64 {
+            let (seal, h) = m1_seal(&zone, i, 0);
+            state.register_seal(&seal, &format!("epoch:0:{i}"), h);
+            if i < 128 {
+                assert!(!state.should_create_super_seal(&zone), "epoch {i} is not a boundary");
+            }
+        }
+        assert_eq!(
+            state.super_seal_window_status(&zone),
+            SealWindowStatus { present: 64, holes: 0, complete: true }
+        );
+        assert!(state.should_create_super_seal(&zone));
+        let win = state.recent_seal_hashes.get(&zone).expect("window");
+        assert_eq!(win.keys().next().copied(), Some(65), "pruned to the window floor");
+        assert_eq!(win.len(), 64, "bounded: never more than SUPER_SEAL_INTERVAL entries");
+
+        // A jump of ≥ 64 epochs prunes everything below the new floor: the
+        // window is short (not holed) and refuses the mint at 256.
+        let (seal, h) = m1_seal(&zone, 256, 0);
+        state.register_seal(&seal, "epoch:0:256", h);
+        assert_eq!(
+            state.super_seal_window_status(&zone),
+            SealWindowStatus { present: 1, holes: 0, complete: false }
+        );
+        assert!(!state.should_create_super_seal(&zone));
+    }
+
     #[test]
     fn test_super_seal_committee_hash_absent_defaults_to_zero() {
         // When create_super_seal is called with committee_hash = [0u8; 32]
@@ -15189,5 +17114,79 @@ mod tests {
             Some([0xAA; 32]),
             "jury seed at the inverted entry's end_ts must be its VRF output"
         );
+    }
+}
+
+#[cfg(test)]
+mod seal_gate_verdict_step01_tests {
+    use super::*;
+
+    #[test]
+    fn ema_folds_once_per_epoch_regardless_of_revisits() {
+        let mut st = EpochState::new();
+        let z = ZoneId::new("0");
+        st.update_activity(&z, 100, 10.0, 7);
+        let rate_after_first = st.zone_activity_rate.get(&z).copied().unwrap();
+        // Lex-min flip / boot re-register revisits the SAME epoch: must not re-fold.
+        st.update_activity(&z, 100, 10.0, 7);
+        st.update_activity(&z, 100, 10.0, 6);
+        assert_eq!(st.zone_activity_rate.get(&z).copied().unwrap(), rate_after_first);
+        // The next epoch folds normally.
+        st.update_activity(&z, 200, 10.0, 8);
+        assert!(st.zone_activity_rate.get(&z).copied().unwrap() > rate_after_first);
+    }
+
+    #[test]
+    fn snapshot_restore_recomputes_intervals_from_rates() {
+        let mut st = EpochState::new();
+        let z = ZoneId::new("0");
+        st.update_activity(&z, 200, 10.0, 1); // 20 rec/s → floor-pinned interval
+        let live_interval = st.zone_adaptive_interval.get(&z).copied().unwrap();
+        let snap = st.to_snapshot();
+        let restored = EpochState::from_snapshot(&snap);
+        let restored_interval = restored.zone_adaptive_interval.get(&z).copied();
+        // The old code blanked this map on every restart (the comment lied).
+        assert_eq!(restored_interval, Some(live_interval));
+        assert!(restored.last_activity_epoch.is_empty(), "dedup index is runtime-only");
+    }
+
+    #[test]
+    fn prune_stale_zones_clears_interval_and_dedup_maps() {
+        let mut st = EpochState::new();
+        let z = ZoneId::new("7");
+        st.latest_epoch.insert(z.clone(), 3);
+        st.update_activity(&z, 100, 10.0, 3);
+        assert!(st.zone_adaptive_interval.contains_key(&z));
+        st.prune_stale_zones(4); // zone index 7 >= zone_count 4 → stale
+        assert!(!st.zone_adaptive_interval.contains_key(&z), "step-0b: interval map must prune");
+        assert!(!st.last_activity_epoch.contains_key(&z));
+        assert!(!st.zone_activity_rate.contains_key(&z));
+    }
+    /// C1adj (audit 2026-08-30) symmetry pin: BOTH wall-clock twins must stamp
+    /// their emit-ts INSIDE the epoch-watermark dedup branch. Source-shape pin
+    /// (W-M/4e-iv precedent — the twins sit mid-flow in seal apply): the
+    /// `.store(` of each twin's emit-ts must appear textually AFTER its
+    /// `if epoch_no > prev` guard. That ordering is exactly the drift that
+    /// burned the reap budget on watermark-rejected seals.
+    #[test]
+    fn c1adj_twin_stamps_inside_dedup_branches() {
+        let src = include_str!("epoch.rs");
+        for (twin, anchor, stamp) in [
+            ("reap", "const REAP_CHECK_INTERVAL_SECS", ".last_xzone_reap_emit_ts"),
+            ("idle-decay", "const IDLE_DECAY_MIN_EMIT_SPACING_SECS", ".last_idle_decay_emit_ts"),
+        ] {
+            let region = src.split(anchor).nth(1).expect(twin);
+            let guard = region.find("if epoch_no > prev").expect("dedup guard");
+            // First `.store(` on the twin's own atomic after the anchor.
+            let stamp_at = region.find(stamp).expect("stamp read/store present");
+            let store_at = region[stamp_at..]
+                .find(".store(")
+                .map(|off| stamp_at + off)
+                .expect("stamp store present");
+            assert!(
+                store_at > guard,
+                "{twin} twin stamps BEFORE its dedup guard — budget burns on rejected seals"
+            );
+        }
     }
 }

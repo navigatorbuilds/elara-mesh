@@ -105,7 +105,7 @@ Exactly one of:
   from a snapshot **and** no read faulted. A zone-scoped node never claims
   authoritative absence (its `basis` carries `zone_subset`).
 
-Absence-authority is a **window, not a bool**: a verifier holding a receipt with
+Absence-authority is a **window, not a bool**: a verifier holding a proof with
 `claimed_ts ≥ complete_from_ms` and an absent answer has an authoritative
 refutation; below the floor it is genuinely unknowable on this node. The two
 `/mandate/{id}/acts` and `/agent/{hash}/acts` list endpoints carry the same
@@ -152,5 +152,5 @@ labelled.
 
 - The always-on authority seed runs `node_profile=archive` as the interim
   network-permanence anchor (retention effectively infinite; node-local policy,
-  non-fork). Combined with the public receipts archive, this guarantees the
+  non-fork). Combined with the public proof log, this guarantees the
   signed record survives even where a full-zone node's body ages out.

@@ -694,6 +694,13 @@ const EXPECTED_RECORDS_PER_EPOCH: f64 = 100.0;
 ///   → More records in epoch = more reward (capped at 2×)
 ///   → Empty epochs get zero factor
 /// - Other multipliers applied by the caller (reputation, entity clustering)
+///
+/// ⚠ CADENCE DEPENDENCY (2026-08-29 adaptive-seal-gate verdict, deferred item):
+/// this formula is per-SEAL and the 2.0 cap makes it supply-sensitive to seal
+/// CADENCE — splitting one 60s epoch into twelve 5s epochs turns a single
+/// capped 2.0 into up to 12 × 1.0 (≈6× emission per unit time). If this path
+/// is ever activated after per-zone adaptive sealing is wired, it MUST first
+/// gain a rate-normalising term (reward per unit TIME, not per seal).
 pub fn epoch_reward_amount(base_reward: u64, record_count: u64) -> u64 {
     if record_count == 0 || base_reward == 0 {
         return 0;

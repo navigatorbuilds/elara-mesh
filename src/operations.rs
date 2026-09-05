@@ -97,7 +97,9 @@ impl<S: Storage> DamVm<S> {
             record.timestamp,
         )?;
 
-        // Insert into storage
+        // Insert into storage. `Storage::insert` is a bare put (payload +
+        // zone index; no identity/slot/side rows) — `DamVm` is not the node's
+        // writer (the node uses `put_record_with_pk_zone`, R2 2026-09-02).
         self.storage.insert(record)
     }
 

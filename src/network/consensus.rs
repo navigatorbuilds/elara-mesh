@@ -1152,7 +1152,15 @@ pub struct AWCConsensus {
     /// Master switch (config `liveness_decay_enabled`).
     liveness_decay_enabled: bool,
     /// Trailing activity window in epochs: a staker is live iff its last
-    /// observed attestation is within `chain_tip_epoch - window`. This window
+    /// observed attestation is within `chain_tip_epoch - window`.
+    /// ⚠ CADENCE DEPENDENCY (2026-08-29 adaptive-seal-gate verdict, step-0a
+    /// remainder): `chain_tip_epoch` is the GLOBAL max across zones — under
+    /// per-zone adaptive cadence a floor-pinned zone advances it ~12× faster,
+    /// silently shrinking this window's wall-clock meaning and aging out
+    /// honest stakers in slow zones. Before EVER enabling this flag with the
+    /// adaptive gate live, convert the comparison to the
+    /// rotation_finality.rs max(epoch_window, wall_clock_floor) pattern.
+    /// This window
     /// IS the safety boundary — it must exceed realistic transient-outage and
     /// partition durations, because stake silent for a full window ages out
     /// of quorum (see internal design notes partition tradeoff).

@@ -214,6 +214,11 @@ pub struct AnchorView {
     /// Same set partitioned by current home zone (`resolve_identity_zone`) —
     /// the escalation-decision input (`stakers_by_zone`).
     by_zone: std::sync::Arc<std::collections::HashMap<crate::ZoneId, Vec<(String, u64)>>>,
+    /// R1-X1-V (2026-09-02): the id set of `flat` — the verifier's
+    /// fast-forward stake gate input (`epoch::SealStakeView`). Built in the
+    /// SAME rebuild from the same filtered list, so it is the proposer's `>0`
+    /// set exactly.
+    staked_set: std::sync::Arc<std::collections::HashSet<String>>,
 }
 
 /// Transitions-F1: memoized zone-transition-seal trust set — the identities
@@ -986,6 +991,81 @@ pub struct NodeState {
     /// rate = super-seal pipeline stalled, page on >2×SUPER_SEAL_INTERVAL
     /// epoch silence.
     pub super_seals_minted_total: AtomicU64,
+    /// R1-X1 (2026-09-02, Layer B): GC seal-floor SUPPRESSION events — one
+    /// per zone per derivation whose latest super-seal pointer cannot be
+    /// bounded by the zone's own tip: `end_epoch` ahead of `latest_epoch`, or
+    /// no local tip at all. Such a zone gets NO floor that cycle — never a
+    /// floor clamped at the tip, which would hand the record-prune arm a
+    /// deletion authority the unbounded code never had. WARN-level
+    /// observability, NOT yet a must-stay-0 canary: until the ingest bound
+    /// (R1-X1 Commit 3) lands, a node catching up after downtime registers
+    /// current super-seals ahead of its tip legitimately. Surfaced as
+    /// `elara_gc_seal_floor_suppressed_total`.
+    pub gc_seal_floor_suppressed_total: AtomicU64,
+    /// R1-X1: zones suppressed by the LAST seal-floor derivation (a gauge,
+    /// so the condition clears by itself once the seal at `end_epoch`
+    /// arrives). Surfaced as `elara_gc_seal_floor_suppressed_zones`.
+    pub gc_seal_floor_suppressed_zones: AtomicU64,
+    /// R1-X1: records claiming `epoch_op = super_seal` whose shape extraction
+    /// returned `Err` at ingest. Before this counter the Err vanished
+    /// silently inside the ingest fold. Counted ONLY when the op string IS
+    /// `super_seal` — a non-string `epoch_op` errs before the op is inspected
+    /// and is any signed record's to send. The record's fate is unchanged
+    /// (never rejected on Err here), only counted. Surfaced as
+    /// `elara_super_seal_extract_err_total`.
+    pub super_seal_extract_err_total: AtomicU64,
+    /// R1-X6 (2026-09-03): records claiming epoch_op=zone_subscription whose
+    /// shape extraction returned Err at ingest — previously swallowed by the
+    /// `if let Ok(Some(..))` consumer. Surfaced as
+    /// `elara_zone_subscription_extract_err_total`. Record fate unchanged.
+    pub zone_subscription_extract_err_total: AtomicU64,
+    /// R1-X6 (2026-09-03): records claiming epoch_op=zone_transition whose shape
+    /// extraction returned Err at ingest (op-string guarded like the super_seal
+    /// arm). Surfaced as `elara_zone_transition_extract_err_total`.
+    /// (global_seal / sunset have NO such counter: their malformed records are
+    /// hard-rejected pre-store by dedicated verify gates, so the fold-arm Err is
+    /// unreachable — see the ingest.rs arms.)
+    pub zone_transition_extract_err_total: AtomicU64,
+    /// R1-X1 M1: super-seal boundary evaluations (this node, producer side)
+    /// at which the mint was REFUSED because the zone's seal window was
+    /// incomplete — entries present, but not the canonical seal of every
+    /// epoch in `[latest-63, latest]` (a B7 fast-forward or ingest hole, or a
+    /// snapshot-bootstrapped node whose CF_EPOCHS starts inside the window).
+    /// Pre-M1 such a window could still reach 64 entries and mint a
+    /// super-seal whose `[start,end]` claim did not match its hash list.
+    /// Not bumped for a boundary a peer's super-seal already covers. Surfaced
+    /// as `elara_super_seal_buffer_noncontiguous_total`; WARN-level — expect
+    /// at most one bump per affected boundary, then 0.
+    pub super_seal_buffer_noncontiguous_total: AtomicU64,
+    /// R1-X1 Commit 3 (Layer A ingest bound, verdict §2A): super-seals
+    /// ADMITTED at ingest — A4 coverage or A5 boundary-proposer passed, or the
+    /// local pointer already covered the range (historical replay).
+    pub super_seal_admission_accepted_total: AtomicU64,
+    /// Super-seals DEFERRED (transient reject → super-seal retry lane) because
+    /// `end_epoch` is ahead of this node's zone tip (A3).
+    pub super_seal_admission_deferred_ahead_of_tip_total: AtomicU64,
+    /// Super-seals DEFERRED because the zone has no local tip at all (A3;
+    /// closes R1-X1-TL — a super-seal can never register a zone this node
+    /// never sealed).
+    pub super_seal_admission_deferred_zone_unknown_total: AtomicU64,
+    /// Super-seals DEFERRED because neither A4 (coverage) nor A5
+    /// (boundary-proposer) could be brought to PASS: canonical seals missing
+    /// locally, an UNATTRIBUTED root mismatch, or the Light profile (which
+    /// never verifies seals).
+    pub super_seal_admission_deferred_unverifiable_total: AtomicU64,
+    /// CANARY (must stay 0): all 64 canonical seal hashes were present, the
+    /// boundary seal's creator signed the super-seal (A5 attributes it) and
+    /// the Merkle root STILL differed — the local seal set or the proposer is
+    /// wrong; both are investigation-grade.
+    pub super_seal_admission_root_mismatch_total: AtomicU64,
+    /// Super-seals REJECTED permanently on shape (A1/A2): `seal_count != 64`,
+    /// range width != 64, or `end_epoch` off the 64-boundary. Wire error —
+    /// never stored; the retry drain embargoes it on re-fail (B5).
+    pub super_seal_admission_rejected_shape_total: AtomicU64,
+    /// WARN-only: an ADMITTED super-seal whose `previous_super_seal_hash` /
+    /// `start_epoch` do not link to the local pointer (A6). Informational
+    /// until super-seal chain forks are fenced (R1-X1-D).
+    pub super_seal_admission_chain_link_mismatch_total: AtomicU64,
     /// Super-seal CREATION
     /// attempts. Bumped on the producer side of `epoch_seal_loop` after
     /// `should_create_super_seal` returns true (i.e. latest_epoch is at a
@@ -1102,14 +1182,14 @@ pub struct NodeState {
     /// BOTH anchors = consensus liveness break (no anchor sees itself as
     /// rank-eligible), and the tick-summary INFO line emitted from
     /// `epoch_seal_loop` shows which zones are dropping. The reason-tagged
-    /// sub-counters below split this single counter into four so
+    /// sub-counters below split this single counter into five so
     /// the *which gate fired* question can be answered from /metrics alone.
     pub seal_loop_proposals_none_total: AtomicU64,
     /// Cumulative `SealProposal::None(NoneReason::AlreadySealed)`.
     /// /metrics: `elara_seal_loop_proposals_none_already_sealed_total`.
     /// Healthy duplicate-suppression signal — fires every tick on anchors
     /// that lost the race for a (zone, epoch). Sub-counter of
-    /// `seal_loop_proposals_none_total`; the four reason-counters always
+    /// `seal_loop_proposals_none_total`; the five reason-counters always
     /// sum to the parent.
     pub seal_loop_proposals_none_already_sealed_total: AtomicU64,
     /// Cumulative `SealProposal::None(NoneReason::BootstrapNonGenesis)`.
@@ -1138,6 +1218,42 @@ pub struct NodeState {
     /// anchors for the same zone means the lower ranks are absent/byzantine
     /// and the backoff schedule has parked the chain waiting on them.
     pub seal_loop_proposals_none_rank_too_high_total: AtomicU64,
+    /// Cumulative `SealProposal::None(NoneReason::AdaptiveIntervalPending)`.
+    /// /metrics: `elara_seal_loop_proposals_none_adaptive_pending_total`.
+    /// NL-1 adaptive seal-gate (Step 2). This anchor IS the rank-elected
+    /// per-zone proposer but held because the zone is not yet due under its
+    /// adaptive cadence. Sub-counter of `seal_loop_proposals_none_total`; the
+    /// five reason-counters always sum to the parent. Non-zero ONLY when
+    /// `use_adaptive_seal_gate` is on (merge-dark; default-false = always 0);
+    /// with the flag on, a steady climb = healthy cadence throttling, NOT a
+    /// stall (contrast NotInTopRanks / RankTooHighForElapsed).
+    pub seal_loop_proposals_none_adaptive_pending_total: AtomicU64,
+    /// /metrics: `elara_seal_loop_durable_tip_heals_total` (T-F10-MULTIZONE,
+    /// Layer 3, 2026-09-02). Epochs whose tip the seal loop re-seeded from a
+    /// self-produced seal found durable in CF_EPOCHS but missing from RAM
+    /// (crash in the durable-write→register_seal window, snapshot lag at an
+    /// unclean exit, merge→prune→re-split). Informational: a non-zero delta
+    /// = a hole was closed instead of an equivocation. Steady state 0.
+    pub seal_loop_durable_tip_heals_total: AtomicU64,
+    /// /metrics: `elara_seal_loop_durable_tip_heal_failed_total`. A
+    /// self-produced durable seal was refused by the §E chain-anchor fence
+    /// during the heal; the loop skipped that tick's proposal. MUST STAY 0 —
+    /// non-zero means this node holds an own seal on a fenced-off chain at a
+    /// pinned epoch (stale pre-re-genesis node): wipe + virgin re-join.
+    pub seal_loop_durable_tip_heal_failed_total: AtomicU64,
+    /// /metrics: `elara_seal_loop_durable_heal_siblings_read_total`. DISC-5
+    /// sibling records dereferenced by the heal's walk — the canary for the
+    /// deliberate no-sibling-cap ruling. Steady state 0; a per-tick delta that
+    /// grows without a matching heal = stored foreign seals piling up at this
+    /// node's `next_epoch` (rejected-tip siblings or a planted flood).
+    pub seal_loop_durable_heal_siblings_read_total: AtomicU64,
+    /// /metrics: `elara_seal_loop_durable_heal_siblings_divergent_total`.
+    /// DISC-5 siblings whose index row and stored payload disagreed during
+    /// the heal walk (record missing/unreadable, unparseable seal payload,
+    /// zone/epoch mismatch). MUST STAY 0 — non-zero = index/record divergence
+    /// in the durable store (F2 residual R4 canary). Foreign-creator siblings
+    /// are normal and are not counted.
+    pub seal_loop_durable_heal_siblings_divergent_total: AtomicU64,
     /// Gossip metrics: total records received via pull.
     pub gossip_pull_total: AtomicU64,
     /// NETWORK-HARDENING Tier 1.1: cumulative announcements sent in
@@ -1467,6 +1583,34 @@ pub struct NodeState {
     /// Always zero on Light profile (light nodes don't store individual
     /// seals at all).
     pub gc_pruned_seals_total: AtomicU64,
+    /// R1 (2026-09-02): zones with a live epoch tip AND a registered
+    /// super-seal (a Gap-3 seal-pruning floor exists); sums with
+    /// `gc_zones_without_seal_floor` to the live-tip zone count. Gauge,
+    /// refreshed from the RAM epoch state by `gc::refresh_seal_floor_gauges`
+    /// (each /metrics scrape, ≤ 60 s stale; every GC cycle) — profile-
+    /// independent (archive included); 0 while `gc_seal_floor_gauges_unix_ts`
+    /// is 0 = never computed, not healthy.
+    pub gc_seal_floor_zones: AtomicU64,
+    /// R1 (2026-09-02): zones with a live epoch tip and NO super-seal ever
+    /// registered — every seal there is GC-immortal until a floor appears
+    /// (R1 residue classes A/C). Gauge, refreshed like `gc_seal_floor_zones`.
+    /// Non-zero briefly after a snapshot-less boot (floors re-register at
+    /// the next boundary, ≤ SUPER_SEAL_INTERVAL epochs); sustained non-zero
+    /// on a sealing zone = super-seal minting is not happening there.
+    pub gc_zones_without_seal_floor: AtomicU64,
+    /// R1 (2026-09-02): max over floored zones of `latest_epoch − latest
+    /// super-seal end_epoch`. Healthy < 2×SUPER_SEAL_INTERVAL (128);
+    /// growing without bound = the floor is frozen while the zone keeps
+    /// sealing (persistent super-seal mint failure — there is no retry
+    /// between boundaries). Gauge, refreshed like `gc_seal_floor_zones`.
+    pub gc_seal_floor_lag_epochs_max: AtomicU64,
+    /// R1 gauge fix (2026-09-02): unix time of the last refresh of the three
+    /// seal-floor gauges above by `gc::refresh_seal_floor_gauges` (each
+    /// /metrics scrape, at most once per 60 s; every GC cycle). 0 = never
+    /// refreshed — the gauges still hold their boot value and must not be
+    /// read as healthy (before this fix they read 0/0/0 for the first
+    /// `gc_interval_secs` after every boot and forever with the loop off).
+    pub gc_seal_floor_gauges_unix_ts: AtomicU64,
     /// Tier 3.4 (Protocol §11.8): finalized non-seal records pruned because
     /// their per-zone epoch has been super-sealed (timestamp older than the
     /// zone's `record_pruning_floor_ts` = end-time of the seal at
@@ -2032,6 +2176,17 @@ pub struct NodeState {
     /// no-boot-seed rationale: `apply_reap_batch`'s `Locked → Refunded` one-way
     /// flip makes a post-restart re-emit a harmless no-op (C10c).
     pub last_xzone_reap_emit_epoch: AtomicU64,
+    /// Wall-clock twins of the two emit watermarks above (2026-08-29 seal-gate
+    /// verdict, step 0a): the epoch-numbered watermarks stay the RESTART-SAFE
+    /// dedup (seeded from the chain tip, C10c); these timestamps add what epoch
+    /// numbers stop providing once per-zone cadence varies — (a) an emit-spacing
+    /// floor so the fastest zone can never drive charge cadence, and (b) a true
+    /// time-since-last-emit for the charge duration (the sealing zone's window
+    /// stops being a proxy for it under variable cadence). Unix seconds; 0 =
+    /// no emit since boot. Emitter-side only (genesis authority) — the emitted
+    /// record is what the fleet applies, so these never diverge consensus.
+    pub last_idle_decay_emit_ts: AtomicU64,
+    pub last_xzone_reap_emit_ts: AtomicU64,
     /// Negative cache for attestations that failed signature verification.
     /// Prevents infinite re-pull of known-bad attestations (record_id:witness_hash).
     pub attestation_bad_sigs: std::sync::Mutex<SeenSet>,
@@ -2078,6 +2233,11 @@ pub struct NodeState {
     /// re-FETCHED by id in the gossip pull loop instead. (record_id, attempts);
     /// bounded by gossip::GOSSIP_RETRY_CAP, FIFO-evicted.
     pub gossip_retry: std::sync::Mutex<std::collections::VecDeque<(String, u8)>>,
+    /// R1-X1 Commit 3 (S1): parked super-seals (transient A3/A4/A5 defers)
+    /// in their OWN bounded lane, so an ahead-of-tip super-seal burst can
+    /// never FIFO-evict parked epoch seals out of `gossip_retry`, nor the
+    /// reverse. Cap `gossip::SUPER_SEAL_RETRY_CAP`.
+    pub super_seal_retry: std::sync::Mutex<std::collections::VecDeque<(String, u8)>>,
     /// Counter: records recovered (ingested) via the gossip_retry queue.
     pub gossip_retry_recovered_total: AtomicU64,
     /// Counter: first-hop admission-throttle refusals dropped from BOTH the
@@ -2208,6 +2368,20 @@ pub struct NodeState {
     pub slashing: std::sync::Mutex<super::slashing::SlashingMonitor>,
     /// Auto-slashes executed by this node.
     pub auto_slashes_total: AtomicU64,
+    /// F2 (2026-09-02) durable equivocation detection telemetry.
+    /// Witness scans run in ingest Phase 2 (one per stored seal).
+    pub slashing_witness_scans_total: AtomicU64,
+    /// Index rows touched by witness scans (creator-keyed prefix, so ~1 per
+    /// honest seal; > `DURABLE_HEAL_SIBLINGS_WARN` per scan is a canary).
+    pub slashing_witness_keys_read_total: AtomicU64,
+    /// Scans whose `keys_read` exceeded `DURABLE_HEAL_SIBLINGS_WARN` (32).
+    pub slashing_witness_overflow_warn_total: AtomicU64,
+    /// Equivocations detected by the witness scan (before genesis gating /
+    /// dedup — counts the observation, not the slash).
+    pub slashing_equivocations_detected_total: AtomicU64,
+    /// `claim_offense` hits on the durable `slash_offense:` marker (a repeat
+    /// detection of an offense slashed before a restart).
+    pub slashing_durable_dedup_hits_total: AtomicU64,
     /// Fork heals — records synced during partition healing.
     pub fork_heals_total: AtomicU64,
     /// NETWORK-HARDENING-ROADMAP Tier 1.2 #2 — per-peer first-seen-diverged
@@ -2437,6 +2611,16 @@ pub struct NodeState {
     /// non-genesis anchor's VRF registration — cross-check against
     /// `seal_record_hashes_missing_total` (cold-join backfill lag) before paging.
     pub epoch_seal_fastforward_vrf_deferred_total: AtomicU64,
+    /// R1-X1-V (2026-09-02): non-genesis catch-up seals DEFERRED on the
+    /// fast-forward branch because the creator is not admissible by this
+    /// node's staked-anchor set (not staked, or the set is still in the
+    /// bootstrap regime — `aggregator::BOOTSTRAP_MIN_STAKERS`). Parked
+    /// (retryable), NOT applied — a self-declared "anchor" with a valid VRF
+    /// proof but no stake cannot fast-forward `latest_epoch`. Healthy = 0. A
+    /// sustained climb = a forged-seal probe, or an honest joiner whose ledger
+    /// view has not caught up (cross-check the B7 counter above and the
+    /// `snapshot_bootstrap_*` counters before paging).
+    pub epoch_seal_fastforward_unstaked_deferred_total: AtomicU64,
     /// C2: strictly-sequential epoch seals REJECTED at register-time because their
     /// `previous_seal_hash` does not chain to our canonical tip (forged chain-link /
     /// Byzantine-anchor fork attempt). The authoritative chain-link check runs under
@@ -2528,6 +2712,13 @@ pub struct NodeState {
     /// shortfall. A persistently non-zero value means operators must add
     /// more anchors before this transition kind can finalize.
     pub transitions_orchestrator_skipped_undersized_pool_total: AtomicU64,
+    /// A3 (audit 2026-08-30): count of orchestrator ticks where
+    /// `propose_transition_from_decision` itself returned `Err` (storage read,
+    /// snapshot build, structural validate, or signing failed). Previously a
+    /// bare `warn!` — a proposer that self-rejects every tick was invisible
+    /// off-box. Any sustained non-zero rate here means the genesis authority
+    /// is failing to propose transitions it decided to make.
+    pub transitions_orchestrator_propose_failed_total: AtomicU64,
     /// Gap 4: count of TransitionSeals that flipped to `Finalized` in
     /// `run_transition_tick` — i.e. reached their `effective_epoch` in
     /// `DisputeWindow` status with the veto threshold not met.
@@ -3334,14 +3525,6 @@ pub struct NodeState {
     pub pq_read_limiter: Arc<super::peer_bandwidth::PeerBandwidthLimiter>,
     /// Continuity scoring — tracks unbroken network presence per identity (Protocol §11.35).
     pub continuity: std::sync::Mutex<crate::continuity::ContinuityState>,
-    /// Reincarnation detection — behavioral fingerprinting for Sybil identity resets (Protocol §6.4).
-    pub reincarnation: std::sync::Mutex<crate::reincarnation::ReincarnationState>,
-    /// Read-mostly snapshot of the §6.4 suspect set (2026-08-29 verdict,
-    /// design D): the admission gate reads THIS lock-free, so the clamp is
-    /// deterministic under every load condition; the mutex above stays the
-    /// write-side truth. Published ONLY inside the ingest write-guard that
-    /// runs `check_reincarnation` (publish-after-drop would lose updates).
-    pub reincarnation_suspects: arc_swap::ArcSwap<std::collections::HashSet<String>>,
     /// Monotonic slot-nonce counter for records created by THIS node's identity
     /// (MESH-BFT Phase 3 Stage 1C — slot mutual exclusion).
     ///
@@ -3534,6 +3717,15 @@ pub struct NodeState {
     /// `elara_zone_purge_records_purged_total`. Steady non-zero is normal
     /// during subscription churn; zero on a node that never unsubscribes.
     pub zone_purge_records_purged_total: AtomicU64,
+    /// R14-b (2026-09-02): cumulative `CF_RECORD_BY_ZONE` rows deleted because
+    /// no record exists behind them — by the zone-purge tick and by the GC
+    /// loop's bounded reconcile walk. A one-time rise on a node that ran the
+    /// pre-R14 delete path, then flat; climbing on a fresh node = a NEW leak.
+    pub zone_idx_ghosts_pruned_total: AtomicU64,
+    /// R14-b: index rows examined by the reconcile walk (≤ 5000 per GC cycle).
+    pub zone_idx_reconcile_rows_scanned_total: AtomicU64,
+    /// R14-b: completed end-to-end passes of the reconcile walk over the index.
+    pub zone_idx_reconcile_passes_total: AtomicU64,
     /// Cumulative orphan edges pruned by the
     /// orphan_resolver_loop's high-count safety prune. Increments only when
     /// `orphan_count > 200` after fetch attempts — i.e. the cascade is
@@ -4055,6 +4247,19 @@ impl NodeState {
             admin_snapshot_rebootstrap_total: AtomicU64::new(0),
             super_seal_coverage_failures_total: AtomicU64::new(0),
             super_seals_minted_total: AtomicU64::new(0),
+            gc_seal_floor_suppressed_total: AtomicU64::new(0),
+            gc_seal_floor_suppressed_zones: AtomicU64::new(0),
+            super_seal_extract_err_total: AtomicU64::new(0),
+            zone_subscription_extract_err_total: AtomicU64::new(0),
+            zone_transition_extract_err_total: AtomicU64::new(0),
+            super_seal_buffer_noncontiguous_total: AtomicU64::new(0),
+            super_seal_admission_accepted_total: AtomicU64::new(0),
+            super_seal_admission_deferred_ahead_of_tip_total: AtomicU64::new(0),
+            super_seal_admission_deferred_zone_unknown_total: AtomicU64::new(0),
+            super_seal_admission_deferred_unverifiable_total: AtomicU64::new(0),
+            super_seal_admission_root_mismatch_total: AtomicU64::new(0),
+            super_seal_admission_rejected_shape_total: AtomicU64::new(0),
+            super_seal_admission_chain_link_mismatch_total: AtomicU64::new(0),
             super_seal_creation_attempts_total: AtomicU64::new(0),
             super_seal_creation_failures_total: AtomicU64::new(0),
             super_seal_creation_sign_failures_total: AtomicU64::new(0),
@@ -4076,6 +4281,11 @@ impl NodeState {
             seal_loop_proposals_none_bootstrap_decline_total: AtomicU64::new(0),
             seal_loop_proposals_none_not_in_top_ranks_total: AtomicU64::new(0),
             seal_loop_proposals_none_rank_too_high_total: AtomicU64::new(0),
+            seal_loop_proposals_none_adaptive_pending_total: AtomicU64::new(0),
+            seal_loop_durable_tip_heals_total: AtomicU64::new(0),
+            seal_loop_durable_tip_heal_failed_total: AtomicU64::new(0),
+            seal_loop_durable_heal_siblings_read_total: AtomicU64::new(0),
+            seal_loop_durable_heal_siblings_divergent_total: AtomicU64::new(0),
             gossip_pull_total: AtomicU64::new(0),
             gossip_push_after_pull_announcements_total: AtomicU64::new(0),
             gossip_push_after_pull_at_cap_total: AtomicU64::new(0),
@@ -4122,6 +4332,10 @@ impl NodeState {
             gc_compactions_total: AtomicU64::new(0),
             startup_compactions_total: AtomicU64::new(0),
             gc_pruned_seals_total: AtomicU64::new(0),
+            gc_seal_floor_zones: AtomicU64::new(0),
+            gc_zones_without_seal_floor: AtomicU64::new(0),
+            gc_seal_floor_lag_epochs_max: AtomicU64::new(0),
+            gc_seal_floor_gauges_unix_ts: AtomicU64::new(0),
             gc_pruned_epoch_total: AtomicU64::new(0),
             gc_cycles_total: AtomicU64::new(0),
             gc_last_cycle_duration_ms: AtomicU64::new(0),
@@ -4232,12 +4446,15 @@ impl NodeState {
             last_idle_decay_emit_epoch: AtomicU64::new(0),
             last_xzone_refund_emit_epoch: AtomicU64::new(0),
             last_xzone_reap_emit_epoch: AtomicU64::new(0),
+            last_idle_decay_emit_ts: AtomicU64::new(0),
+            last_xzone_reap_emit_ts: AtomicU64::new(0),
             // Sized to match `seen` (50k): a peer can cache-bust a 5k reject set
             // in ~10 min, evicting legit rejections so they re-trigger full
             // Dilithium3 re-verification on re-push. 50k raises that bar 10×.
             gossip_rejected: std::sync::Mutex::new(SeenSet::new(50_000)),
             gossip_rejected_dedup_total: AtomicU64::new(0),
             gossip_retry: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            super_seal_retry: std::sync::Mutex::new(std::collections::VecDeque::new()),
             gossip_retry_recovered_total: AtomicU64::new(0),
             throttle_refused_dropped_total: AtomicU64::new(0),
             auto_rewards_total: AtomicU64::new(0),
@@ -4283,6 +4500,11 @@ impl NodeState {
             gossip_push_duration: super::server::Histogram::new(super::server::LATENCY_BUCKETS),
             slashing: std::sync::Mutex::new(super::slashing::SlashingMonitor::new()),
             auto_slashes_total: AtomicU64::new(0),
+            slashing_witness_scans_total: AtomicU64::new(0),
+            slashing_witness_keys_read_total: AtomicU64::new(0),
+            slashing_witness_overflow_warn_total: AtomicU64::new(0),
+            slashing_equivocations_detected_total: AtomicU64::new(0),
+            slashing_durable_dedup_hits_total: AtomicU64::new(0),
             fork_heals_total: AtomicU64::new(0),
             peer_divergence_first_seen: tokio::sync::Mutex::new(
                 std::collections::HashMap::new(),
@@ -4330,6 +4552,7 @@ impl NodeState {
             xzone_demoted_seal_covers_claimed_lock_total: AtomicU64::new(0),
             demoted_seal_scan_queue_dropped_total: AtomicU64::new(0),
             epoch_seal_fastforward_vrf_deferred_total: AtomicU64::new(0),
+            epoch_seal_fastforward_unstaked_deferred_total: AtomicU64::new(0),
             epoch_seal_chain_link_rejected_total: AtomicU64::new(0),
             epoch_phantom_tip_suspected_total: AtomicU64::new(0),
             epoch_successor_chainable_total: AtomicU64::new(0),
@@ -4369,6 +4592,7 @@ impl NodeState {
             transitions_proposed_by_orchestrator_total: AtomicU64::new(0),
             transitions_orchestrator_insert_rejected_total: AtomicU64::new(0),
             transitions_orchestrator_skipped_pending_total: AtomicU64::new(0),
+            transitions_orchestrator_propose_failed_total: AtomicU64::new(0),
             transitions_orchestrator_skipped_undersized_pool_total: AtomicU64::new(0),
             xzone_locks_total: AtomicU64::new(0),
             xzone_claims_total: AtomicU64::new(0),
@@ -4523,8 +4747,6 @@ impl NodeState {
                 super::peer_bandwidth::MAX_PEERS,
             )),
             continuity: std::sync::Mutex::new(crate::continuity::ContinuityState::new()),
-            reincarnation: std::sync::Mutex::new(crate::reincarnation::ReincarnationState::new()),
-            reincarnation_suspects: arc_swap::ArcSwap::from_pointee(std::collections::HashSet::new()),
             slot_nonce_self: AtomicU64::new(1),
             // Ceiling 0 → the first `next_slot_nonce` reserves a durable block
             // (unless `bootstrap_slot_nonce` seeds it first from the persisted
@@ -4555,6 +4777,9 @@ impl NodeState {
             rotation_sweep_pending_markers: AtomicU64::new(0),
             zone_purge_queue: std::sync::Mutex::new(std::collections::VecDeque::new()),
             zone_purge_records_purged_total: AtomicU64::new(0),
+            zone_idx_ghosts_pruned_total: AtomicU64::new(0),
+            zone_idx_reconcile_rows_scanned_total: AtomicU64::new(0),
+            zone_idx_reconcile_passes_total: AtomicU64::new(0),
             orphan_resolver_high_count_pruned_total: AtomicU64::new(0),
             orphan_resolver_saturation_skips_total: AtomicU64::new(0),
             balances_response_truncated_total: AtomicU64::new(0),
@@ -4756,6 +4981,25 @@ impl NodeState {
         std::sync::Arc<Vec<(String, u64)>>,
         std::sync::Arc<std::collections::HashMap<crate::ZoneId, Vec<(String, u64)>>>,
     ) {
+        let (flat, by_zone, _) = self.staked_anchor_view_with_set().await;
+        (flat, by_zone)
+    }
+
+    /// [`Self::staked_anchor_view`] plus the id set of the flat list —
+    /// `{id : (id, stake) ∈ flat}`, built in the SAME rebuild from the same
+    /// filtered list, so it is the proposer's `>0` set exactly (sub-`MIN_STAKE`
+    /// slash residue included — LIVENESS-1 symmetry: an anchor the proposer
+    /// still ranks is an anchor the verifier still admits). Read by the seal
+    /// verifier (`network::ingest`) for the R1-X1-V fast-forward stake gate
+    /// (`epoch::SealStakeView`). One accessor call per incoming seal — never a
+    /// second lock acquisition for the set.
+    pub async fn staked_anchor_view_with_set(
+        &self,
+    ) -> (
+        std::sync::Arc<Vec<(String, u64)>>,
+        std::sync::Arc<std::collections::HashMap<crate::ZoneId, Vec<(String, u64)>>>,
+        std::sync::Arc<std::collections::HashSet<String>>,
+    ) {
         use super::RwLockRecover;
         use std::sync::Arc;
         // Read the two lock-free monotonic dimensions once.
@@ -4768,7 +5012,7 @@ impl NodeState {
             let fp = ledger.total_staked;
             if let Some(v) = self.anchor_view.read_recover().as_ref() {
                 if v.key == key && v.fp == fp {
-                    return (Arc::clone(&v.flat), Arc::clone(&v.by_zone));
+                    return (Arc::clone(&v.flat), Arc::clone(&v.by_zone), Arc::clone(&v.staked_set));
                 }
             }
         }
@@ -4804,15 +5048,19 @@ impl NodeState {
                 .or_default()
                 .push((h.clone(), *s));
         }
+        let staked_set: std::collections::HashSet<String> =
+            flat.iter().map(|(id, _)| id.clone()).collect();
         let flat = Arc::new(flat);
         let by_zone = Arc::new(by_zone);
+        let staked_set = Arc::new(staked_set);
         *self.anchor_view.write_recover() = Some(AnchorView {
             key,
             fp,
             flat: Arc::clone(&flat),
             by_zone: Arc::clone(&by_zone),
+            staked_set: Arc::clone(&staked_set),
         });
-        (flat, by_zone)
+        (flat, by_zone, staked_set)
     }
 
     /// Drop the memoized staked-anchor view so the next
@@ -5069,6 +5317,46 @@ impl NodeState {
             index_next,
             "slot_nonce bootstrapped (F-9 durable high-water)"
         );
+    }
+
+    /// Lift the in-memory slot-nonce counter over the CF_SLOT_INDEX high-water
+    /// for THIS node's account, after the genesis bootstrap pull has stored
+    /// self-authored records with their slot rows (R2, 2026-09-02;
+    /// `gossip::bootstrap_store_record`). `bootstrap_slot_nonce` ran at
+    /// startup against an empty index and is not re-callable (plain stores);
+    /// this is monotone (`fetch_max`) and never lowers the counter.
+    ///
+    /// Counter ONLY: the durable F-9 ceiling (`slot_nonce_durable_ceiling`) is
+    /// deliberately untouched — the next `next_slot_nonce` that crosses the old
+    /// ceiling fsyncs a fresh block above the lifted counter, so the
+    /// crash-safety invariant (never reuse a nonce below the durable
+    /// high-water) holds without a second fsync here. Returns the counter's
+    /// value after the reseed. Cost: one bounded prefix scan of the node's own
+    /// slot rows.
+    pub fn reseed_slot_nonce_from_index(&self) -> u64 {
+        use std::sync::atomic::Ordering;
+        let account_hash = crate::crypto::hash::sha3_256_hex(&self.identity.public_key);
+        match self.rocks.max_slot_nonce_for_account(&account_hash) {
+            Ok(Some(max_nonce)) => {
+                let index_next = max_nonce.saturating_add(1);
+                let before = self.slot_nonce_self.fetch_max(index_next, Ordering::AcqRel);
+                if index_next > before {
+                    tracing::info!(
+                        from = before,
+                        to = index_next,
+                        "slot_nonce reseeded over the CF_SLOT_INDEX high-water (R2 post-bootstrap)"
+                    );
+                    index_next
+                } else {
+                    before
+                }
+            }
+            Ok(None) => self.slot_nonce_self.load(Ordering::Acquire),
+            Err(e) => {
+                tracing::warn!(error = %e, "slot_nonce reseed: CF_SLOT_INDEX scan failed; counter unchanged");
+                self.slot_nonce_self.load(Ordering::Acquire)
+            }
+        }
     }
 
     /// Create a signed beat ledger record with a freshly-allocated slot nonce.
@@ -5592,14 +5880,13 @@ impl NodeState {
             // orphan for its (zone, epoch)? Plus capture canonical seal_id
             // for the weight comparison.
             let (is_orphan, canonical_id): (bool, Option<String>) = {
-                if let Ok(e) = self.epoch.read() {
-                    (
-                        e.is_orphan_sibling(&parsed.zone, parsed.epoch_number, record_id),
-                        e.latest_seal_id.get(&parsed.zone).cloned(),
-                    )
-                } else {
-                    (false, None)
-                }
+                // R1-X5 (2026-09-02): read_recover — never skip on poison.
+                use crate::network::RwLockRecover;
+                let e = self.epoch.read_recover();
+                (
+                    e.is_orphan_sibling(&parsed.zone, parsed.epoch_number, record_id),
+                    e.latest_seal_id.get(&parsed.zone).cloned(),
+                )
             };
             if is_orphan {
                 // Step 2 — weight comparison.
@@ -5614,10 +5901,10 @@ impl NodeState {
                 };
                 if orphan_weight > canonical_weight {
                     // Step 3 — commit the swap.
-                    let promoted = if let Ok(mut e) = self.epoch.write() {
+                    let promoted = {
+                        use crate::network::RwLockRecover;
+                        let mut e = self.epoch.write_recover();
                         e.promote_orphan_to_canonical(&parsed, record_id, record_hash)
-                    } else {
-                        false
                     };
                     if promoted {
                         tracing::info!(
@@ -6438,8 +6725,12 @@ impl NodeState {
         }
     }
 
-    /// Insert a record into RocksDB.
-    pub fn insert_record_both(&self, record: &ValidationRecord) -> crate::errors::Result<String> {
+    /// TEST-ONLY: insert a record straight into RocksDB, bypassing the ingest
+    /// pipeline entirely (no validation, no slot claim, no DISC-5 / equivocation
+    /// witness / slash-offense side-writes). Production code goes through
+    /// `ingest::insert_record_inner`; this exists so fixtures can seed storage.
+    #[cfg(test)]
+    pub(crate) fn insert_record_both(&self, record: &ValidationRecord) -> crate::errors::Result<String> {
         self.rocks.put_record(&record.id, record)?;
         Ok(record.id.clone())
     }
@@ -6928,6 +7219,15 @@ pub fn rebuild_delegations(storage: &dyn Storage) -> DelegationRegistry {
 /// for the lifetime of the test.
 #[cfg(test)]
 pub(crate) fn build_test_node_state() -> std::sync::Arc<NodeState> {
+    build_test_node_state_with(|_| {})
+}
+
+/// `build_test_node_state` with a hook to tweak the `NodeConfig` before the
+/// state is built (R1-X1 Commit 3: the Light-profile admission test).
+#[cfg(test)]
+pub(crate) fn build_test_node_state_with(
+    tweak: impl FnOnce(&mut crate::network::config::NodeConfig),
+) -> std::sync::Arc<NodeState> {
     use crate::identity::{CryptoProfile, EntityType, Identity};
     use crate::network::config::NodeConfig;
     use crate::network::witness::WitnessManager;
@@ -6935,7 +7235,7 @@ pub(crate) fn build_test_node_state() -> std::sync::Arc<NodeState> {
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let data_dir = tmp.path().to_path_buf();
-    let config = NodeConfig {
+    let mut config = NodeConfig {
         data_dir: data_dir.clone(),
         identity_path: data_dir.join("identity.json"),
         db_path: data_dir.join("elara.db"),
@@ -6952,6 +7252,7 @@ pub(crate) fn build_test_node_state() -> std::sync::Arc<NodeState> {
             "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff".into(),
         ..Default::default()
     };
+    tweak(&mut config);
 
     let identity = Identity::generate(EntityType::Device, CryptoProfile::ProfileB)
         .expect("generate identity");
@@ -8067,6 +8368,64 @@ mod tests {
         let mut bz: Vec<(String, u64)> = by_zone6.values().flatten().cloned().collect();
         bz.sort();
         assert_eq!(bz, sorted(&flat6), "by_zone partitions exactly the flat set");
+    }
+
+    /// R1-X1-V (2026-09-02): the verifier's fast-forward stake gate reads the
+    /// `staked_set` half of the SAME memoized view the proposer ranks over.
+    /// Pins: (1) the set is exactly the ids of `flat` — the proposer's `>0`
+    /// set, sub-`MIN_STAKE` residue INCLUDED (a slashed anchor the proposer
+    /// still ranks must still be admissible on the verifier side — LIVENESS-1
+    /// symmetry); (2) a cache hit hands back the same Arc; (3) the two-tuple
+    /// accessor is a pure projection of the three-tuple one; (4) a
+    /// stake-mutation signal rebuilds it.
+    #[tokio::test]
+    async fn r1x1v_stake_set_equals_proposer_flat_ids() {
+        use crate::crypto::hash::sha3_256_hex;
+        use std::sync::Arc;
+        let state = test_node_state(None);
+        let a = sha3_256_hex(b"r1x1v-anchor-a");
+        let b = sha3_256_hex(b"r1x1v-anchor-b");
+        let c = sha3_256_hex(b"r1x1v-anchor-c-zero"); // anchor, staked 0 → excluded
+        let d = sha3_256_hex(b"r1x1v-staker-d"); // staked, NOT an anchor → excluded
+        let s = sha3_256_hex(b"r1x1v-anchor-s-residue"); // anchor, sub-MIN_STAKE residue → INCLUDED
+        for id in [&a, &b, &c, &s] {
+            state.rocks.store_public_key_anchor(id, b"pk").unwrap();
+        }
+        {
+            let mut l = state.ledger.write().await;
+            l.accounts.entry(a.clone()).or_default().staked = 100;
+            l.accounts.entry(b.clone()).or_default().staked = 200;
+            l.accounts.entry(c.clone()).or_default().staked = 0;
+            l.accounts.entry(d.clone()).or_default().staked = 500;
+            l.accounts.entry(s.clone()).or_default().staked = 40;
+        }
+        const {
+            assert!(40 < crate::accounting::types::MIN_STAKE, "fixture: s must be sub-MIN_STAKE residue");
+        };
+        let (flat, _, set) = state.staked_anchor_view_with_set().await;
+        let flat_ids: std::collections::HashSet<String> = flat.iter().map(|(id, _)| id.clone()).collect();
+        assert_eq!(*set, flat_ids, "staked_set must be exactly the ids of the proposer's flat list");
+        assert_eq!(set.len(), 3);
+        assert!(set.contains(&a) && set.contains(&b) && set.contains(&s));
+        assert!(!set.contains(&c), "zero-stake anchor excluded");
+        assert!(!set.contains(&d), "non-anchor staker excluded");
+        // (2) cache hit → same Arc
+        let (_, _, set2) = state.staked_anchor_view_with_set().await;
+        assert!(Arc::ptr_eq(&set, &set2), "cache hit must hand back the same set");
+        // (3) the two-tuple accessor projects the same view
+        let (flat_b, _) = state.staked_anchor_view().await;
+        assert!(Arc::ptr_eq(&flat, &flat_b));
+        // (4) stake mutation (s fully slashed) → rebuild reflects it
+        {
+            let mut l = state.ledger.write().await;
+            l.accounts.get_mut(&s).unwrap().staked = 0;
+            l.stake_mutation_seq = l.stake_mutation_seq.wrapping_add(1);
+        }
+        let (flat3, _, set3) = state.staked_anchor_view_with_set().await;
+        assert!(!Arc::ptr_eq(&set, &set3), "seq bump must rebuild");
+        assert!(!set3.contains(&s), "fully slashed anchor leaves the set");
+        let flat3_ids: std::collections::HashSet<String> = flat3.iter().map(|(id, _)| id.clone()).collect();
+        assert_eq!(*set3, flat3_ids);
     }
 
     /// Gate S1 #3 (internal design notes): `staked_anchor_view`
@@ -10591,12 +10950,15 @@ mod tests {
 
     #[test]
     fn ops189_reason_subcounters_sum_to_none_parent() {
-        // Conservation invariant: the four reason sub-counters MUST sum to
+        // Conservation invariant: the five reason sub-counters MUST sum to
         // the parent `seal_loop_proposals_none_total` (modulo the parent
         // being bumped on every None and the reason being bumped on the
         // same call). The seal-loop match arm bumps both in the same
-        // execution path; if a future change adds a 5th reason and forgets
+        // execution path; if a future change adds a 6th reason and forgets
         // to bump the parent, or vice versa, this test catches the drift.
+        // (The 5th, `adaptive_pending`, is the NL-1 Step 2 gate — it bumps
+        // through the identical parent+reason path, so it belongs here even
+        // though it is only ever produced when `use_adaptive_seal_gate` is on.)
         let state = test_node_state(None);
         // Simulate the seal-loop's atomic update pattern: every None hits
         // exactly one reason counter AND the parent.
@@ -10605,6 +10967,7 @@ mod tests {
             (5u64, &state.seal_loop_proposals_none_bootstrap_decline_total),
             (7u64, &state.seal_loop_proposals_none_not_in_top_ranks_total),
             (2u64, &state.seal_loop_proposals_none_rank_too_high_total),
+            (11u64, &state.seal_loop_proposals_none_adaptive_pending_total),
         ];
         let mut total = 0u64;
         for (n, counter) in bumps {
@@ -10616,7 +10979,8 @@ mod tests {
         let sum = state.seal_loop_proposals_none_already_sealed_total.load(std::sync::atomic::Ordering::Relaxed)
             + state.seal_loop_proposals_none_bootstrap_decline_total.load(std::sync::atomic::Ordering::Relaxed)
             + state.seal_loop_proposals_none_not_in_top_ranks_total.load(std::sync::atomic::Ordering::Relaxed)
-            + state.seal_loop_proposals_none_rank_too_high_total.load(std::sync::atomic::Ordering::Relaxed);
+            + state.seal_loop_proposals_none_rank_too_high_total.load(std::sync::atomic::Ordering::Relaxed)
+            + state.seal_loop_proposals_none_adaptive_pending_total.load(std::sync::atomic::Ordering::Relaxed);
         assert_eq!(parent, total, "parent counter must reflect all bumps");
         assert_eq!(sum, parent, "sum of reason sub-counters must equal parent — drift = bookkeeping bug");
     }
@@ -10630,6 +10994,62 @@ mod tests {
     // counter, `cap fired` was indistinguishable from `cycle naturally
     // short` from a single duration gauge alone. These tests pin the boot
     // contract + the drain-mode signature + the export-route inclusion.
+
+    /// R1 (2026-09-02): the seal-floor gauges and their refresh stamp boot
+    /// at 0 (= never computed) and are refreshed only by
+    /// `gc::refresh_seal_floor_gauges`, never by ingest.
+    #[test]
+    fn r1_seal_floor_gauges_start_at_zero() {
+        let state = test_node_state(None);
+        use std::sync::atomic::Ordering::Relaxed;
+        assert_eq!(state.gc_seal_floor_zones.load(Relaxed), 0);
+        assert_eq!(state.gc_zones_without_seal_floor.load(Relaxed), 0);
+        assert_eq!(state.gc_seal_floor_lag_epochs_max.load(Relaxed), 0);
+        assert_eq!(state.gc_seal_floor_gauges_unix_ts.load(Relaxed), 0);
+    }
+
+    /// R1 gauge fix (2026-09-02): the seal-floor gauges are refreshed from
+    /// the RAM epoch maps on demand — the /metrics scrape path is a cache
+    /// hit within `SEAL_FLOOR_GAUGES_MAX_AGE_SECS`, the GC-cycle path
+    /// (max age 0) always walks — so a node never reports 0/0/0 while a
+    /// zone has a live tip, whatever its GC interval is.
+    #[test]
+    fn r1_seal_floor_gauges_refresh_on_demand_from_ram() {
+        use crate::network::RwLockRecover;
+        use crate::network::gc::refresh_seal_floor_gauges;
+        use std::sync::atomic::Ordering::Relaxed;
+        let state = test_node_state(None);
+        let z0 = crate::ZoneId::from_legacy(0);
+        let z1 = crate::ZoneId::from_legacy(1);
+        {
+            let mut ep = state.epoch.write_recover();
+            ep.latest_epoch.insert(z0.clone(), 103_816);
+            ep.latest_super_seal
+                .insert(z0.clone(), (103_808, "ss".to_string(), [0u8; 32], [0u8; 32]));
+        }
+        let live = state.epoch.read_recover().latest_epoch.len() as u64;
+        // Never refreshed yet: the scrape path walks.
+        assert!(refresh_seal_floor_gauges(&state, 60));
+        assert_eq!(state.gc_seal_floor_zones.load(Relaxed), 1);
+        assert_eq!(state.gc_zones_without_seal_floor.load(Relaxed), live - 1);
+        assert_eq!(state.gc_seal_floor_lag_epochs_max.load(Relaxed), 8);
+        let ts = state.gc_seal_floor_gauges_unix_ts.load(Relaxed);
+        assert!(ts > 0, "a refresh must stamp its time");
+        // A second zone with a tip and no floor appears.
+        {
+            let mut ep = state.epoch.write_recover();
+            ep.latest_epoch.insert(z1.clone(), 7);
+        }
+        // Within the max-age window the scrape path is a cache hit: no walk.
+        assert!(!refresh_seal_floor_gauges(&state, 60));
+        assert_eq!(state.gc_zones_without_seal_floor.load(Relaxed), live - 1);
+        // The GC cycle always walks.
+        assert!(refresh_seal_floor_gauges(&state, 0));
+        assert_eq!(state.gc_seal_floor_zones.load(Relaxed), 1);
+        assert_eq!(state.gc_zones_without_seal_floor.load(Relaxed), live);
+        assert_eq!(state.gc_seal_floor_lag_epochs_max.load(Relaxed), 8);
+        assert!(state.gc_seal_floor_gauges_unix_ts.load(Relaxed) >= ts);
+    }
 
     #[test]
     fn ops22_gc_scan_capped_total_starts_at_zero() {
@@ -11028,6 +11448,42 @@ mod tests {
         state.bootstrap_slot_nonce();
         assert_eq!(state.next_slot_nonce(), 1);
         assert_eq!(state.next_slot_nonce(), 2);
+    }
+
+    /// R2: the post-bootstrap reseed lifts the counter over the index
+    /// high-water, is monotone (never lowers), and leaves the F-9 durable
+    /// ceiling to the next allocation.
+    #[test]
+    fn r2_reseed_slot_nonce_lifts_over_index_and_never_lowers() {
+        use std::sync::atomic::Ordering;
+        let state = build_test_node_state();
+        let account = crate::crypto::hash::sha3_256_hex(&state.identity.public_key);
+        let plant = |nonce: u64| {
+            state
+                .rocks
+                .put_cf_raw(
+                    crate::storage::rocks::CF_SLOT_INDEX,
+                    format!("{account}:{nonce:016x}").as_bytes(),
+                    b"rid",
+                )
+                .unwrap();
+        };
+        // Empty index: unchanged (fresh node stays at 1).
+        assert_eq!(state.reseed_slot_nonce_from_index(), 1);
+        // A self row at nonce 40 → counter 41; the next allocation hands out
+        // 41 and the ceiling has moved above it (fresh durable block).
+        plant(40);
+        assert_eq!(state.reseed_slot_nonce_from_index(), 41);
+        assert_eq!(state.next_slot_nonce(), 41);
+        assert!(state.slot_nonce_durable_ceiling.load(Ordering::Acquire) > 41);
+        // Never lowers: hand out 70 more, then an index row BELOW the counter.
+        for _ in 0..70 {
+            state.next_slot_nonce();
+        }
+        let before = state.slot_nonce_self.load(Ordering::Acquire);
+        plant(50);
+        assert_eq!(state.reseed_slot_nonce_from_index(), before);
+        assert_eq!(state.next_slot_nonce(), before);
     }
 
     // ── F-9: durable self-nonce high-water (power-loss reuse prevention) ──────

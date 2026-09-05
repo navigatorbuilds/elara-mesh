@@ -117,7 +117,7 @@ pub async fn handle_probe_endpoint(
 /// listener. Every entry is node-local state — host resources (`listen_addr`,
 /// `system_load`, `rss_mb`, `memory_pressure`, `disk_usage`), this node's
 /// operational counters (`gc_pruned_total`, `auto_slashes_total`), optional
-/// higher-layer counters (`continuity_identities`, `reincarnation_*`),
+/// higher-layer counters (`continuity_identities`),
 /// real-time per-zone timing (`zone_timing`), committee composition
 /// (`committees`), peer-bandwidth/mesh-density (`peer_bandwidth`,
 /// `pq_read_limiter`), and this
@@ -145,9 +145,6 @@ const STATUS_LOOPBACK_ONLY_FIELDS: &[&str] = &[
     "gc_pruned_total",
     "auto_slashes_total",
     "continuity_identities",
-    "reincarnation_fingerprints",
-    "reincarnation_abandoned",
-    "reincarnation_candidates",
     // Build identity — loopback-only, matching the `/version` gate (86d9bc32).
     // The live `git_sha` is the PRIVATE-repo HEAD (absent from the curated public
     // mirror, so it reveals the private upstream + exact binary for targeting);
@@ -442,9 +439,6 @@ pub async fn status(
         "committees": committees_json,
         "latest_seal_anchor": latest_seal_anchor,
         "continuity_identities": state.continuity.try_lock().map(|c| c.identity_count()).unwrap_or(0),
-        "reincarnation_fingerprints": state.reincarnation.try_lock().map(|r| r.fingerprint_count()).unwrap_or(0),
-        "reincarnation_abandoned": state.reincarnation.try_lock().map(|r| r.abandoned_count()).unwrap_or(0),
-        "reincarnation_candidates": state.reincarnation.try_lock().map(|r| r.candidate_count()).unwrap_or(0),
         // Temporal proprioception: per-zone adaptive intervals (EMERGENT-MIND §4)
         "zone_timing": zone_timing,
         // Zone count + pending transition
@@ -2794,8 +2788,8 @@ mod tests {
         // Everything in STATUS_LOOPBACK_ONLY_FIELDS is node-local state — host
         // resources (listen_addr/system_load/rss_mb/memory_pressure/disk_usage),
         // this node's operational counters (gc_pruned_total/auto_slashes_total),
-        // optional higher-layer counters (continuity_identities/
-        // reincarnation_*), real-time per-zone timing (zone_timing), committee
+        // optional higher-layer counters (continuity_identities),
+        // real-time per-zone timing (zone_timing), committee
         // composition (committees), peer-bandwidth/mesh-density (peer_bandwidth),
         // and the zone subscription set (subscribed_zones) — none derivable from
         // the shared chain. A non-loopback caller MUST see every one of these keys

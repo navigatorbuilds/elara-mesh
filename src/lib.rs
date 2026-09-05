@@ -45,7 +45,6 @@ pub mod operations;
 // `verify_core`, so the wasm build can grow receipt support without drift.
 pub use elara_record::receipt;
 pub use elara_record::record;
-pub mod reincarnation;
 pub mod seed_vault;
 pub mod service_install;
 // silence.rs REMOVED — pausing zones hurts availability with no benefit.

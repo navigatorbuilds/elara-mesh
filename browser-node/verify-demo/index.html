@@ -103,13 +103,13 @@
     this page — a record, an <code>.elara-receipt</code>, trust pins, or a
     mandate bundle (or <span class="droplink" id="pickfile">choose a file</span>).
     The page reads its shape, puts it in the right box below, and verifies it
-    automatically. Drop a receipt and its pins file together and both land.
+    automatically. Drop a proof and its pins file together and both land.
   </p>
   <p class="lede" style="margin-top:-0.9rem">
     This box checks the record's own integrity — structure, identity binding, and
     the post-quantum signature. To check a record <em>against the chain</em> —
     epoch seal, inclusion, a drand time beacon — paste a
-    <strong>receipt</strong> in the next section, or use the
+    <strong>proof</strong> in the next section, or use the
     <code>elara-verify</code> CLI (<code>--inclusion</code> / <code>--seal</code> /
     <code>--anchor</code>; external anchor proofs are CLI-only).
   </p>
@@ -136,24 +136,24 @@
 
   <h1>…the <span class="tag">whole chain, one file</span></h1>
   <p class="lede">
-    A <strong>receipt</strong> (<code>.elara-receipt</code>) bundles the evidence
+    A <strong>proof</strong> (<code>.elara-receipt</code>) bundles the evidence
     for one verification — the signed record, the epoch seal, inclusion and
     account proofs — so "check it yourself" is <strong>one file</strong>. Paste
     it and the same shared core grades every leg <em>and the cryptographic links
     between them</em>, offline: post-quantum signatures, seal commitments, and a
     drand not-before beacon whose BLS signature is verified <strong>in your
     browser</strong> against the pinned League-of-Entropy key. (External
-    existed-by anchor proofs don't ride in receipts — that leg is
+    existed-by anchor proofs don't ride in proofs — that leg is
     graded by the CLI, and shows here as an honest
     <span style="color:var(--partial)">⚠</span>.)
   </p>
   <p class="lede" style="margin-top:-0.9rem">
-    <strong>Trust pins come from you, never from the receipt.</strong> A receipt
+    <strong>Trust pins come from you, never from the proof.</strong> A proof
     that vouched for its own trust root would prove nothing, so without a pinned
     anchor key the seal grades
     <span style="color:var(--partial)">⚠&nbsp;PARTIAL</span> — honestly. The
     sample button — and the "verify this" links on the
-    <a href="../receipts.html">receipts page</a> — fill the pin with the repo's
+    <a href="../receipts.html">proof log</a> — fill the pin with the repo's
     zone-0 anchor key for the demo; in real use you obtain that key from a
     source you already trust. Try "Drop the pins" to watch the verdict
     downgrade rather than lie.
@@ -164,7 +164,7 @@
   <textarea id="rpins" class="pins" spellcheck="false" placeholder='Trust pins, optional JSON — {"trusted_anchor": ["<anchor pubkey hex from a source YOU trust>"], "expected_hash": "…", "expect_root": "…", "expect_identity": "…"}'></textarea>
   <div class="row">
     <button id="rverify" disabled>Loading verifier…</button>
-    <button id="r-sample" class="ghost" type="button">Load sample receipt</button>
+    <button id="r-sample" class="ghost" type="button">Load sample proof</button>
     <button id="r-nopins" class="ghost" type="button">Drop the pins</button>
     <button id="rclear" class="ghost" type="button">Clear</button>
   </div>
@@ -270,7 +270,7 @@
     verifyBtn.disabled = false;
     verifyBtn.textContent = "Verify";
     rverifyBtn.disabled = false;
-    rverifyBtn.textContent = "Verify receipt";
+    rverifyBtn.textContent = "Verify proof";
     mverifyBtn.disabled = false;
     mverifyBtn.textContent = "Check authorization";
   }).catch((e) => {
@@ -427,7 +427,7 @@
     const note = $("act-note");
     const section = $("rinput");
     if (!/^[0-9a-f][0-9a-f-]{6,62}[0-9a-f]$/.test(act)) {
-      note.textContent = "The ?act= link id has an unexpected format — nothing was loaded. Paste a receipt manually below.";
+      note.textContent = "The ?act= link id has an unexpected format — nothing was loaded. Paste a proof manually below.";
       note.style.display = "block";
       return;
     }
@@ -439,14 +439,14 @@
       $("rinput").value = rec;
       $("rpins").value = pins;
       rreset();
-      note.innerHTML = "Loaded the maintainer act <code></code> from this site's receipts feed — " +
-        "<strong>nothing is verified yet</strong>. Press <strong>Verify receipt</strong> and read the verdict; " +
+      note.innerHTML = "Loaded the maintainer act <code></code> from this site's proof log — " +
+        "<strong>nothing is verified yet</strong>. Press <strong>Verify proof</strong> and read the verdict; " +
         "the check runs in your browser only.";
       note.querySelector("code").textContent = act;
       note.style.display = "block";
       section.scrollIntoView({ behavior: "auto", block: "center" });
     } catch (e) {
-      note.textContent = "Could not load that act's receipt from this site (it may have left the newest-acts window). Paste one manually, or fetch it from any mesh node.";
+      note.textContent = "Could not load that act's proof from this site (it may have left the newest-acts window). Paste one manually, or fetch it from any mesh node.";
       note.style.display = "block";
     }
   })();

@@ -15,10 +15,11 @@
 //!   @spec Protocol §11.33
 //!
 //! (Corrected 2026-07-29: the `@spec` line read §11.35 while the header above
-//! and the live call site — `ingest.rs`, "Continuity + Reincarnation tracking
-//! (Protocol §11.33, §6.4)" — both say §11.33. §11.35 is *Cognitive Checkpoint
-//! Integrity*, a Layer-3 elara-core concern marked N/A for this repo, so the
-//! generated spec-map pointed every continuity change at the wrong section.)
+//! and the live call site — `ingest.rs`, "Continuity tracking (Protocol §11.33)"
+//! (the §6.4 reincarnation half was removed 2026-08-30) — both say §11.33.
+//! §11.35 is *Cognitive Checkpoint Integrity*, a Layer-3 elara-core concern
+//! marked N/A for this repo, so the generated spec-map pointed every continuity
+//! change at the wrong section.)
 
 use std::collections::HashMap;
 

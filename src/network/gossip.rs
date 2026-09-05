@@ -285,6 +285,15 @@ pub(crate) fn is_retryable_ingest_rejection(err_str: &str) -> bool {
         // seal never verifies and ages out of the bounded retry buffer — it is NOT
         // permanent-cached, keeping the honest-joiner self-heal path open.
         || err_str.contains("VRF-unverifiable")
+        // R1-X1-V (2026-09-02): the fast-forward STAKE gate's deferral — the
+        // creator is not admissible by the local staked-anchor set. Same
+        // contract as B7: an honest joiner's ledger view catches up and the
+        // retry verifies; a forged seal never becomes admissible and ages out.
+        // Defence-in-depth here: seal-class rejects are disposed by
+        // `dispose_seal_ingest_failure` BEFORE `should_permanent_reject` on
+        // every ingress path, so this clause is the acceptance-criterion pin
+        // plus the guard for the non-seal consumers of this classifier.
+        || err_str.contains("stake-unverifiable")
 }
 
 /// B6 fork-safety linchpin: decide whether a rejected gossip-push record id may
@@ -375,7 +384,9 @@ pub(crate) fn is_stale_seal_record(
     rec: &ValidationRecord,
     epoch_state: &super::epoch::EpochState,
 ) -> bool {
-    if rec.metadata.get(EPOCH_OP_KEY).and_then(|v| v.as_str()) != Some("seal") {
+    if rec.metadata.get(EPOCH_OP_KEY).and_then(|v| v.as_str())
+        != Some(crate::network::epoch::EPOCH_OP_SEAL)
+    {
         return false;
     }
     let seal_epoch = rec
@@ -468,6 +479,8 @@ pub(crate) struct SealRejectProbe {
     pub id: String,
     pub is_epoch_op: bool,
     pub is_seal_op: bool,
+    /// R1-X1 Commit 3: `epoch_op == super_seal` — routed to its own lane.
+    pub is_super_seal_op: bool,
     pub seal_epoch: u64,
     pub zone_str: String,
 }
@@ -476,7 +489,10 @@ pub(crate) fn seal_reject_probe(rec: &ValidationRecord) -> SealRejectProbe {
     SealRejectProbe {
         id: rec.id.clone(),
         is_epoch_op: rec.metadata.contains_key(EPOCH_OP_KEY),
-        is_seal_op: rec.metadata.get(EPOCH_OP_KEY).and_then(|v| v.as_str()) == Some("seal"),
+        is_seal_op: rec.metadata.get(EPOCH_OP_KEY).and_then(|v| v.as_str())
+            == Some(crate::network::epoch::EPOCH_OP_SEAL),
+        is_super_seal_op: rec.metadata.get(EPOCH_OP_KEY).and_then(|v| v.as_str())
+            == Some(crate::network::epoch::EPOCH_OP_SUPER_SEAL),
         seal_epoch: rec
             .metadata
             .get("epoch_number")
@@ -499,7 +515,10 @@ pub(crate) fn seal_reject_probe(rec: &ValidationRecord) -> SealRejectProbe {
 /// - everything else — retryable AND non-retryable/malformed alike — →
 ///   bounded attempt-capped park (ages out at GOSSIP_RETRY_MAX_ATTEMPTS;
 ///   a distinct-id flood evicts oldest FIFO entries, which is a latency
-///   degrade, not a loss: pull cursors re-offer evictees).
+///   degrade, not a loss: pull cursors re-offer evictees);
+/// - super-seals (R1-X1 Commit 3) → their OWN bounded lane (S1), never
+///   stale-declined: a transient A3/A4/A5 defer is re-offered until the tip
+///   catches up; a permanent shape reject is embargoed by the drain (B5).
 ///
 /// Returns true iff the record was seal-class and disposed here; false =
 /// caller keeps its legacy non-seal logic (B6 `should_permanent_reject`
@@ -511,6 +530,18 @@ pub(crate) fn dispose_seal_ingest_failure_probed(
 ) -> bool {
     if !probe.is_epoch_op {
         return false;
+    }
+    if probe.is_super_seal_op {
+        // R1-X1 Commit 3: a super-seal is never "stale" (a boundary is a
+        // boundary forever) and never enters `declined_seal_ids`. Transient
+        // A3/A4/A5 defers park in the super-seal lane (own cap — never
+        // evicting epoch seals). A permanent A1/A2 shape reject lands here
+        // too (the probe cannot see the error); the drain's non-retryable
+        // re-fail arm embargoes it in `gossip_rejected` (B5).
+        if attempts < GOSSIP_RETRY_MAX_ATTEMPTS {
+            park_retryable_in_lane(state, ParkLane::SuperSeal, &probe.id, attempts);
+        }
+        return true;
     }
     let stale = probe.is_seal_op && {
         let local = state
@@ -565,18 +596,72 @@ pub(crate) const GOSSIP_RETRY_CAP: usize = 1024;
 pub(crate) const GOSSIP_RETRY_MAX_ATTEMPTS: u8 = 20;
 /// Records re-fetched per timestamp_pull cycle.
 const GOSSIP_RETRY_DRAIN_PER_CYCLE: usize = 16;
+/// R1-X1 Commit 3 (S1): super-seal lane cap. One super-seal per zone per 64
+/// epochs, so 256 parked ids cover a 4-zone testnet's whole history or a
+/// 256-zone burst of ahead-of-tip arrivals; FIFO-evicted beyond (pull cursors
+/// re-offer evictees — a super-seal is re-offered forever, never declined).
+pub(crate) const SUPER_SEAL_RETRY_CAP: usize = 256;
+/// Super-seals re-fetched per timestamp_pull cycle. Each re-fetch may cost up
+/// to 64 rocks reads on the A4 derivation, so the drain is deliberately
+/// narrower than the seal lane's.
+const SUPER_SEAL_RETRY_DRAIN_PER_CYCLE: usize = 8;
 
-/// Park a record id (attempts seeded) for targeted re-fetch. Dedup by id;
-/// FIFO-evict at cap. O(queue) scan is fine at cap ≤ 1024.
-pub(crate) fn park_retryable_with_attempts(state: &NodeState, record_id: &str, attempts: u8) {
-    let mut q = state.gossip_retry.lock_recover();
+/// R1-X1 Commit 3 (S1): the two park lanes. Epoch seals and super-seals park
+/// in SEPARATE bounded queues so an ahead-of-tip super-seal burst can never
+/// FIFO-evict parked epoch seals, nor the reverse. Attempt aging
+/// (`GOSSIP_RETRY_MAX_ATTEMPTS`) is shared.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ParkLane {
+    Seal,
+    SuperSeal,
+}
+
+impl ParkLane {
+    fn queue(self, state: &NodeState) -> &std::sync::Mutex<std::collections::VecDeque<(String, u8)>> {
+        match self {
+            ParkLane::Seal => &state.gossip_retry,
+            ParkLane::SuperSeal => &state.super_seal_retry,
+        }
+    }
+
+    pub(crate) const fn cap(self) -> usize {
+        match self {
+            ParkLane::Seal => GOSSIP_RETRY_CAP,
+            ParkLane::SuperSeal => SUPER_SEAL_RETRY_CAP,
+        }
+    }
+
+    const fn drain_per_cycle(self) -> usize {
+        match self {
+            ParkLane::Seal => GOSSIP_RETRY_DRAIN_PER_CYCLE,
+            ParkLane::SuperSeal => SUPER_SEAL_RETRY_DRAIN_PER_CYCLE,
+        }
+    }
+
+    const fn name(self) -> &'static str {
+        match self {
+            ParkLane::Seal => "seal",
+            ParkLane::SuperSeal => "super-seal",
+        }
+    }
+}
+
+/// Park a record id (attempts seeded) in `lane` for targeted re-fetch. Dedup
+/// by id; FIFO-evict at the lane's cap. O(queue) scan is fine at cap ≤ 1024.
+pub(crate) fn park_retryable_in_lane(state: &NodeState, lane: ParkLane, record_id: &str, attempts: u8) {
+    let mut q = lane.queue(state).lock_recover();
     if q.iter().any(|(id, _)| id == record_id) {
         return;
     }
-    if q.len() >= GOSSIP_RETRY_CAP {
+    if q.len() >= lane.cap() {
         q.pop_front();
     }
     q.push_back((record_id.to_string(), attempts));
+}
+
+/// Park a record id (attempts seeded) in the seal/general lane.
+pub(crate) fn park_retryable_with_attempts(state: &NodeState, record_id: &str, attempts: u8) {
+    park_retryable_in_lane(state, ParkLane::Seal, record_id, attempts);
 }
 
 /// Park a freshly-rejected record id for re-fetch.
@@ -584,24 +669,38 @@ pub(crate) fn park_retryable(state: &NodeState, record_id: &str) {
     park_retryable_with_attempts(state, record_id, 0);
 }
 
-/// Drain up to GOSSIP_RETRY_DRAIN_PER_CYCLE parked ids and re-fetch them by
+/// Drain both park lanes (seal/general first, then super-seals) once per
+/// timestamp_pull cycle. Returns the total recovered.
+async fn retry_parked_records(state: &Arc<NodeState>, base_url: &str) -> usize {
+    let seals = retry_parked_lane(state, base_url, ParkLane::Seal).await;
+    let super_seals = retry_parked_lane(state, base_url, ParkLane::SuperSeal).await;
+    seals.saturating_add(super_seals)
+}
+
+/// Drain up to the lane's per-cycle budget of parked ids and re-fetch them by
 /// id from `base_url`'s PQ port. Ingest success or a permanent rejection
 /// drops the id; a retryable rejection or fetch miss re-parks with
 /// attempts+1 (dropped at GOSSIP_RETRY_MAX_ATTEMPTS). Transport failure
 /// re-parks untouched (another peer's cycle will drain). Returns recovered.
-async fn retry_parked_records(state: &Arc<NodeState>, base_url: &str) -> usize {
+///
+/// Lane difference (R1-X1 Commit 3, B5): in the super-seal lane a
+/// NON-retryable re-fail (an A1/A2 shape reject, or any other permanent
+/// error) is embargoed in `gossip_rejected` instead of being re-parked. The
+/// seal lane keeps its 8b never-embargo rule (a parked seal that went stale
+/// must age out, not graduate into the permanent set).
+async fn retry_parked_lane(state: &Arc<NodeState>, base_url: &str, lane: ParkLane) -> usize {
     let batch: Vec<(String, u8)> = {
-        let mut q = state.gossip_retry.lock_recover();
-        let n = q.len().min(GOSSIP_RETRY_DRAIN_PER_CYCLE);
+        let mut q = lane.queue(state).lock_recover();
+        let n = q.len().min(lane.drain_per_cycle());
         q.drain(..n).collect()
     };
     if batch.is_empty() {
         return 0;
     }
     let requeue = |entries: Vec<(String, u8)>| {
-        let mut q = state.gossip_retry.lock_recover();
+        let mut q = lane.queue(state).lock_recover();
         for entry in entries {
-            if !q.iter().any(|(id, _)| id == &entry.0) && q.len() < GOSSIP_RETRY_CAP {
+            if !q.iter().any(|(id, _)| id == &entry.0) && q.len() < lane.cap() {
                 q.push_back(entry);
             }
         }
@@ -628,7 +727,7 @@ async fn retry_parked_records(state: &Arc<NodeState>, base_url: &str) -> usize {
         let Some(record) = fetched.remove(&id) else {
             // This peer doesn't have it — retry later (possibly via another peer).
             if attempts + 1 < GOSSIP_RETRY_MAX_ATTEMPTS {
-                park_retryable_with_attempts(state, &id, attempts + 1);
+                park_retryable_in_lane(state, lane, &id, attempts + 1);
             }
             continue;
         };
@@ -648,11 +747,16 @@ async fn retry_parked_records(state: &Arc<NodeState>, base_url: &str) -> usize {
                 // re-failed any other way) must NOT graduate into the permanent
                 // embargo — the panel-missed `:414` leak. Aging is preserved:
                 // the helper re-parks with attempts+1 and drops at the cap.
-                if dispose_seal_ingest_failure_probed(state, &probe, attempts + 1) {
+                if lane == ParkLane::SuperSeal && !is_retryable_ingest_rejection(&err_str) {
+                    // B5: a permanent re-fail in the super-seal lane (shape
+                    // reject, or any non-transient error) → embargo, never
+                    // another re-fetch.
+                    state.gossip_rejected.lock_recover().insert(id);
+                } else if dispose_seal_ingest_failure_probed(state, &probe, attempts + 1) {
                     // disposed (declined, re-parked with aging, or aged out)
                 } else if is_retryable_ingest_rejection(&err_str) {
                     if attempts + 1 < GOSSIP_RETRY_MAX_ATTEMPTS {
-                        park_retryable_with_attempts(state, &id, attempts + 1);
+                        park_retryable_in_lane(state, lane, &id, attempts + 1);
                     }
                 } else {
                     state.gossip_rejected.lock_recover().insert(id);
@@ -661,7 +765,10 @@ async fn retry_parked_records(state: &Arc<NodeState>, base_url: &str) -> usize {
         }
     }
     if recovered > 0 {
-        info!("gossip retry: recovered {recovered} previously-rejected records (wall-#5 leg 3)");
+        info!(
+            "gossip retry ({}): recovered {recovered} previously-rejected records (wall-#5 leg 3)",
+            lane.name()
+        );
     }
     recovered
 }
@@ -1714,6 +1821,14 @@ pub async fn pull_loop(state: Arc<NodeState>, mut shutdown: watch::Receiver<()>,
                 );
             }
 
+            // R2: a self-authored record pulled from the genesis snapshot now
+            // claims its slot row (`bootstrap_store_record`), so lift the
+            // in-memory slot-nonce counter over the index high-water before the
+            // first self-authored write of this boot (`bootstrap_slot_nonce`
+            // ran at startup against an empty index). Counter only — the
+            // durable F-9 ceiling is untouched, so the next allocation crosses
+            // it and fsyncs a fresh block.
+            state.reseed_slot_nonce_from_index();
             // Always rebuild ledger when pool is empty — records may already be in
             // RocksDB from a previous pull that stored them but didn't rebuild.
             let genesis = state.config.genesis_authority.clone();
@@ -2857,6 +2972,67 @@ fn bootstrap_genesis_mint_admissible(
         && crate::accounting::types::creator_identity_hash(record) == genesis_authority
 }
 
+/// Bootstrap store order: every genesis-authority-authored record first
+/// (the pinned genesis mint and its siblings must land before any record that
+/// spends from it), then by creation timestamp. This is MINT ordering only —
+/// it is NOT an equivocation-ordering guarantee: two conflicting seals from one
+/// creator are stored in whatever order they arrive and no witness walk runs
+/// in the bootstrap path (residual R9).
+fn bootstrap_record_order(
+    a: &ValidationRecord,
+    b: &ValidationRecord,
+    genesis_authority: &str,
+) -> std::cmp::Ordering {
+    let a_genesis = crate::accounting::types::creator_identity_hash(a) == genesis_authority;
+    let b_genesis = crate::accounting::types::creator_identity_hash(b) == genesis_authority;
+    match (a_genesis, b_genesis) {
+        (true, false) => std::cmp::Ordering::Less,
+        (false, true) => std::cmp::Ordering::Greater,
+        _ => a.timestamp.total_cmp(&b.timestamp),
+    }
+}
+
+/// Store one bootstrap-pulled record with the SAME storage shape live ingest
+/// gives it (F2 residual R2,
+/// internal design notes): payload,
+/// registry-resolved zone index, identity/pk row, and — from the one shared
+/// builder `side_writes::record_side_writes` — the DISC-5 epoch-index row, the
+/// creator-keyed equivocation witness row and the slash-offense marker, all in
+/// the record's own WriteBatch. Before R2 this path was a bare `put_record`:
+/// a bootstrap-pulled seal was invisible to `seal_record_ids_at_zone_epoch`,
+/// the durable-tip heal and the witness walk, and a bootstrap-pulled slash
+/// record carried no restart-proof dedup marker.
+///
+/// Pure storage: no ledger apply, no witness scan, no slash (those are the
+/// live path's; R9 covers the wider admission channel). A slot claim is
+/// written ONLY for a self-authored record — a foreign slot row would be an
+/// unconditional last-wins claim on behalf of a peer whose row a later live
+/// ingest of the same (account, nonce) then overwrites (R13). Rotation ops are
+/// not replayed here (R12). The identity-CF pk row widens the "known
+/// identity" set to bootstrap creators: benign — proposal eligibility is
+/// gated by the ledger stake filter, not by this row.
+fn bootstrap_store_record(
+    state: &NodeState,
+    record: &ValidationRecord,
+) -> crate::errors::Result<()> {
+    let id_hash = crate::accounting::types::creator_identity_hash(record);
+    let zone_key = state.resolve_record_zone(&record.id).to_key_bytes();
+    let self_authored = record.creator_public_key == state.identity.public_key;
+    let slot_key = if self_authored { record.slot_key() } else { None };
+    let super::side_writes::SideWriteSet { side_writes, .. } =
+        super::side_writes::record_side_writes(record);
+    state.rocks.put_record_with_pk_zone(
+        &record.id,
+        record,
+        &id_hash,
+        &record.creator_public_key,
+        zone_key,
+        slot_key.as_deref(),
+        side_writes,
+        None,
+    )
+}
+
 async fn bootstrap_pull_from_zero(state: &Arc<NodeState>, base_url: &str) -> crate::errors::Result<(u64, bool)> {
     // Paginate: pull batches of 100 until peer returns <100 (exhausted)
     // Smaller pages avoid 10s client timeout on high-latency links (Tailscale relay)
@@ -2890,16 +3066,7 @@ async fn bootstrap_pull_from_zero(state: &Arc<NodeState>, base_url: &str) -> cra
         .iter()
         .filter_map(|wire| ValidationRecord::from_bytes(wire).ok())
         .collect();
-    let ga = genesis_auth.clone();
-    decoded.sort_by(|a, b| {
-        let a_is_genesis = crate::accounting::types::creator_identity_hash(a) == ga;
-        let b_is_genesis = crate::accounting::types::creator_identity_hash(b) == ga;
-        match (a_is_genesis, b_is_genesis) {
-            (true, false) => std::cmp::Ordering::Less,
-            (false, true) => std::cmp::Ordering::Greater,
-            _ => a.timestamp.total_cmp(&b.timestamp),
-        }
-    });
+    decoded.sort_by(|a, b| bootstrap_record_order(a, b, genesis_auth));
 
     // During bootstrap, store records DIRECTLY in RocksDB + DAG without ledger
     // validation. This breaks the chicken-and-egg: normally insert_record rejects
@@ -3031,8 +3198,10 @@ async fn bootstrap_pull_from_zero(state: &Arc<NodeState>, base_url: &str) -> cra
             continue;
         }
 
-        // Store directly in RocksDB (skip ledger validation)
-        if let Err(e) = state.rocks.put_record(&record_id, &record) {
+        // Store directly in RocksDB (skip ledger validation).
+        // R2 (2026-09-02): live-ingest storage shape — see
+        // `bootstrap_store_record`. `record_id` == `record.id` here.
+        if let Err(e) = bootstrap_store_record(state, &record) {
             debug!("bootstrap store failed for {}: {e}", &record_id[..16.min(record_id.len())]);
             continue;
         }
@@ -6373,6 +6542,19 @@ mod tests {
     }
 
     #[test]
+    fn r1x1v_stake_unverifiable_deferral_is_retryable() {
+        // R1-X1-V (2026-09-02): the fast-forward stake gate's deferral is parked
+        // and re-tried (an honest joiner's ledger view catches up), never
+        // permanent-cached — same contract as B7's "VRF-unverifiable".
+        let reason = "non-genesis catch-up seal from 0123456789abcdef is stake-unverifiable \
+                      (creator not admissible by the local staked-anchor set: staked=0, \
+                      need >= 3 incl. creator; bootstrap regime: genesis-only) — deferring \
+                      fast-forward for zone 0 epoch 5000";
+        assert!(is_retryable_ingest_rejection(reason));
+        assert!(!reason.contains("VRF"), "the stake marker must not overlap the VRF arm");
+    }
+
+    #[test]
     fn permanent_rejections_stay_cached() {
         // Time-invariant verdicts: re-pulling can never change the outcome.
         for reason in [
@@ -8591,5 +8773,267 @@ mod tests {
             load_backstop_cycle(&state, b"backstop:test_cycle", 0),
             u64::MAX - 1,
         );
+    }
+
+    // ─── R2: bootstrap store shape ───
+    // internal design notes
+
+    fn r2_state() -> std::sync::Arc<NodeState> {
+        crate::network::state::build_test_node_state()
+    }
+
+    fn r2_foreign_identity() -> crate::identity::Identity {
+        crate::identity::Identity::generate(
+            crate::identity::EntityType::Device,
+            crate::identity::CryptoProfile::ProfileB,
+        )
+        .unwrap()
+    }
+
+    /// T1 + T8: a bootstrap-stored seal is visible to the DISC-5 readers and
+    /// carries its witness row — byte-identical to live ingest's builder rows.
+    #[test]
+    fn r2_bootstrap_store_makes_seal_rows_visible() {
+        let state = r2_state();
+        let peer = r2_foreign_identity();
+        let seal = crate::network::side_writes::test_support::seal_record(
+            peer.public_key.clone(),
+            "medical/eu",
+            12,
+            b"a",
+        );
+        bootstrap_store_record(&state, &seal).unwrap();
+
+        assert_eq!(
+            state.rocks.seal_record_ids_at_zone_epoch(12, "medical/eu"),
+            vec![seal.id.clone()],
+            "DISC-5 row must exist for the heal / explorer readers"
+        );
+        let creator = crate::crypto::hash::sha3_256_hex(&seal.creator_public_key);
+        let eqv = crate::storage::rocks::StorageEngine::equivocation_index_key(
+            12,
+            "medical/eu",
+            &creator,
+            &seal.id,
+        );
+        assert_eq!(
+            state
+                .rocks
+                .get_cf_raw(crate::storage::rocks::CF_METADATA, &eqv)
+                .unwrap()
+                .as_deref(),
+            Some(&seal.record_hash()[..]),
+            "witness row carries the seal's record hash"
+        );
+        let built = crate::network::side_writes::record_side_writes(&seal).side_writes;
+        assert_eq!(
+            built.disc5_epoch_key.as_deref(),
+            Some(&crate::network::epoch::disc5_index_key(12, "medical/eu", &seal.id)[..])
+        );
+        assert_eq!(built.equivocation_key.map(|(k, _)| k), Some(eqv));
+        assert!(state.rocks.record_exists(&seal.id).unwrap());
+    }
+
+    /// T2 + T5: a seal that arrived through bootstrap is a witness for a later
+    /// conflicting seal from the same creator at the same (zone, epoch); and
+    /// the bootstrap path itself never scans or slashes (a conflicting pair
+    /// pulled together stores both rows, counters stay 0 — residual R9).
+    #[test]
+    fn r2_bootstrap_stored_seal_is_a_witness_for_a_later_conflicting_seal() {
+        use std::sync::atomic::Ordering::Relaxed;
+        let state = r2_state();
+        let anchor = r2_foreign_identity();
+        let first = crate::network::side_writes::test_support::seal_record(
+            anchor.public_key.clone(),
+            "z/eq",
+            5,
+            b"first",
+        );
+        let second = crate::network::side_writes::test_support::seal_record(
+            anchor.public_key.clone(),
+            "z/eq",
+            5,
+            b"second",
+        );
+        assert_ne!(first.record_hash(), second.record_hash());
+
+        bootstrap_store_record(&state, &first).unwrap();
+        assert_eq!(state.slashing_witness_scans_total.load(Relaxed), 0);
+        assert_eq!(state.slashing_equivocations_detected_total.load(Relaxed), 0);
+
+        // The live path's post-put walk for the SECOND seal finds the
+        // bootstrap row.
+        let creator = crate::crypto::hash::sha3_256_hex(&anchor.public_key);
+        let scan = state.rocks.find_equivocation_witness(
+            5,
+            "z/eq",
+            &creator,
+            &second.id,
+            &second.record_hash(),
+        );
+        assert_eq!(scan.witness, Some((first.id.clone(), first.record_hash())));
+
+        // Both pulled together: both rows durable, still no scan / no slash.
+        bootstrap_store_record(&state, &second).unwrap();
+        let mut ids = state.rocks.seal_record_ids_at_zone_epoch(5, "z/eq");
+        ids.sort();
+        let mut want = vec![first.id.clone(), second.id.clone()];
+        want.sort();
+        assert_eq!(ids, want);
+        assert_eq!(state.slashing_witness_scans_total.load(Relaxed), 0);
+        assert_eq!(state.slashing_equivocations_detected_total.load(Relaxed), 0);
+    }
+
+    /// T3: a bootstrap-stored slash record writes its durable offense marker,
+    /// so `claim_offense` short-circuits after a restart exactly as it does
+    /// for a live-ingested slash record.
+    #[test]
+    fn r2_bootstrap_stored_slash_record_writes_offense_marker() {
+        let state = r2_state();
+        let digest = crate::network::slashing::seal_equivocation_offense("offender", "z", 3);
+        let slash =
+            crate::network::side_writes::test_support::slash_record(vec![0xAA; 1952], &digest);
+        assert!(state.rocks.slash_offense_record(&digest).is_none());
+        bootstrap_store_record(&state, &slash).unwrap();
+        assert_eq!(state.rocks.slash_offense_record(&digest), Some(slash.id.clone()));
+    }
+
+    /// T6: the slot row is claimed ONLY for a self-authored record (R13 keeps
+    /// foreign claims out of the bootstrap path), and the post-pull reseed
+    /// lifts the slot-nonce counter over the stored self record.
+    #[test]
+    fn r2_bootstrap_claims_slot_only_for_self_authored_records_and_reseeds_nonce() {
+        let state = r2_state();
+        let self_account = crate::crypto::hash::sha3_256_hex(&state.identity.public_key);
+        let mut mine = crate::network::side_writes::test_support::seal_record(
+            state.identity.public_key.clone(),
+            "z/self",
+            1,
+            b"mine",
+        );
+        mine.nonce = 40;
+        assert!(mine.slot_key().is_some(), "v5+ record carries a slot key");
+        let mut foreign = crate::network::side_writes::test_support::seal_record(
+            vec![0xAA; 1952],
+            "z/self",
+            2,
+            b"theirs",
+        );
+        foreign.nonce = 99;
+
+        bootstrap_store_record(&state, &mine).unwrap();
+        bootstrap_store_record(&state, &foreign).unwrap();
+
+        assert_eq!(
+            state.rocks.max_slot_nonce_for_account(&self_account).unwrap(),
+            Some(40)
+        );
+        let foreign_account = crate::crypto::hash::sha3_256_hex(&foreign.creator_public_key);
+        assert_eq!(
+            state.rocks.max_slot_nonce_for_account(&foreign_account).unwrap(),
+            None,
+            "foreign slot claims are never written by bootstrap (R13)"
+        );
+        assert_eq!(state.reseed_slot_nonce_from_index(), 41);
+        assert_eq!(state.next_slot_nonce(), 41);
+    }
+
+    /// T9: genesis-authority records first, then by timestamp.
+    #[test]
+    fn r2_bootstrap_order_puts_genesis_first_then_timestamp() {
+        let ga_identity = r2_foreign_identity();
+        let ga = crate::crypto::hash::sha3_256_hex(&ga_identity.public_key);
+        let mk = |pk: Vec<u8>, ts: f64| {
+            let mut r = ValidationRecord::create(
+                b"x",
+                pk,
+                vec![],
+                crate::record::Classification::Public,
+                None,
+            );
+            r.timestamp = ts;
+            r
+        };
+        let mut v = [
+            mk(vec![0xAA; 1952], 1.0),
+            mk(ga_identity.public_key.clone(), 5.0),
+            mk(vec![0xBB; 1952], 3.0),
+            mk(ga_identity.public_key.clone(), 4.0),
+        ];
+        v.sort_by(|a, b| bootstrap_record_order(a, b, &ga));
+        let ts: Vec<f64> = v.iter().map(|r| r.timestamp).collect();
+        assert_eq!(ts, vec![4.0, 5.0, 1.0, 3.0]);
+    }
+
+    /// R1-X1 Commit 3 (S1): super-seals park in their OWN lane — never in
+    /// `gossip_retry`, never in `declined_seal_ids`, never embargoed by
+    /// disposition — and a full seal lane cannot starve them.
+    #[test]
+    fn r1x1_c3_super_seal_rejects_park_in_their_own_lane() {
+        let state = crate::network::state::build_test_node_state();
+        state
+            .epoch
+            .write()
+            .unwrap()
+            .latest_epoch
+            .insert(crate::ZoneId::new("z0"), 500);
+        for i in 0..GOSSIP_RETRY_CAP {
+            park_retryable_with_attempts(&state, &format!("seal-{i}"), 0);
+        }
+        assert_eq!(state.gossip_retry.lock_recover().len(), GOSSIP_RETRY_CAP);
+
+        // "Stale" by epoch — irrelevant: a super-seal boundary is never stale.
+        let ss = seal_meta_record("super_seal", 10, "z0");
+        assert!(dispose_seal_ingest_failure(&state, &ss, 0));
+        assert!(state
+            .super_seal_retry
+            .lock_recover()
+            .iter()
+            .any(|(id, _)| id == &ss.id));
+        assert!(!state
+            .gossip_retry
+            .lock_recover()
+            .iter()
+            .any(|(id, _)| id == &ss.id));
+        assert!(!state.declined_seal_ids.lock().unwrap().contains(&ss.id));
+        assert!(!state.gossip_rejected.lock_recover().contains(&ss.id));
+        // The seal lane is untouched by the super-seal park.
+        assert_eq!(state.gossip_retry.lock_recover().len(), GOSSIP_RETRY_CAP);
+
+        // At the attempt cap the super-seal ages out — still never embargoed.
+        let aged = seal_meta_record("super_seal", 11, "z0");
+        assert!(dispose_seal_ingest_failure(&state, &aged, GOSSIP_RETRY_MAX_ATTEMPTS));
+        assert!(!state
+            .super_seal_retry
+            .lock_recover()
+            .iter()
+            .any(|(id, _)| id == &aged.id));
+        assert!(!state.gossip_rejected.lock_recover().contains(&aged.id));
+    }
+
+    /// R1-X1 Commit 3 (S1): the super-seal lane has its own cap and FIFO
+    /// eviction; filling it never touches the seal lane, and vice versa.
+    #[test]
+    fn r1x1_c3_super_seal_lane_cap_is_independent() {
+        let state = crate::network::state::build_test_node_state();
+        assert_eq!(ParkLane::SuperSeal.cap(), SUPER_SEAL_RETRY_CAP);
+        assert_eq!(ParkLane::Seal.cap(), GOSSIP_RETRY_CAP);
+        const { assert!(SUPER_SEAL_RETRY_DRAIN_PER_CYCLE < GOSSIP_RETRY_DRAIN_PER_CYCLE) };
+        for i in 0..(SUPER_SEAL_RETRY_CAP + 10) {
+            park_retryable_in_lane(&state, ParkLane::SuperSeal, &format!("ss-{i}"), 0);
+        }
+        let lane = state.super_seal_retry.lock_recover();
+        assert_eq!(lane.len(), SUPER_SEAL_RETRY_CAP);
+        // FIFO: the ten oldest were evicted, the newest survive.
+        assert!(!lane.iter().any(|(id, _)| id == "ss-0"));
+        assert!(lane.iter().any(|(id, _)| id == "ss-10"));
+        assert!(lane
+            .iter()
+            .any(|(id, _)| id == &format!("ss-{}", SUPER_SEAL_RETRY_CAP + 9)));
+        drop(lane);
+        assert!(state.gossip_retry.lock_recover().is_empty());
+        // Dedup by id within the lane.
+        park_retryable_in_lane(&state, ParkLane::SuperSeal, "ss-10", 3);
+        assert_eq!(state.super_seal_retry.lock_recover().len(), SUPER_SEAL_RETRY_CAP);
     }
 }

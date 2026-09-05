@@ -4252,6 +4252,64 @@ pub async fn epoch_headers(
     Ok(Json(body))
 }
 
+// ─── /revocations/since/{cursor} ─────────────────────────────────────────────
+//
+// T-REVOCATION-EXPORT (X402-ALGORAND-ENDPOINT-VERDICT-2026-08-30 D6): bounded
+// incremental export of live revocation state, so an off-node pusher (Workers
+// KV sync) can mirror it WITHOUT the full-CF scan of `collect_revocations` or
+// the whole-ledger `/snapshot`. Public read-only, same gate class as
+// `/headers/from/{epoch}`: revocations are inherently public verification
+// state (the /mandate/{id} surface already serves them per-mandate).
+//
+// Path cursor: `0` starts from the beginning; otherwise the EXCLUSIVE resume
+// point = the `next_cursor` from the previous page (the 128-hex composite
+// `mandate_id_hash ‖ revoker_identity_hash` storage key). `?limit=` ≤ 1000
+// (default 1000). Response: `{ revocations: [{mandate_id_hash,
+// revoker_identity_hash, revoked_at_ms, version}], next_cursor, count }` —
+// `next_cursor: null` means the walk is complete. Exposes revocation FACTS
+// only (key halves + timestamp), never mandate content beyond what
+// `/mandate/{id}` already serves.
+pub async fn revocations_since(
+    State(state): State<Arc<NodeState>>,
+    AxumPath(cursor): AxumPath<String>,
+    Query(params): Query<HashMap<String, String>>,
+) -> std::result::Result<Json<serde_json::Value>, AppError> {
+    let cursor = match cursor.as_str() {
+        "0" => None,
+        c if c.len() == 128 && c.bytes().all(|b| b.is_ascii_hexdigit()) => Some(c.to_string()),
+        _ => {
+            return Err(ElaraError::Wire(
+                "/revocations/since/{cursor}: cursor must be `0` (start) or a previous \
+                 page's next_cursor (128 hex chars)"
+                    .into(),
+            )
+            .into())
+        }
+    };
+    let limit = params
+        .get("limit")
+        .and_then(|l| l.parse::<usize>().ok())
+        .unwrap_or(1000)
+        .clamp(1, 1000);
+    let (page, next_cursor) = state.rocks.revocations_page(cursor.as_deref(), limit);
+    let revocations: Vec<serde_json::Value> = page
+        .iter()
+        .map(|(k, e)| {
+            serde_json::json!({
+                "mandate_id_hash": &k[..64],
+                "revoker_identity_hash": &k[64..],
+                "revoked_at_ms": e.revoked_at_ms,
+                "version": e.version,
+            })
+        })
+        .collect();
+    Ok(Json(serde_json::json!({
+        "count": revocations.len(),
+        "revocations": revocations,
+        "next_cursor": next_cursor,
+    })))
+}
+
 // ─── /headers/from/{epoch} ───────────────────────────────────────────────────
 //
 // Gap 1 light-client shortcut: returns headers with `epoch_number >= {epoch}`.

@@ -818,6 +818,11 @@ const PUBLIC_ROUTE_PREFIXES: &[&str] = &[
     // that mutate or expose private state; these expose neither.
     "/proof/account",
     "/headers",
+    // T-REVOCATION-EXPORT: bounded incremental revocation export (read-only,
+    // idempotent, ≤1000 entries/page). Same disclosure profile as /mandate —
+    // revocation FACTS are public verification state; the off-node KV pusher
+    // consumes this from outside the host.
+    "/revocations/since",
     // C4 slice 1: agent-mandate query surface — read-only, idempotent, no
     // secrets (a public ledger's mandates/acts are public by design; same
     // disclosure profile as /proof/account). The prefix covers both
@@ -5046,6 +5051,18 @@ pub(crate) async fn metrics_body_tiered(
     let gc_last_cycle_duration_ms = state.gc_last_cycle_duration_ms.load(std::sync::atomic::Ordering::Relaxed);
     let gc_last_cycle_unix_ts = state.gc_last_cycle_unix_ts.load(std::sync::atomic::Ordering::Relaxed);
     let gc_scan_capped = state.gc_scan_capped_total.load(std::sync::atomic::Ordering::Relaxed);
+    // R1 (2026-09-02): the seal-floor gauges are computed on demand from RAM
+    // (≤ SEAL_FLOOR_GAUGES_MAX_AGE_SECS stale) so they are truthful before
+    // the first GC cycle and with the GC loop disabled. No epoch lock is held
+    // here — the refresh takes its own read acquisition.
+    crate::network::gc::refresh_seal_floor_gauges(
+        &state,
+        crate::network::gc::SEAL_FLOOR_GAUGES_MAX_AGE_SECS,
+    );
+    let gc_seal_floor_zones = state.gc_seal_floor_zones.load(std::sync::atomic::Ordering::Relaxed);
+    let gc_zones_without_seal_floor = state.gc_zones_without_seal_floor.load(std::sync::atomic::Ordering::Relaxed);
+    let gc_seal_floor_lag_epochs_max = state.gc_seal_floor_lag_epochs_max.load(std::sync::atomic::Ordering::Relaxed);
+    let gc_seal_floor_gauges_unix_ts = state.gc_seal_floor_gauges_unix_ts.load(std::sync::atomic::Ordering::Relaxed);
     let gc_oldest_record_age_seconds: f64 = match state.rocks.earliest_record_timestamp() {
         Some(earliest_ts) => {
             let now = std::time::SystemTime::now()
@@ -5630,6 +5647,18 @@ pub(crate) async fn metrics_body_tiered(
          # HELP elara_gc_pruned_seals_total MAINNET gap #3: per-zone epoch seals pruned because a covering super-seal exists AND the seal's epoch is below the per-zone safety floor (latest_super_seal end_epoch − 2 × SUPER_SEAL_INTERVAL). Super-seals, zone_transitions, and global seals are integrity-critical and never counted here. Sustained non-zero on FullZone profile = super-seal consolidation closing the unbounded-growth gap on the seal stream. Always zero on Archive (∞ retention keeps seals on disk) and Light (no seals stored).\n\
          # TYPE elara_gc_pruned_seals_total counter\n\
          elara_gc_pruned_seals_total {gc_pruned_seals}\n\
+         # HELP elara_gc_seal_floor_zones R1 (2026-09-02): zones with a live epoch tip AND a registered super-seal (a Gap-3 seal-pruning floor exists); sums with elara_gc_zones_without_seal_floor to the number of live-tip zones. Refreshed from RAM epoch state on each /metrics scrape (at most once per 60 s) and every GC cycle (O(zones), no record scan); profile-independent, archive included. 0 while elara_gc_seal_floor_gauges_unix_ts is 0 = never computed, not healthy.\n\
+         # TYPE elara_gc_seal_floor_zones gauge\n\
+         elara_gc_seal_floor_zones {gc_seal_floor_zones}\n\
+         # HELP elara_gc_zones_without_seal_floor R1 (2026-09-02): zones with a live epoch tip and NO super-seal ever registered - every seal there is GC-immortal until a floor appears. Briefly non-zero after a snapshot-less boot (floors re-register at the next 64-epoch boundary); sustained non-zero on a sealing zone = super-seal minting is not happening there.\n\
+         # TYPE elara_gc_zones_without_seal_floor gauge\n\
+         elara_gc_zones_without_seal_floor {gc_zones_without_seal_floor}\n\
+         # HELP elara_gc_seal_floor_lag_epochs_max R1 (2026-09-02): max over floored zones of (latest_epoch - latest super-seal end_epoch). Healthy < 128 (2 x SUPER_SEAL_INTERVAL); growing without bound = the seal-pruning floor is frozen while the zone keeps sealing (persistent super-seal mint failure, no retry between boundaries). Alarm at >= 320.\n\
+         # TYPE elara_gc_seal_floor_lag_epochs_max gauge\n\
+         elara_gc_seal_floor_lag_epochs_max {gc_seal_floor_lag_epochs_max}\n\
+         # HELP elara_gc_seal_floor_gauges_unix_ts R1 (2026-09-02): unix time of the last refresh of the three elara_gc_seal_floor* gauges (each /metrics scrape, at most once per 60 s; every GC cycle). 0 = never refreshed - the three gauges still hold their boot value and must not be read as healthy. Alert: now - value > 600 while the node is up = the scrape path is not refreshing.\n\
+         # TYPE elara_gc_seal_floor_gauges_unix_ts gauge\n\
+         elara_gc_seal_floor_gauges_unix_ts {gc_seal_floor_gauges_unix_ts}\n\
          # HELP elara_gc_pruned_epoch_total Finalized non-seal records pruned because their per-zone epoch has already been super-sealed (timestamp below `latest_super_seal end_epoch - 2 x SUPER_SEAL_INTERVAL` boundary). The seal Merkle root preserves verifiability; the body bytes are no longer needed. Distinct from elara_gc_pruned_retention_total (time-based) - this fires as soon as a super-seal covers the record. Sustained non-zero on FullZone = epoch-based GC trimming the body stream against the seal root, the scaling path that lets the chain hold 1M zones x 720 seals/day. Always zero on Archive (auto-disabled) and on nodes with epoch_pruning_enabled=false.\n\
          # TYPE elara_gc_pruned_epoch_total counter\n\
          elara_gc_pruned_epoch_total {gc_pruned_epoch}\n\
@@ -6064,6 +6093,7 @@ pub(crate) async fn metrics_body_tiered(
     let tr_orch_rejected   = state.transitions_orchestrator_insert_rejected_total.load(std::sync::atomic::Ordering::Relaxed);
     let tr_orch_skipped    = state.transitions_orchestrator_skipped_pending_total.load(std::sync::atomic::Ordering::Relaxed);
     let tr_orch_undersized = state.transitions_orchestrator_skipped_undersized_pool_total.load(std::sync::atomic::Ordering::Relaxed);
+    let tr_orch_propose_failed = state.transitions_orchestrator_propose_failed_total.load(std::sync::atomic::Ordering::Relaxed);
     let tr_finalized       = state.transitions_finalized_total.load(std::sync::atomic::Ordering::Relaxed);
     let tr_finalized_split = state.transitions_finalized_split_total.load(std::sync::atomic::Ordering::Relaxed);
     let tr_finalized_merge = state.transitions_finalized_merge_total.load(std::sync::atomic::Ordering::Relaxed);
@@ -6096,6 +6126,9 @@ pub(crate) async fn metrics_body_tiered(
          # HELP elara_transitions_orchestrator_skipped_undersized_pool_total Orchestrator ticks skipped because the registered+staked anchor pool is below the kind's M-of-N threshold\n\
          # TYPE elara_transitions_orchestrator_skipped_undersized_pool_total counter\n\
          elara_transitions_orchestrator_skipped_undersized_pool_total {tr_orch_undersized}\n\
+         # HELP elara_transitions_orchestrator_propose_failed_total Orchestrator ticks where propose_transition_from_decision returned Err (proposer self-rejected)\n\
+         # TYPE elara_transitions_orchestrator_propose_failed_total counter\n\
+         elara_transitions_orchestrator_propose_failed_total {tr_orch_propose_failed}\n\
          # HELP elara_transitions_finalized_total TransitionSeals this node observed flipping to Finalized\n\
          # TYPE elara_transitions_finalized_total counter\n\
          elara_transitions_finalized_total {tr_finalized}\n\
@@ -6437,58 +6470,57 @@ pub(crate) async fn metrics_body_tiered(
     ");
 
     // SlashingMonitor BFT-equivocation observability.
-    // SlashingMonitor (economics §10 BFT auto-slash) is wired into the
-    // epoch-seal validation path — every epoch seal arriving at this node
-    // calls `record_seal()` which detects when an anchor produces two
-    // different seals for the same (zone, epoch_number) and triggers
-    // `mark_slashed()` — but had ZERO /metrics surface. Operators saw
-    // `elara_conflict_proof_pushed_total` (proofs THIS node generated) and
-    // `elara_revoke_all_involuntary_total` (gateway slashes via fisherman
-    // path), but no signal on (a) whether the auto-slash path has fired
-    // locally, (b) how many seal entries the local monitor is tracking, or
-    // (c) the size of the dedup set preventing repeat slashes for the same
-    // equivocation pair.
-    //
-    // At mainnet 1M-zone × 7-witness × 720-epoch/day scale, a non-trivial
-    // fraction of zones will have an anchor produce two seals for the same
-    // epoch in the wild (NTP drift, fork resolution churn, malicious
-    // attempt) — the equivocation-detection working set IS the operator-
-    // visible "BFT safety footprint" gauge.
-    //
-    // Three new metrics, single brief lock under `LockRecover::lock_recover`:
-    //   * `elara_slashing_executed_total` (counter — `slash_count`)
-    //     lifetime BFT auto-slashes by THIS node. Resets on process
-    //     restart. Steady-state should be 0; non-zero = an anchor is
-    //     equivocating in the local view.
-    //   * `elara_slashing_tracked_seals` (gauge — `tracked_seals()`)
-    //     resident equivocation-detection entries (one per
-    //     (creator, zone, epoch) tuple seen). Bounded by per-zone prune
-    //     cycle via `prune_before_epoch`; sustained climbing past
-    //     pruned-window expectation = retention loop is stalled
-    //     (memory-budget alarm).
-    //   * `elara_slashing_dedup_pairs` (gauge — `slashed_pair_count()`)
-    //     size of the already-slashed (creator, seal_a, seal_b) dedup
-    //     set. Pair with `_executed_total`: dedup_pairs grows ≥1 per
-    //     fresh equivocation pair, ≤ executed_total (each slash adds
-    //     1 to both). Sustained dedup_pairs > executed_total =
-    //     impossible (would mean the dedup set was populated without
-    //     a slash — would indicate a bug). dedup_pairs < executed_total
-    //     is also impossible since `mark_slashed` increments both.
-    //     The two should agree.
+    // F2 (2026-09-02, internal design notes):
+    // seal-equivocation detection moved from a RAM per-(creator, zone,
+    // epoch) map to the durable creator-keyed witness index in CF_METADATA,
+    // scanned in ingest Phase 2 right after each seal's own batch write.
+    // Consequences for this block:
+    //   * `elara_slashing_tracked_seals` is RETIRED — pinned 0 (series kept
+    //     one release so dashboards don't break). There is no resident seal
+    //     window any more; the pre-F2 HELP text ("UNBOUNDED") described the
+    //     map this change removed.
+    //   * `elara_slashing_dedup_pairs` now counts OFFENSES (digests of
+    //     (creator, zone, epoch) / liveness / geo keys) reserved or executed
+    //     by this process — not seal pairs.
+    //   * `elara_slashing_executed_total` counts durably-inserted auto-slash
+    //     records. Invariant: executed_total ≤ dedup_pairs (a reservation
+    //     whose slash failed is released; a durable-dedup hit keeps the
+    //     reservation without executing) — the two are NOT "always equal".
+    //   * Five new counters below expose the witness scan itself.
     let (slash_executed_total, slash_tracked_seals, slash_dedup_pairs) = {
         let s = state.slashing.lock_recover();
-        (s.slash_count, s.tracked_seals() as u64, s.slashed_pair_count() as u64)
+        (s.slash_count, 0u64, s.slashed_offense_count() as u64)
     };
+    let slashing_witness_scans = state.slashing_witness_scans_total.load(std::sync::atomic::Ordering::Relaxed);
+    let slashing_witness_keys_read = state.slashing_witness_keys_read_total.load(std::sync::atomic::Ordering::Relaxed);
+    let slashing_witness_overflow_warn = state.slashing_witness_overflow_warn_total.load(std::sync::atomic::Ordering::Relaxed);
+    let slashing_equivocations_detected = state.slashing_equivocations_detected_total.load(std::sync::atomic::Ordering::Relaxed);
+    let slashing_durable_dedup_hits = state.slashing_durable_dedup_hits_total.load(std::sync::atomic::Ordering::Relaxed);
     let body = format!("{body}\
-         # HELP elara_slashing_executed_total Lifetime count of BFT auto-slashes executed by this node (the economics spec — anchor equivocation detected via `record_seal` returning a different content_hash for the same (creator, zone, epoch_number)). Steady-state should be 0; non-zero = an anchor is equivocating in the local view (NTP drift, malicious attempt, or fork-resolution churn). Resets on process restart. Pair with `elara_slashing_dedup_pairs` (always equal in steady state — `mark_slashed` increments both); divergence indicates a bug.\n\
+         # HELP elara_slashing_executed_total Lifetime count of auto-slash records durably inserted by this node (seal equivocation, liveness failure, geo fraud). Steady-state should be 0; non-zero = an offense was proven in the local view. Resets on process restart. Invariant: executed_total <= elara_slashing_dedup_pairs (a failed slash releases its reservation; a durable-dedup hit reserves without executing).\n\
          # TYPE elara_slashing_executed_total counter\n\
          elara_slashing_executed_total {slash_executed_total}\n\
-         # HELP elara_slashing_tracked_seals Resident equivocation-detection entries in SlashingMonitor (one per (creator, zone, epoch_number) tuple seen via `record_seal`). Bounded by per-zone prune cycle via `prune_before_epoch` after each tick. Sustained growth past pruned-window expectation = retention loop is stalled (memory-budget alarm — investigate epoch tick health). At mainnet 1M-zone × 720-epoch/day scale this gauge IS the operator-visible BFT safety-footprint signal.\n\
+         # HELP elara_slashing_tracked_seals RETIRED 2026-09-02 (F2): seal-equivocation detection now reads the durable creator-keyed witness index (CF_METADATA `eqv:` rows written in each seal's own batch) instead of a RAM seal window, so there are no resident entries to count. Pinned 0; series kept one release for dashboard compatibility. Use elara_slashing_witness_scans_total for the live detection signal.\n\
          # TYPE elara_slashing_tracked_seals gauge\n\
          elara_slashing_tracked_seals {slash_tracked_seals}\n\
-         # HELP elara_slashing_dedup_pairs Size of the already-slashed (creator, seal_a, seal_b) dedup set in SlashingMonitor. Pair with `elara_slashing_executed_total`: each `mark_slashed` increments both, so the two gauges should agree in steady state. dedup_pairs > executed_total OR dedup_pairs < executed_total = bug in slash bookkeeping. Resets on process restart along with `_executed_total`.\n\
+         # HELP elara_slashing_dedup_pairs Size of the auto-slash OFFENSE set in SlashingMonitor (offense-keyed since F2 2026-09-02: one digest per (creator, zone, epoch) equivocation / liveness / geo-fraud offense reserved or executed by this process). Resets on process restart; the durable `slash_offense:` marker carries dedup across restarts. Invariant: >= elara_slashing_executed_total.\n\
          # TYPE elara_slashing_dedup_pairs gauge\n\
          elara_slashing_dedup_pairs {slash_dedup_pairs}\n\
+         # HELP elara_slashing_witness_scans_total Durable equivocation witness scans run in ingest Phase 2 (one per stored epoch seal). Climbs with elara_epoch_seals_total; a plateau while seals climb = the scan is not running.\n\
+         # TYPE elara_slashing_witness_scans_total counter\n\
+         elara_slashing_witness_scans_total {slashing_witness_scans}\n\
+         # HELP elara_slashing_witness_keys_read_total Witness-index rows touched by all scans. The prefix is creator-keyed, so an honest seal reads ~1 row; keys_read/scans drifting well above 1 = one creator is stacking seals at one (zone, epoch).\n\
+         # TYPE elara_slashing_witness_keys_read_total counter\n\
+         elara_slashing_witness_keys_read_total {slashing_witness_keys_read}\n\
+         # HELP elara_slashing_witness_overflow_warn_total Scans whose keys_read exceeded DURABLE_HEAL_SIBLINGS_WARN (32) — the same canary shape as the T-F10 durable-heal sibling walk. Must stay 0 on a healthy mesh.\n\
+         # TYPE elara_slashing_witness_overflow_warn_total counter\n\
+         elara_slashing_witness_overflow_warn_total {slashing_witness_overflow_warn}\n\
+         # HELP elara_slashing_equivocations_detected_total Seal equivocations observed by the witness scan (same creator, same (zone, epoch), different content hash) — counts the observation before genesis gating and dedup, so it can exceed executed_total on non-authority nodes.\n\
+         # TYPE elara_slashing_equivocations_detected_total counter\n\
+         elara_slashing_equivocations_detected_total {slashing_equivocations_detected}\n\
+         # HELP elara_slashing_durable_dedup_hits_total claim_offense short-circuits on the durable `slash_offense:` marker — an offense re-detected after the process that slashed it restarted. Non-zero is expected after a restart with a known offender; unbounded growth = the offender keeps re-emitting the same equivocation.\n\
+         # TYPE elara_slashing_durable_dedup_hits_total counter\n\
+         elara_slashing_durable_dedup_hits_total {slashing_durable_dedup_hits}\n\
     ");
 
     // Resident-set gauges for three admin/eligibility
@@ -7739,7 +7771,8 @@ pub(crate) async fn metrics_body_tiered(
     // §11.35 admission-gate degraded-mode counters (2026-08-29 contention-
     // polarity verdict). Healthy = low and bursty, correlated with the snapshot
     // clone window; poisoned = 0 forever (non-zero means a panic occurred under
-    // that lock); reincarnation contended = structurally 0 after the de-lock.
+    // that lock); reincarnation contended = structurally 0 (subsystem removed
+    // 2026-08-30; the counter survives as the regression canary).
     let dc_cont = state.daily_cap_continuity_contended_total.load(std::sync::atomic::Ordering::Relaxed);
     let dc_cont_poi = state.daily_cap_continuity_poisoned_total.load(std::sync::atomic::Ordering::Relaxed);
     let dc_trust = state.daily_cap_trust_contended_total.load(std::sync::atomic::Ordering::Relaxed);
@@ -7755,7 +7788,7 @@ pub(crate) async fn metrics_body_tiered(
          # HELP elara_daily_cap_trust_contended_total Admission-gate limit computations that found the trust RwLock contended and used the strictest tier cap (fail closed — this branch shipped 2026-07 with no observability; counter added 2026-08-29).\n\
          # TYPE elara_daily_cap_trust_contended_total counter\n\
          elara_daily_cap_trust_contended_total {dc_trust}\n\
-         # HELP elara_daily_cap_reincarnation_contended_total Regression canary: the admission gate no longer takes the reincarnation lock (deterministic ArcSwap suspects snapshot since 2026-08-29), so this must stay 0. Non-zero = a lock-taking read crept back into the gate.\n\
+         # HELP elara_daily_cap_reincarnation_contended_total Regression canary: the reincarnation subsystem was REMOVED 2026-08-30 (unanimous audit verdict; lock-free since 2026-08-29), so this must stay 0. Non-zero = a reincarnation read crept back into the admission gate.\n\
          # TYPE elara_daily_cap_reincarnation_contended_total counter\n\
          elara_daily_cap_reincarnation_contended_total {dc_reinc}\n\
          # HELP elara_daily_limit_degraded_total Submissions whose daily limit was reduced by ANY lock-fallback branch — the single operator signal for how often the admission gate runs degraded. The refusal message carries a degraded marker on these.\n\
@@ -7882,6 +7915,15 @@ pub(crate) async fn metrics_body_tiered(
          elara_epoch_seal_fastforward_vrf_deferred_total {b7_ff_deferred}\n\
     ");
 
+    // R1-X1-V (2026-09-02): the stake-gate sibling of the B7 counter above —
+    // must-stay-0 canary (deploy-verify greps it).
+    let r1x1v_ff_unstaked = state.epoch_seal_fastforward_unstaked_deferred_total.load(std::sync::atomic::Ordering::Relaxed);
+    let body = format!("{body}\
+         # HELP elara_epoch_seal_fastforward_unstaked_deferred_total Non-genesis epoch seals deferred on the catch-up fast-forward branch of `verify_epoch_seal_inner` because the creator is not admissible by the local staked-anchor set (unstaked, or fewer than BOOTSTRAP_MIN_STAKERS staked anchors). Parked + retried, never applied — closes the R1-X1-V self-declared-anchor fast-forward vector. Healthy = 0.\n\
+         # TYPE elara_epoch_seal_fastforward_unstaked_deferred_total counter\n\
+         elara_epoch_seal_fastforward_unstaked_deferred_total {r1x1v_ff_unstaked}\n\
+    ");
+
     let c2_chain_rejected = state.epoch_seal_chain_link_rejected_total.load(std::sync::atomic::Ordering::Relaxed);
     let body = format!("{body}\
          # HELP elara_epoch_seal_chain_link_rejected_total Strictly-sequential epoch seals (epoch == our tip+1) REJECTED at ingest register-time because their previous_seal_hash did not chain to our canonical tip — the authoritative C2 chain-link guard under the epoch write lock (the verify-time check is advisory). A valid signature proves WHO signed, not which chain; this blocks a key-holding Byzantine anchor from advancing latest_seal_hash onto a fork. Healthy = 0; a sustained climb = a forged-seal fork probe.\n\
@@ -7991,7 +8033,56 @@ pub(crate) async fn metrics_body_tiered(
     // inside `register_super_seal` (no per-scrape O(zones) scan, which
     // would page-fault a 1M-zone archive node).
     let super_seals_minted = state.super_seals_minted_total.load(std::sync::atomic::Ordering::Relaxed);
-    let super_seal_max_end = state.epoch.read().map(|e| e.super_seal_max_end_epoch).unwrap_or(0);
+    // R1-X1 (2026-09-02): one `read_recover` for the max gauge and the two
+    // restore diagnostics — a poisoned epoch lock must not silently report
+    // them as 0.
+    let (super_seal_max_end, super_seal_restore_dropped, super_seal_restore_tipless_kept) = {
+        let e = state.epoch.read_recover();
+        (
+            e.super_seal_max_end_epoch,
+            e.super_seal_restore_dropped,
+            e.super_seal_restore_tipless_kept,
+        )
+    };
+    let gc_seal_floor_suppressed = state
+        .gc_seal_floor_suppressed_total
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let gc_seal_floor_suppressed_zones = state
+        .gc_seal_floor_suppressed_zones
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let super_seal_extract_err = state
+        .super_seal_extract_err_total
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let zone_subscription_extract_err = state
+        .zone_subscription_extract_err_total
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let zone_transition_extract_err = state
+        .zone_transition_extract_err_total
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let super_seal_buffer_noncontiguous = state
+        .super_seal_buffer_noncontiguous_total
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let super_seal_admission_accepted = state
+        .super_seal_admission_accepted_total
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let super_seal_admission_deferred_ahead_of_tip = state
+        .super_seal_admission_deferred_ahead_of_tip_total
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let super_seal_admission_deferred_zone_unknown = state
+        .super_seal_admission_deferred_zone_unknown_total
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let super_seal_admission_deferred_unverifiable = state
+        .super_seal_admission_deferred_unverifiable_total
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let super_seal_admission_root_mismatch = state
+        .super_seal_admission_root_mismatch_total
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let super_seal_admission_rejected_shape = state
+        .super_seal_admission_rejected_shape_total
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let super_seal_admission_chain_link_mismatch = state
+        .super_seal_admission_chain_link_mismatch_total
+        .load(std::sync::atomic::Ordering::Relaxed);
     let super_seal_creation_attempts = state.super_seal_creation_attempts_total.load(std::sync::atomic::Ordering::Relaxed);
     let super_seal_creation_failures = state.super_seal_creation_failures_total.load(std::sync::atomic::Ordering::Relaxed);
     let super_seal_sign_failures = state.super_seal_creation_sign_failures_total.load(std::sync::atomic::Ordering::Relaxed);
@@ -8032,6 +8123,51 @@ pub(crate) async fn metrics_body_tiered(
          # HELP elara_super_seal_max_end_epoch Running max of `end_epoch` across every zone's latest super-seal. Reading via the O(1) gauge maintained in `EpochState::register_super_seal` — never scans the per-zone map. Stalls (flat while seal-finalized rate climbs) signal SUPER_SEAL_INTERVAL boundaries are not being collapsed by the producer; page on >2×SUPER_SEAL_INTERVAL epoch divergence from `elara_latest_epoch`.\n\
          # TYPE elara_super_seal_max_end_epoch gauge\n\
          elara_super_seal_max_end_epoch {super_seal_max_end}\n\
+         # HELP elara_gc_seal_floor_suppressed_total R1-X1: GC seal-floor suppression events — one per zone per derivation whose latest super-seal pointer has no bounding tip (end_epoch ahead of the zone's `latest_epoch`, or no local tip); the zone got NO floor that cycle (`gc::seal_pruning_floor_map_bounded`). WARN-level: a node catching up after downtime trips it legitimately until the ingest bound (R1-X1 Commit 3) lands; otherwise investigate the pointer's creator.\n\
+         # TYPE elara_gc_seal_floor_suppressed_total counter\n\
+         elara_gc_seal_floor_suppressed_total {gc_seal_floor_suppressed}\n\
+         # HELP elara_gc_seal_floor_suppressed_zones R1-X1: zones suppressed by the LAST seal-floor derivation; clears by itself once the seal at end_epoch arrives.\n\
+         # TYPE elara_gc_seal_floor_suppressed_zones gauge\n\
+         elara_gc_seal_floor_suppressed_zones {gc_seal_floor_suppressed_zones}\n\
+         # HELP elara_super_seal_restore_dropped_total R1-X1: super-seal pointers dropped by `EpochState::from_snapshot` at the last restore because end_epoch was ahead of the zone's snapshot tip. Boot-time value for this process; WARN-level until R1-X1 Commit 3.\n\
+         # TYPE elara_super_seal_restore_dropped_total counter\n\
+         elara_super_seal_restore_dropped_total {super_seal_restore_dropped}\n\
+         # HELP elara_super_seal_restore_tipless_kept_total R1-X1: super-seal pointers kept at the last restore for zones with NO snapshot tip (cannot be judged; excluded from the max gauge; no GC floor). Boot-time value for this process; investigate if non-zero on a node that seals every zone it tracks.\n\
+         # TYPE elara_super_seal_restore_tipless_kept_total counter\n\
+         elara_super_seal_restore_tipless_kept_total {super_seal_restore_tipless_kept}\n\
+         # HELP elara_super_seal_extract_err_total R1-X1: records claiming epoch_op=super_seal whose shape extraction failed at ingest — previously swallowed silently. Non-zero = a malformed / probing super-seal or a producer/parser wire drift (record fate unchanged).\n\
+         # TYPE elara_super_seal_extract_err_total counter\n\
+         elara_super_seal_extract_err_total {super_seal_extract_err}\n\
+         # HELP elara_zone_subscription_extract_err_total R1-X6: records claiming epoch_op=zone_subscription whose shape extraction failed at ingest — previously swallowed silently. Non-zero = a malformed / probing subscription or producer wire drift (record fate unchanged).\n\
+         # TYPE elara_zone_subscription_extract_err_total counter\n\
+         elara_zone_subscription_extract_err_total {zone_subscription_extract_err}\n\
+         # HELP elara_zone_transition_extract_err_total R1-X6: records claiming epoch_op=zone_transition whose shape extraction failed at ingest (op-string guarded). Non-zero = a malformed zone-transition announcement or producer wire drift (record fate unchanged).\n\
+         # TYPE elara_zone_transition_extract_err_total counter\n\
+         elara_zone_transition_extract_err_total {zone_transition_extract_err}\n\
+         # HELP elara_super_seal_buffer_noncontiguous_total R1-X1 M1: producer-side super-seal boundary evaluations refused because this node's seal window had entries but not the canonical seal of every epoch in [latest-63, latest] (fast-forward / ingest hole / snapshot-bootstrap start inside the window). Expect at most one bump per affected boundary, then 0; sustained growth = the node keeps missing seals.\n\
+         # TYPE elara_super_seal_buffer_noncontiguous_total counter\n\
+         elara_super_seal_buffer_noncontiguous_total {super_seal_buffer_noncontiguous}\n\
+         # HELP elara_super_seal_admission_accepted_total R1-X1 Commit 3 (Layer A ingest bound): super-seals admitted at ingest — coverage (A4) or boundary-proposer (A5) passed, or the local pointer already covered the range (historical replay). Informational.\n\
+         # TYPE elara_super_seal_admission_accepted_total counter\n\
+         elara_super_seal_admission_accepted_total {super_seal_admission_accepted}\n\
+         # HELP elara_super_seal_admission_deferred_ahead_of_tip_total R1-X1 Commit 3: super-seals deferred (transient reject, parked in the super-seal retry lane) because end_epoch is ahead of this node's zone tip (A3). Bumps while a node catches up; sustained growth with a flat tip = the node is not sealing.\n\
+         # TYPE elara_super_seal_admission_deferred_ahead_of_tip_total counter\n\
+         elara_super_seal_admission_deferred_ahead_of_tip_total {super_seal_admission_deferred_ahead_of_tip}\n\
+         # HELP elara_super_seal_admission_deferred_zone_unknown_total R1-X1 Commit 3: super-seals deferred because the zone has no local tip at all (A3) — a super-seal can never register a zone this node never sealed. Expected on a follower that has not yet ingested the zone's first seal.\n\
+         # TYPE elara_super_seal_admission_deferred_zone_unknown_total counter\n\
+         elara_super_seal_admission_deferred_zone_unknown_total {super_seal_admission_deferred_zone_unknown}\n\
+         # HELP elara_super_seal_admission_deferred_unverifiable_total R1-X1 Commit 3: super-seals deferred because neither A4 (all 64 canonical seal hashes local, root matches) nor A5 (creator == creator of the canonical seal at end_epoch) could pass — seals missing locally, an unattributed root mismatch, or the Light profile. Re-offered by gossip until verifiable.\n\
+         # TYPE elara_super_seal_admission_deferred_unverifiable_total counter\n\
+         elara_super_seal_admission_deferred_unverifiable_total {super_seal_admission_deferred_unverifiable}\n\
+         # HELP elara_super_seal_admission_root_mismatch_total R1-X1 Commit 3 CANARY (must stay 0): all 64 canonical seal hashes were present, the boundary seal's creator signed the super-seal, and the Merkle root still differed — the local seal set or the proposer is wrong. Investigate immediately.\n\
+         # TYPE elara_super_seal_admission_root_mismatch_total counter\n\
+         elara_super_seal_admission_root_mismatch_total {super_seal_admission_root_mismatch}\n\
+         # HELP elara_super_seal_admission_rejected_shape_total R1-X1 Commit 3: super-seals rejected permanently on shape (seal_count != 64, range width != 64, or end_epoch off the 64-boundary). Never stored; embargoed on the retry drain's re-fail. Non-zero = a malformed or probing producer.\n\
+         # TYPE elara_super_seal_admission_rejected_shape_total counter\n\
+         elara_super_seal_admission_rejected_shape_total {super_seal_admission_rejected_shape}\n\
+         # HELP elara_super_seal_admission_chain_link_mismatch_total R1-X1 Commit 3 (informational): admitted super-seals whose previous_super_seal_hash / start_epoch did not link to the local pointer (A6). Expected around bootstrap or after a pointer gap; sustained growth = a forked super-seal chain (R1-X1-D).\n\
+         # TYPE elara_super_seal_admission_chain_link_mismatch_total counter\n\
+         elara_super_seal_admission_chain_link_mismatch_total {super_seal_admission_chain_link_mismatch}\n\
          # HELP elara_super_seal_creation_attempts_total Producer-side super-seal creation attempts (this node only). Bumped in `epoch_seal_loop` after `should_create_super_seal` returns true — i.e. just before `create_super_seal()` runs. Disambiguates the failure mode when minted_total stays at 0: attempts climbing but minted flat = create/insert errors (failures counter), attempts flat = gate never fires (boundary log lines explain).\n\
          # TYPE elara_super_seal_creation_attempts_total counter\n\
          elara_super_seal_creation_attempts_total {super_seal_creation_attempts}\n\
@@ -8164,6 +8300,11 @@ pub(crate) async fn metrics_body_tiered(
     let seal_loop_none_bootstrap = state.seal_loop_proposals_none_bootstrap_decline_total.load(std::sync::atomic::Ordering::Relaxed);
     let seal_loop_none_not_in_top = state.seal_loop_proposals_none_not_in_top_ranks_total.load(std::sync::atomic::Ordering::Relaxed);
     let seal_loop_none_rank_too_high = state.seal_loop_proposals_none_rank_too_high_total.load(std::sync::atomic::Ordering::Relaxed);
+    let seal_loop_none_adaptive_pending = state.seal_loop_proposals_none_adaptive_pending_total.load(std::sync::atomic::Ordering::Relaxed);
+    let seal_loop_durable_heals = state.seal_loop_durable_tip_heals_total.load(std::sync::atomic::Ordering::Relaxed);
+    let seal_loop_durable_heal_failed = state.seal_loop_durable_tip_heal_failed_total.load(std::sync::atomic::Ordering::Relaxed);
+    let seal_loop_durable_siblings_read = state.seal_loop_durable_heal_siblings_read_total.load(std::sync::atomic::Ordering::Relaxed);
+    let seal_loop_durable_siblings_divergent = state.seal_loop_durable_heal_siblings_divergent_total.load(std::sync::atomic::Ordering::Relaxed);
     let body = format!("{body}\
          # HELP elara_seal_loop_ticks_total Cumulative `epoch_seal_loop` ticks that survived the catchup-skip check. At base 60s interval this climbs by ~1/min once boot warmup ends. Pair with the four proposal-outcome counters below to disambiguate stall mode.\n\
          # TYPE elara_seal_loop_ticks_total counter\n\
@@ -8177,7 +8318,7 @@ pub(crate) async fn metrics_body_tiered(
          # HELP elara_seal_loop_proposals_escalate_total Cumulative `SealProposal::GlobalEscalate(_)` outcomes (Stage 3c.1 stuck-zone bailout). Healthy = 0. Sustained non-zero = a zone's rank ladder is fully exhausted; this node is emitting a global quorum seal because no anchor in the natural zone responded.\n\
          # TYPE elara_seal_loop_proposals_escalate_total counter\n\
          elara_seal_loop_proposals_escalate_total {seal_loop_escalate}\n\
-         # HELP elara_seal_loop_proposals_none_total Cumulative `SealProposal::None` outcomes (sum of the four reason sub-counters). In a 2-anchor fleet sealing 2 zones, one anchor will None and the other PerZone on any given (zone, epoch), so steady-state climb rate is ~1x per_zone rate. None climbing AND per_zone flat at 0 across ALL anchors = consensus liveness break (no anchor is rank-eligible).\n\
+         # HELP elara_seal_loop_proposals_none_total Cumulative `SealProposal::None` outcomes (sum of the five reason sub-counters). In a 2-anchor fleet sealing 2 zones, one anchor will None and the other PerZone on any given (zone, epoch), so steady-state climb rate is ~1x per_zone rate. None climbing AND per_zone flat at 0 across ALL anchors = consensus liveness break (no anchor is rank-eligible).\n\
          # TYPE elara_seal_loop_proposals_none_total counter\n\
          elara_seal_loop_proposals_none_total {seal_loop_none}\n\
          # HELP elara_seal_loop_proposals_none_already_sealed_total `NoneReason::AlreadySealed` — `latest_epoch[zone] >= epoch_number`. Healthy duplicate-suppression signal; fires on every anchor that lost the race for a (zone, epoch).\n\
@@ -8192,6 +8333,21 @@ pub(crate) async fn metrics_body_tiered(
          # HELP elara_seal_loop_proposals_none_rank_too_high_total `NoneReason::RankTooHighForElapsed` — top-7 but `our_rank > current_allowed_rank` (exponential backoff has not yet unlocked our slot). Self-clearing as elapsed_ms grows; sustained non-zero across all anchors for the same zone = lower ranks absent/byzantine, schedule parked waiting on them.\n\
          # TYPE elara_seal_loop_proposals_none_rank_too_high_total counter\n\
          elara_seal_loop_proposals_none_rank_too_high_total {seal_loop_none_rank_too_high}\n\
+         # HELP elara_seal_loop_proposals_none_adaptive_pending_total `NoneReason::AdaptiveIntervalPending` (NL-1 adaptive seal-gate, Step 2) — this anchor IS the rank-elected per-zone proposer but the zone is not yet due under its adaptive cadence, so the seal is held this tick. Zero while `use_adaptive_seal_gate` is OFF (merge-dark default). With the flag on, a steady climb is healthy cadence throttling (traffic-derived interval slower than the tick), NOT a stall — contrast not_in_top_ranks / rank_too_high.\n\
+         # TYPE elara_seal_loop_proposals_none_adaptive_pending_total counter\n\
+         elara_seal_loop_proposals_none_adaptive_pending_total {seal_loop_none_adaptive_pending}\n\
+         # HELP elara_seal_loop_durable_tip_heals_total T-F10-MULTIZONE Layer-3 heal: epochs whose tip the seal loop re-seeded from a self-produced seal that was durable in CF_EPOCHS but missing from RAM (crash in the durable-write/register_seal window, snapshot lag at an unclean exit, merge/prune/re-split). Informational: each unit is a closed re-propose hole instead of an equivocation. Steady state 0.\n\
+         # TYPE elara_seal_loop_durable_tip_heals_total counter\n\
+         elara_seal_loop_durable_tip_heals_total {seal_loop_durable_heals}\n\
+         # HELP elara_seal_loop_durable_tip_heal_failed_total MUST STAY 0. A self-produced durable seal was refused by the chain-anchor fence during the T-F10 heal and the loop skipped that tick's proposal. Non-zero = this node holds its own seal on a fenced-off chain at a pinned epoch (stale pre-re-genesis node): wipe + virgin re-join.\n\
+         # TYPE elara_seal_loop_durable_tip_heal_failed_total counter\n\
+         elara_seal_loop_durable_tip_heal_failed_total {seal_loop_durable_heal_failed}\n\
+         # HELP elara_seal_loop_durable_heal_siblings_read_total DISC-5 sibling records dereferenced by the T-F10 heal walk (canary for the deliberate no-sibling-cap ruling). Steady state 0; a per-tick delta growing without a matching heal = stored foreign seals piling up at this node's next_epoch (rejected-tip siblings or a planted flood).\n\
+         # TYPE elara_seal_loop_durable_heal_siblings_read_total counter\n\
+         elara_seal_loop_durable_heal_siblings_read_total {seal_loop_durable_siblings_read}\n\
+         # HELP elara_seal_loop_durable_heal_siblings_divergent_total DISC-5 siblings whose index row and stored payload disagreed during the T-F10 heal walk (record missing/unreadable, unparseable seal payload, or zone/epoch mismatch). MUST STAY 0 — non-zero = index/record divergence in the durable store (F2 residual R4 canary); foreign-creator siblings are normal and not counted.\n\
+         # TYPE elara_seal_loop_durable_heal_siblings_divergent_total counter\n\
+         elara_seal_loop_durable_heal_siblings_divergent_total {seal_loop_durable_siblings_divergent}\n\
     ");
 
     // DISC-4 Phase D-2 observability: slow-record classification counters.
@@ -8689,8 +8845,6 @@ pub(crate) async fn metrics_body_tiered(
     };
     let rocksdb_live_bytes = state.rocks.total_live_bytes();
     let cont_ids = state.continuity.try_lock().map(|c| c.identity_count()).unwrap_or(0);
-    let reinc_fps = state.reincarnation.try_lock().map(|r| r.fingerprint_count()).unwrap_or(0);
-    let reinc_cands = state.reincarnation.try_lock().map(|r| r.candidate_count()).unwrap_or(0);
 
     let (rocks_memtable, rocks_cache, rocks_table_readers) = state.rocks.memory_usage();
     let (rocks_pending_compaction, rocks_running_compactions, rocks_immutable_memtables) =
@@ -9353,12 +9507,6 @@ pub(crate) async fn metrics_body_tiered(
          # HELP elara_continuity_identities Number of identities tracked by continuity scoring\n\
          # TYPE elara_continuity_identities gauge\n\
          elara_continuity_identities {cont_ids}\n\
-         # HELP elara_reincarnation_fingerprints Number of behavioral fingerprints tracked\n\
-         # TYPE elara_reincarnation_fingerprints gauge\n\
-         elara_reincarnation_fingerprints {reinc_fps}\n\
-         # HELP elara_reincarnation_candidates Number of detected reincarnation candidates\n\
-         # TYPE elara_reincarnation_candidates gauge\n\
-         elara_reincarnation_candidates {reinc_cands}\n\
          # HELP elara_rocksdb_memtable_bytes RocksDB memtable memory usage\n\
          # TYPE elara_rocksdb_memtable_bytes gauge\n\
          elara_rocksdb_memtable_bytes {rocks_memtable}\n\
@@ -9892,6 +10040,16 @@ pub(crate) async fn metrics_body_tiered(
         .load(std::sync::atomic::Ordering::Relaxed);
     let zp_queue_depth = super::zone_purge::queue_depth(state.as_ref()) as u64;
     let zp_lag_secs = super::zone_purge::oldest_lag_secs(state.as_ref());
+    // R14-b: zone-index ghost-row hygiene counters (atomics, no IO).
+    let zi_ghosts = state
+        .zone_idx_ghosts_pruned_total
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let zi_scanned = state
+        .zone_idx_reconcile_rows_scanned_total
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let zi_passes = state
+        .zone_idx_reconcile_passes_total
+        .load(std::sync::atomic::Ordering::Relaxed);
     // Orphan-resolver high-count circuit-breaker prune
     // counter. Increments only when orphan_count > 200 after a fetch attempt
     // — the prune-as-circuit-breaker fired because cascade outpaced fetch.
@@ -10201,6 +10359,15 @@ pub(crate) async fn metrics_body_tiered(
          # HELP elara_zone_purge_records_purged_total Cumulative records deleted by the zone-purge tick after unsubscribe(). Steady non-zero is normal during subscription churn; a node that never unsubscribes should hold this at 0 fleet-wide.\n\
          # TYPE elara_zone_purge_records_purged_total counter\n\
          elara_zone_purge_records_purged_total {zp_purged}\n\
+         # HELP elara_zone_idx_ghosts_pruned_total R14-b: cumulative CF_RECORD_BY_ZONE rows deleted because no record exists behind them (pre-R14 delete-path leak) - by the zone-purge tick and by the GC loop's bounded reconcile walk (<=5000 rows per cycle, cursor persisted). Expected: a one-time rise on a node that ran pre-R14 code, then flat. Climbing on a fresh node = a NEW leak path.\n\
+         # TYPE elara_zone_idx_ghosts_pruned_total counter\n\
+         elara_zone_idx_ghosts_pruned_total {zi_ghosts}\n\
+         # HELP elara_zone_idx_reconcile_rows_scanned_total R14-b: cumulative zone-index rows examined by the GC loop's reconcile walk.\n\
+         # TYPE elara_zone_idx_reconcile_rows_scanned_total counter\n\
+         elara_zone_idx_reconcile_rows_scanned_total {zi_scanned}\n\
+         # HELP elara_zone_idx_reconcile_passes_total R14-b: completed end-to-end passes of the reconcile walk over CF_RECORD_BY_ZONE.\n\
+         # TYPE elara_zone_idx_reconcile_passes_total counter\n\
+         elara_zone_idx_reconcile_passes_total {zi_passes}\n\
          # HELP elara_orphan_resolver_high_count_pruned_total Cumulative orphan edges pruned by the orphan_resolver_loop's circuit-breaker prune. The resolver always attempts fetch (bounded MAX_FETCH=50/cycle); when orphan_count > 200 after fetch - i.e. cascade is outpacing fetch - this prune fires to cap growth. Bootstrap-pathology distinguisher: rises during catch-up on a behind node, drains to flat once orphan_count stabilises below 200. Sustained non-zero in steady state means fetch is structurally losing to cascade - investigate peer reachability or trigger snapshot-resync.\n\
          # TYPE elara_orphan_resolver_high_count_pruned_total counter\n\
          elara_orphan_resolver_high_count_pruned_total {or_high_count_pruned}\n\
@@ -10780,6 +10947,7 @@ pub fn routes(state: Arc<NodeState>) -> Router {
         // with `epoch_number >= {epoch}`. Optional `?zone=` and `?limit=` query
         // params work identically to `/epochs/headers`.
         .route("/headers/from/{epoch}", get(explorer::headers_from_epoch))
+        .route("/revocations/since/{cursor}", get(explorer::revocations_since))
         // ZSP-C zone-scoped record sync: `/records/from/{epoch}?zone=<id>`
         // returns wire records since the start of `(zone, epoch)`. Iterates
         // CF_RECORD_BY_ZONE (Phase B index) so a light node subscribed to one
@@ -11039,6 +11207,7 @@ pub fn public_routes(state: Arc<NodeState>) -> Router {
         // the loopback data plane (`compute_account_proof`).
         .route("/proof/account/{identity}", get(explorer::account_proof))
         .route("/headers/from/{epoch}", get(explorer::headers_from_epoch))
+        .route("/revocations/since/{cursor}", get(explorer::revocations_since))
         // §11.23 Layer A slice 0: external explorers can resolve a content
         // hash to the full record without first knowing the record id.
         // Read-only, idempotent, O(1) RocksDB point lookup — same posture

@@ -85,7 +85,7 @@ and `mandate-bundle-valid.json` (negative).
 ---
 
 Verify offline: `cargo install elara-verify`, then
-`elara-verify --receipt <record_id>.receipt.json` against any **receipt
+`elara-verify --receipt <record_id>.receipt.json` against any **proof
 envelope** in this directory (that path checks the record + seal legs; its
 verdict vocabulary is VERIFIED / PARTIAL / FAILED). The CONSISTENT verdict
 discussed above comes from the mandate-**bundle** verifier, which has no CLI

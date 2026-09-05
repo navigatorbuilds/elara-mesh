@@ -31,7 +31,6 @@ use std::sync::Arc;
 
 use clap::Parser;
 use tokio::signal;
-use tokio::sync::mpsc;
 use tokio::sync::watch;
 use tracing::{debug, error, info, warn};
 
@@ -2245,15 +2244,34 @@ async fn run() -> Result<()> {
                 let mut json_epoch = node_state.epoch.write_recover();
                 let mut merged = 0u32;
                 for (zone, &rocks_num) in &rocks_epoch.latest_epoch {
-                    let json_num = json_epoch.latest_epoch.get(zone).copied().unwrap_or(0);
-                    if rocks_num > json_num {
+                    // T-F10-MULTIZONE (H2): `Option` compare. A zone ABSENT from
+                    // the JSON snapshot whose RocksDB tip is epoch 0 (a fresh
+                    // post-split zone) must merge too — the old `unwrap_or(0)`
+                    // sentinel silently dropped it (0 > 0 is false), leaving the
+                    // zone untracked and epoch 0 open to re-proposal.
+                    let json_num = json_epoch.latest_epoch.get(zone).copied();
+                    if json_num.is_none_or(|j| rocks_num > j) {
+                        // Copy the tip TRIPLET (`latest_epoch`, seal id, seal hash)
+                        // atomically: advancing `latest_epoch` while the seal
+                        // id/hash stay behind would chain our next seal to the
+                        // wrong parent (peers reject it as forged-sequential). A
+                        // snapshot tip without both is skipped. `latest_vrf_output`
+                        // is copied best-effort below, outside the atomic group
+                        // (pre-existing behaviour, unchanged here).
+                        let (Some(seal_id), Some(seal_hash)) = (
+                            rocks_epoch.latest_seal_id.get(zone),
+                            rocks_epoch.latest_seal_hash.get(zone),
+                        ) else {
+                            warn!(
+                                zone = %zone.path(),
+                                rocks_num,
+                                "epoch merge: RocksDB snapshot tip lacks seal id/hash — zone left as JSON had it"
+                            );
+                            continue;
+                        };
                         json_epoch.latest_epoch.insert(zone.clone(), rocks_num);
-                        if let Some(seal_id) = rocks_epoch.latest_seal_id.get(zone) {
-                            json_epoch.latest_seal_id.insert(zone.clone(), seal_id.clone());
-                        }
-                        if let Some(seal_hash) = rocks_epoch.latest_seal_hash.get(zone) {
-                            json_epoch.latest_seal_hash.insert(zone.clone(), *seal_hash);
-                        }
+                        json_epoch.latest_seal_id.insert(zone.clone(), seal_id.clone());
+                        json_epoch.latest_seal_hash.insert(zone.clone(), *seal_hash);
                         if let Some(vrf) = rocks_epoch.latest_vrf_output.get(zone) {
                             json_epoch.latest_vrf_output.insert(zone.clone(), *vrf);
                         }
@@ -2261,6 +2279,11 @@ async fn run() -> Result<()> {
                     }
                 }
                 if merged > 0 {
+                    // The direct `latest_epoch` writes above bypass
+                    // `apply_canonical_seal`, which is what keeps
+                    // `total_epochs_total` exact — restore the invariant once
+                    // (O(zones), boot-only, idempotent).
+                    json_epoch.recount_total_epochs();
                     let total_seals: u64 = json_epoch.latest_epoch.values().map(|n| n + 1).sum();
                     info!("epoch state merged from RocksDB: {merged} zones advanced, {} total seals", total_seals);
                 }
@@ -3328,7 +3351,7 @@ async fn run() -> Result<()> {
     let (tip_merge_tx, tip_merge_rx) = watch::channel(());
     let (mdns_tx, mdns_rx) = watch::channel(());
     // Gap 1: Light-client header sync (only spawned on NodeProfile::Light).
-    let (light_sync_tx, light_sync_rx) = mpsc::channel(1);
+    let (light_sync_tx, light_sync_rx) = watch::channel(());
 
     // Loop-supervision shared teardown flag, hoisted here so EVERY supervised spawn
     // below (incl. these pre-wave-1 loops) can reference it. Stays false until the
@@ -3353,10 +3376,11 @@ async fn run() -> Result<()> {
     if config.network_realm.discovery_enabled() {
         let pex_state = node_state.clone();
         let status = node_state.loop_registry.register("pex", 600);
+        let hb = status.clone();
         elara_runtime::network::supervision::spawn_supervised(
             status,
             loop_shutdown.clone(),
-            move || discovery::pex_loop(pex_state.clone(), pex_rx.clone()),
+            move || discovery::pex_loop(pex_state.clone(), pex_rx.clone(), hb.clone()),
         );
     } else {
         info!("realm=sovereign: PEX loop disabled (discovery-off)");
@@ -3418,17 +3442,30 @@ async fn run() -> Result<()> {
         use elara_runtime::network::node_profile::NodeProfile;
         let profile = NodeProfile::from_str(&node_state.config.node_profile);
         if matches!(profile, NodeProfile::Light) {
+            // C5-B1 (audit 2026-08-30): supervised + registered like the other
+            // 19 loops (was a raw tokio::spawn with no registry entry and no
+            // heartbeat — invisible to hang detection, and its sender was
+            // missing from the teardown drop set so its shutdown arm could
+            // never fire before process::exit killed it mid-tick).
             let ls_state = node_state.clone();
-            tokio::spawn(async move {
-                elara_runtime::network::light::light_sync_loop(ls_state, light_sync_rx).await;
-            });
-            info!("Gap 1: light_sync_loop spawned (NodeProfile::Light)");
-        } else {
-            // Keep the sender alive so the channel doesn't close — otherwise
-            // an idle receiver on another profile could panic. Silently
-            // shadowing is fine here.
-            let _ = light_sync_tx;
+            let status = node_state.loop_registry.register("light_sync", 600);
+            let hb = status.clone();
+            elara_runtime::network::supervision::spawn_supervised(
+                status,
+                loop_shutdown.clone(),
+                move || {
+                    elara_runtime::network::light::light_sync_loop(
+                        ls_state.clone(),
+                        light_sync_rx.clone(),
+                        hb.clone(),
+                    )
+                },
+            );
+            info!("Gap 1: light_sync_loop spawned supervised (NodeProfile::Light)");
         }
+        // On non-Light profiles no loop is spawned; light_sync_tx stays owned
+        // by run() and is dropped in the graceful-teardown block with the
+        // other 19 senders.
     }
 
     // Independent orphan resolver loop (separate from pull_loop to avoid starvation)
@@ -3532,8 +3569,12 @@ async fn run() -> Result<()> {
     // finalizes incoming records before they age out of pending_ledger.
     {
         let lsr_state = node_state.clone();
+        // W-Q: registered for liveness visibility only — raw spawn kept, since
+        // supervised restart is gated on the Jul-19 verdict's drain-reorder.
+        let lsr_hb = node_state.loop_registry.register("low_stake_replay", 240);
         tokio::spawn(async move {
-            elara_runtime::network::low_stake_replay::low_stake_replay_loop(lsr_state).await;
+            elara_runtime::network::low_stake_replay::low_stake_replay_loop(lsr_state, lsr_hb)
+                .await;
         });
     }
 
@@ -3600,10 +3641,14 @@ async fn run() -> Result<()> {
         );
     }
 
-    // One-time CF_EPOCHS backfill from CF_RECORDS for nodes upgraded
-    // from binaries that predate incremental CF_EPOCHS writes. Skips if
-    // CF_EPOCHS already populated, or if CF_RECORDS is empty (fresh node —
-    // incremental writes from day 0).
+    // One-time side-row backfill (R2 shape, 2026-09-02) for nodes upgraded
+    // with an existing CF_RECORDS: every stored seal gets its DISC-5
+    // CF_EPOCHS row and every stored slash record its durable offense
+    // marker, via the one shared builder (`network::side_writes`). Witness
+    // rows are NOT backfilled (R2b/R11 — never arm the walk retroactively).
+    // Trigger unchanged: CF_EPOCHS empty AND records present. A partial
+    // gap is never repaired here — that is why the writers batch the rows
+    // with the record. Races the bootstrap pull benignly (same fixed keys).
     {
         let bf_state = node_state.clone();
         tokio::spawn(async move {
@@ -3617,40 +3662,14 @@ async fn run() -> Result<()> {
                     record_count
                 );
                 let rocks = bf_state.rocks.clone();
-                let written = tokio::task::spawn_blocking(move || -> usize {
-                    let mut written = 0usize;
-                    let _ = rocks.for_each_record(|rec| {
-                        if !rec.metadata
-                            .contains_key(elara_runtime::network::epoch::EPOCH_OP_KEY)
-                        {
-                            return;
-                        }
-                        if let Ok(Some(seal)) =
-                            elara_runtime::network::epoch::extract_epoch_seal(rec)
-                        {
-                            let key = elara_runtime::network::epoch::disc5_index_key(
-                                seal.epoch_number,
-                                seal.zone.path(),
-                                &rec.id,
-                            );
-                            if rocks
-                                .put_cf_raw(
-                                    elara_runtime::storage::rocks::CF_EPOCHS,
-                                    &key,
-                                    &[],
-                                )
-                                .is_ok()
-                            {
-                                written += 1;
-                            }
-                        }
-                    });
-                    written
+                let out = tokio::task::spawn_blocking(move || {
+                    elara_runtime::network::side_writes::backfill_side_rows(&rocks)
                 })
                 .await
-                .unwrap_or(0);
+                .unwrap_or_default();
                 info!(
-                    "DISC-5 backfill: indexed {written} historical epoch seals into CF_EPOCHS"
+                    "DISC-5 backfill: indexed {} historical epoch seals into CF_EPOCHS, {} slash-offense markers restored, {} row batches failed",
+                    out.disc5_rows, out.offense_markers, out.failed
                 );
             } else {
                 info!(
@@ -3748,12 +3767,27 @@ async fn run() -> Result<()> {
         );
     }
 
-    // Health monitor loop
+    // Health monitor loop — supervised (W-P): the LAST lifecycle loop off the
+    // registry; a panic here froze /health green forever (cached_health serves
+    // the final report) with the fence guard + transition apply silently dead.
     {
         let hm_state = node_state.clone();
-        tokio::spawn(async move {
-            elara_runtime::network::health::health_check_loop(hm_state, health_rx).await;
-        });
+        let hc_interval = config.health_check_interval_secs;
+        let status = node_state
+            .loop_registry
+            .register("health_check", (hc_interval * 4).max(120));
+        let hb = status.clone();
+        elara_runtime::network::supervision::spawn_supervised(
+            status,
+            loop_shutdown.clone(),
+            move || {
+                elara_runtime::network::health::health_check_loop(
+                    hm_state.clone(),
+                    health_rx.clone(),
+                    hb.clone(),
+                )
+            },
+        );
     }
 
     // Stage 6 cooperative-scheduler load sensor — samples /proc/stat + /proc/loadavg
@@ -4016,10 +4050,11 @@ async fn run() -> Result<()> {
     if config.network_realm.discovery_enabled() {
         let rc_state = node_state.clone();
         let status = node_state.loop_registry.register("seed_reconnect", 240);
+        let hb = status.clone();
         elara_runtime::network::supervision::spawn_supervised(
             status,
             loop_shutdown.clone(),
-            move || discovery::seed_reconnect_loop(rc_state.clone(), reconnect_rx.clone()),
+            move || discovery::seed_reconnect_loop(rc_state.clone(), reconnect_rx.clone(), hb.clone()),
         );
     } else {
         info!("realm=sovereign: seed reconnect loop disabled (discovery-off)");
@@ -4384,6 +4419,14 @@ async fn run() -> Result<()> {
         }
         info!("shutting down...");
 
+        // C5-B2 (audit 2026-08-30): raise the shutdown flag BEFORE any teardown
+        // effect, so supervision classifies teardown-window loop exits/panics
+        // as shutdown (no record_restart, no 60s fault backoff) instead of
+        // live faults. This was declared at :3336 and cloned into every
+        // supervised spawn, but never stored — the wiring the inline
+        // follow-up comment promised.
+        loop_shutdown.store(true, std::sync::atomic::Ordering::SeqCst);
+
         // Broadcast signed going-offline to all connected peers before dropping
         // tx channels. Best-effort (2s per-peer timeout, 300ms yield after spawn).
         // Receiving peers mark us Offline (no failure count, no backoff).
@@ -4410,6 +4453,7 @@ async fn run() -> Result<()> {
         drop(probe_tx);
         drop(tip_merge_tx);
         drop(mdns_tx);
+        drop(light_sync_tx);
 
         // Stop state_core — it may hold write locks on ledger/dag mid-insert.
         // Shutdown is sent on the priority channel, so it's processed immediately.

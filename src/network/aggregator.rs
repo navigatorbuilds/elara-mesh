@@ -44,6 +44,14 @@ use crate::ZoneId;
 /// holds regardless of how many nodes live in a zone.
 pub const MAX_VIEW_DEPTH: usize = 7;
 
+/// Bootstrap carve-out boundary: with fewer than this many staked anchors ONLY
+/// the genesis authority may propose (rank 0). Mirrored by the verifier's
+/// `epoch::verify_aggregator_rank` and, since R1-X1-V (2026-09-02), by the
+/// non-genesis fast-forward stake gate in `epoch::verify_epoch_seal_inner`
+/// (`SealStakeView::admits_fastforward`) — all three derive from this one
+/// constant. The freeze-trap boundary tests below pin the VALUE.
+pub const BOOTSTRAP_MIN_STAKERS: usize = 3;
+
 /// Return the first `max_rank` aggregator identities for this `(zone, vrf_output)`.
 ///
 /// Sorted by ascending integer priority
@@ -303,8 +311,9 @@ pub fn proposer_rank(inputs: ProposerRankInputs<'_>) -> Option<u8> {
     if already_sealed {
         return None;
     }
-    // Bootstrap: fewer than 3 stakers → genesis-only proposal at rank 0.
-    if staked.len() < 3 {
+    // Bootstrap: fewer than BOOTSTRAP_MIN_STAKERS stakers → genesis-only
+    // proposal at rank 0.
+    if staked.len() < BOOTSTRAP_MIN_STAKERS {
         return if our_identity == genesis_authority { Some(0) } else { None };
     }
     let beacon = chained_beacon(prev_seal_hash, epoch_number, zone);

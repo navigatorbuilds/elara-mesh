@@ -980,46 +980,24 @@ pub async fn admin_gc_trigger(
     // which stalled every finalization writer for the whole scan and was
     // O(total finalized history) regardless of how few candidates GC
     // actually visits.
-    let result = {
+    let (result, seal_floor_suppressed_zones) = {
         let state2 = state.clone();
         tokio::task::spawn_blocking(move || {
             let sunken_ids: std::collections::HashSet<String> = {
                 let relevance = state2.relevance.lock_recover();
                 relevance.sunken_records(now).into_iter().collect()
             };
-            // Gap 3: per-zone seal pruning floor — same derivation as gc_loop.
-            let seal_pruning_floor: std::collections::HashMap<crate::ZoneId, u64> = {
-                let epoch = state2.epoch.read_recover();
-                const SAFETY_MARGIN_INTERVALS: u64 = 2;
-                let safety_margin = SAFETY_MARGIN_INTERVALS
-                    .saturating_mul(crate::network::epoch::SUPER_SEAL_INTERVAL);
-                epoch
-                    .latest_super_seal
-                    .iter()
-                    .map(|(zone, (end_epoch, _, _, _))| {
-                        (zone.clone(), end_epoch.saturating_sub(safety_margin))
-                    })
-                    .collect()
-            };
-            // Per-zone record pruning floor (Protocol §11.8) — same compute
-            // path as `gc_loop`. Empty when operator config disabled OR Archive
-            // profile, mirroring the live loop's behavior.
-            let epoch_pruning_active = state2.config.epoch_pruning_enabled
-                && state2.config.node_profile != "archive";
-            let record_pruning_floor_ts: std::collections::HashMap<crate::ZoneId, f64> =
-                if epoch_pruning_active {
-                    seal_pruning_floor
-                        .iter()
-                        .filter_map(|(zone, floor_epoch)| {
-                            state2
-                                .rocks
-                                .seal_timestamp_at_zone_epoch(*floor_epoch, zone.path())
-                                .map(|ts| (zone.clone(), ts))
-                        })
-                        .collect()
-                } else {
-                    std::collections::HashMap::new()
-                };
+            // Gap 3 + Tier 3.4 (Protocol §11.8): per-zone seal floor + record
+            // floor — the SAME helpers `gc_loop` uses (R1-X4, 2026-09-02; this
+            // route carried a verbatim copy of both derivations = drift risk).
+            // R1-X1 (2026-09-02): the BOUNDED derivation — a pointer without a
+            // bounding tip yields no floor for its zone; the suppressed-zone
+            // count rides the response as `seal_floor_suppressed_zones` so an
+            // operator sees it without /metrics.
+            let (seal_pruning_floor, seal_floor_suppressed_zones) =
+                crate::network::gc::seal_pruning_floor_map_bounded(&state2);
+            let record_pruning_floor_ts =
+                crate::network::gc::record_pruning_floor_ts_map(&state2, &seal_pruning_floor);
             state2.rocks.gc_scan_and_delete(
                 retention_cutoff,
                 stale_cutoff,
@@ -1029,6 +1007,7 @@ pub async fn admin_gc_trigger(
                 &record_pruning_floor_ts,
                 None,
             )
+            .map(|r| (r, seal_floor_suppressed_zones))
         })
         .await
         .map_err(|e| ElaraError::Network(format!("spawn_blocking: {e}")))?
@@ -1056,6 +1035,7 @@ pub async fn admin_gc_trigger(
         "sunken_pruned": result.sunken_pruned,
         "stale_pruned": result.stale_pruned,
         "seal_pruned": result.seal_pruned,
+        "seal_floor_suppressed_zones": seal_floor_suppressed_zones,
         "skipped": result.skipped,
         "total_pruned": total,
     })))

@@ -106,6 +106,33 @@ Exit code `1`. It names **exactly** the one check that broke (`signature`) and
 leaves the other three green — the truth, not a blanket rejection. That is the
 point: the verifier will not print a green it cannot prove.
 
+### The fast-tier class — Profile B (single signature)
+
+`sample-record-profile-b.json` is the **same** record as `sample-record.json`
+with its *optional* SPHINCS+ leg dropped (Profile A → B). The Dilithium3
+(ML-DSA-65) signature still verifies untouched — it signs `signable_bytes()`,
+which never covered the SPHINCS+ fields — so this single signature is a real
+one, not a re-sign:
+
+```bash
+$V examples/verify/sample-record-profile-b.json
+```
+
+```
+  ✓ signature         Dilithium3 (ML-DSA-65) valid over canonical record bytes
+  ✓ profile           Profile B (single signature)
+
+VERDICT: VERIFIED
+```
+
+This is the class the paid x402 verification endpoint serves on its **fast
+edge tier**: single-signature Profile B records are verified inline, while
+Profile A *dual*-signature records are declined there with an honest `422`
+(SPHINCS+ is over the edge CPU budget) and pointed back at this same free
+offline crate — identical verdict logic. Regenerate byte-for-byte from the
+committed wire record:
+`cargo run --release --example dump_record_json -- examples/verify/sample-record.wire --profile-b`.
+
 ## 2. The anchor — *when did it provably exist?*
 
 ```bash
@@ -259,7 +286,7 @@ this identity's sealed account-state provably existed inside a nine-minute
 window on 2026-07-10, shown entirely offline. Full recipes (record *and*
 account chains): [`docs/ELARA-VERIFY.md`](../../docs/ELARA-VERIFY.md).
 
-## 4. The receipt — *the whole run in one file*
+## 4. The proof envelope — *the whole run in one file*
 
 The flags above hand the verifier each piece of evidence separately. A
 `.elara-receipt` (v1, JSON) bundles them — signed wire objects hex-encoded,
@@ -274,11 +301,11 @@ elara-verify --receipt sample-receipt.json \
 ```
 
 Verdict: `VERIFIED` (exit 0) — and the headline says exactly what was and was
-not established (this receipt has no inclusion leg, so no record→seal chain is
-claimed). **Trust never rides in the receipt**: drop the two pin flags and the
+not established (this envelope has no inclusion leg, so no record→seal chain is
+claimed). **Trust never rides in the envelope**: drop the two pin flags and the
 seal leg downgrades to an honest `⚠ PARTIAL` (exit 3) instead of trusting the
-receipt's own contents — a receipt cannot vouch for its own trust root. `.ots`
-Bitcoin proofs do not ride in receipts (their sidecar files stay CLI legs, §2).
+envelope's own contents — an envelope cannot vouch for its own trust root. `.ots`
+Bitcoin proofs do not ride in envelopes (their sidecar files stay CLI legs, §2).
 The same envelope verifies **in a browser** at the hosted verify page
 (`verify_receipt_offline`, the identical shared core compiled to wasm) — paste
 the file, paste the pins.
@@ -477,10 +504,12 @@ Harvested from the live Elara testnet as fixed snapshots that stay valid
 offline indefinitely — and since 2026-07-11 the whole bundle **converges on
 one epoch of one chain**:
 
-- **The record (leg 1, the receipt, the conformance vectors):**
+- **The record (leg 1, the proof envelope, the conformance vectors):**
   `019f4e4f-…` — the genesis authority's witness-profile registration
   (creator `ada8575c…`, organization `elara-seed-0`, dual-signed
-  ML-DSA-65 + SLH-DSA).
+  ML-DSA-65 + SLH-DSA). `sample-record-profile-b.json` is this same
+  record with the SPHINCS+ leg stripped (Profile B) — the fast-tier
+  single-signature class.
 - **The seal (legs 5–6):** the zone-0 **epoch-41340** seal
   (`epoch-41340-zone-0.seal.wire`, hash `826306…`) that committed that
   identity's sealed account-state, signed by the zone-0 validator key

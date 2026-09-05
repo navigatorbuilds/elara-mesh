@@ -107,6 +107,9 @@ pub const CF_GOVERNANCE: &str = "governance";
 pub const CF_VELOCITY: &str = "velocity";
 pub const CF_VRF_KEYS: &str = "vrf_keys";
 /// Secondary index: timestamp → record_id (for range queries without full scan).
+/// Value: since R14 (2026-09-02) the 8-byte zone key the record's
+/// `CF_RECORD_BY_ZONE` row was written under (empty on rows written before
+/// that). Every reader of this CF walks keys only and ignores the value.
 pub const CF_IDX_TIMESTAMP: &str = "idx_timestamp";
 /// Secondary index: creator_identity_hash → record_id (for per-identity queries).
 pub const CF_IDX_CREATOR: &str = "idx_creator";
@@ -257,11 +260,22 @@ pub const CF_WITNESS_REGISTRY: &str = "witness_registry";
 /// under whatever zone their `record.zone` field declares.
 ///
 /// **Population:**
-///   - Hot path: `put_record_with_pk_zone` writes under the registry-resolved
-///     leaf zone (handles post-split routing).
+///   - Hot path: `put_record_with_pk_zone` (ingest + bootstrap) writes under
+///     the registry-resolved leaf zone (handles post-split routing).
 ///   - Other paths: `put_record` / `put_record_with_pk` write under the
 ///     content-derived zone (`record.zone` or `for_record(id)`).
-///   - Existing records: `backfill_zone_index_chunk` (admin-triggered).
+///
+/// **Cleanup (R14, 2026-09-02):** the zone key a row was written under is not
+/// derivable from the record alone, so every put stores it as the value of the
+/// record's `CF_IDX_TIMESTAMP` row and `delete_record` / overwrite cleanup read
+/// it back (`zone_idx_delete_candidates`), also trying the content-derived and
+/// current-count keys for rows written before the hint existed. Before R14 the
+/// delete path re-derived `for_record(id)` alone and leaked the hot-path row on
+/// every retention prune (ghost ids from `iter_zone`, inflated `count_zone`).
+/// Rows leaked BEFORE R14 have no record and no hint left, so no record-driven
+/// delete can reach them: R14-b sweeps them by exact key — the zone-purge tick
+/// for the zone it drains, and `reconcile_zone_index_chunk` (≤ 5000 rows per
+/// GC cycle, cursor in `CF_METADATA`) for the whole index.
 ///
 /// **Capacity:** ~24 bytes/entry × 10T records = 240TB at mainnet ceiling.
 /// At 6-node testnet (~120K records): ~3MB. The CF stores empty values, so
@@ -363,6 +377,27 @@ pub const CF_MANDATE_ACTS_BY_TIME: &str = "mandate_acts_by_time";
 /// (`force_acts_coverage_floor_genesis`). Advanced (never regressed) at snapshot
 /// bootstrap and by the budget evictor. See [`ACTS_COVERAGE_FLOOR_KEY`].
 pub const ACTS_COVERAGE_FLOOR_KEY: &str = "__acts_index_complete_from_ms__";
+
+/// R14-b (2026-09-02): `CF_METADATA` key holding the zone-index reconcile
+/// walk's resume cursor (the last `CF_RECORD_BY_ZONE` key examined). Absent =
+/// the next step starts at the top of the CF.
+pub const ZONE_IDX_RECONCILE_CURSOR_KEY: &[u8] = b"__zone_idx_reconcile_cursor__";
+
+/// R14-b: outcome of one bounded step of
+/// [`StorageEngine::reconcile_zone_index_chunk`].
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ZoneIdxReconcileChunk {
+    /// Index rows examined this step.
+    pub scanned: usize,
+    /// Rows deleted because no record exists behind them (or the key was
+    /// malformed).
+    pub ghosts_deleted: usize,
+    /// Rows restored because their record re-appeared between the existence
+    /// check and the delete (race guard) — expected 0; non-zero is benign.
+    pub reput: usize,
+    /// Resume key for the next step; `None` = the end of the CF was reached.
+    pub next_cursor: Option<Vec<u8>>,
+}
 
 /// Hard server-side cap on a single `/mandate/{id}/acts` page — bounds the
 /// keyset scan + the per-row flag recompute (each a bloom-filtered point read).
@@ -481,6 +516,65 @@ pub enum RotationBatchOp {
         record_id: String,
         lineage_id: String,
     },
+}
+
+/// Side-writes that ride a record's own admission `WriteBatch` in
+/// [`StorageEngine::put_record_with_pk_zone`], so each shares the record's
+/// crash fate (the DISC-5 precedent). `Default` = no side-writes, which is
+/// every non-seal, non-slash record — zero hot-path cost.
+///
+/// F2 (2026-09-02, internal design notes):
+/// replaces the positional `disc5_epoch_key: Option<&[u8]>` parameter with a
+/// named struct so the two F2 keys could be added without a 10th positional
+/// argument.
+#[derive(Default, Clone, Debug)]
+pub struct RecordSideWrites {
+    /// DISC-5 CF_EPOCHS existence key for seal records
+    /// (`network::epoch::disc5_index_key`). Empty value; presence is the signal.
+    pub disc5_epoch_key: Option<Vec<u8>>,
+    /// F2 equivocation witness index row (CF_METADATA):
+    /// `equivocation_index_key(epoch, zone_path, creator, record_id)` → the
+    /// seal's `record_hash`. Creator-keyed so the witness walk only ever
+    /// touches the creator's own slot — see `find_equivocation_witness`.
+    pub equivocation_key: Option<(Vec<u8>, [u8; 32])>,
+    /// F2 durable slash-offense marker (CF_METADATA):
+    /// `slash_offense_key(digest)` → the slash record's id. Written for any
+    /// stored slash record carrying `beat_offense`, so a restarted (or
+    /// rebuilt) genesis node never re-slashes an offense it already executed.
+    pub slash_offense_key: Option<Vec<u8>>,
+}
+
+/// Result of [`StorageEngine::find_equivocation_witness`].
+#[derive(Default, Clone, Debug)]
+pub struct EquivocationScan {
+    /// `(conflicting_record_id, its_record_hash)` — the first other seal by the
+    /// same creator at the same (zone, epoch) with DIFFERENT content.
+    pub witness: Option<(String, [u8; 32])>,
+    /// Witness rows visited (own row included). Exported as
+    /// `elara_slashing_witness_keys_read_total`; the caller warns above
+    /// `DURABLE_HEAL_SIBLINGS_WARN`. Honest steady state: 1 per seal.
+    pub keys_read: u64,
+    /// Rows whose value was not a 32-byte hash (skipped). Must stay 0.
+    pub malformed_rows: u64,
+}
+
+impl RecordSideWrites {
+    /// Seal-record shorthand used by tests and the boot backfill helpers:
+    /// only the DISC-5 key.
+    pub fn disc5(key: Vec<u8>) -> Self {
+        Self {
+            disc5_epoch_key: Some(key),
+            ..Self::default()
+        }
+    }
+
+    /// `true` when the record owns no side row at all (the common case: an
+    /// ordinary non-seal, non-slash record).
+    pub fn is_empty(&self) -> bool {
+        self.disc5_epoch_key.is_none()
+            && self.equivocation_key.is_none()
+            && self.slash_offense_key.is_none()
+    }
 }
 
 /// Why a record is being deleted — controls whether `delete_record` PRESERVES
@@ -984,7 +1078,7 @@ impl StorageEngine {
     /// Layout: `[zone_key (8B)] [ts_be (8B)] [record_id (UTF-8)]`.
     /// The fixed 16-byte prefix lets RocksDB `prefix_iterator_cf` seek directly
     /// to the start of any zone's record range without scanning sibling zones.
-    fn zone_idx_key(zone_key: &[u8; 8], timestamp: f64, record_id: &str) -> Vec<u8> {
+    pub(crate) fn zone_idx_key(zone_key: &[u8; 8], timestamp: f64, record_id: &str) -> Vec<u8> {
         let mut k = Vec::with_capacity(8 + 8 + record_id.len());
         k.extend_from_slice(zone_key);
         k.extend_from_slice(&timestamp.to_be_bytes());
@@ -1005,6 +1099,43 @@ impl StorageEngine {
             .as_ref()
             .map(|z| z.to_key_bytes())
             .unwrap_or_else(|| crate::ZoneId::for_record(record_id).to_key_bytes())
+    }
+
+    /// R14 (2026-09-02): every `CF_RECORD_BY_ZONE` row a stored record may own.
+    ///
+    /// Rows are written under the caller-supplied zone key — the hot path
+    /// (`ingest.rs` / `gossip.rs`) passes the registry-resolved leaf, which is
+    /// NOT derivable from the record alone — so the put paths store that key as
+    /// the value of the record's `CF_IDX_TIMESTAMP` row and the delete paths read
+    /// it back here. Rows written before the hint existed carry an empty value;
+    /// for those the content-derived key (`record_zone_key`) and the current-count
+    /// naive key (`consensus::zone_for_record`) are tried as well. Every candidate
+    /// embeds this record's own id + timestamp, so a delete can never touch
+    /// another record's row. Bounded: at most three point deletes per record.
+    fn zone_idx_delete_candidates(&self, rec: &ValidationRecord, record_id: &str) -> Result<Vec<Vec<u8>>> {
+        let mut zone_keys: Vec<[u8; 8]> = Vec::with_capacity(3);
+        let mut ts_key = Vec::with_capacity(8 + record_id.len());
+        ts_key.extend_from_slice(&rec.timestamp.to_be_bytes());
+        ts_key.extend_from_slice(record_id.as_bytes());
+        let hint = self
+            .db
+            .get_cf(&self.try_cf(CF_IDX_TIMESTAMP)?, &ts_key)
+            .map_err(|e| ElaraError::Storage(format!("zone_idx_delete_candidates get: {e}")))?;
+        if let Some(hint) = hint.as_deref().and_then(|v| <[u8; 8]>::try_from(v).ok()) {
+            zone_keys.push(hint);
+        }
+        let content_key = Self::record_zone_key(rec, record_id);
+        if !zone_keys.contains(&content_key) {
+            zone_keys.push(content_key);
+        }
+        let naive_key = crate::network::consensus::zone_for_record(record_id).to_key_bytes();
+        if !zone_keys.contains(&naive_key) {
+            zone_keys.push(naive_key);
+        }
+        Ok(zone_keys
+            .iter()
+            .map(|zk| Self::zone_idx_key(zk, rec.timestamp, record_id))
+            .collect())
     }
 
     /// Store a record (wire-encoded bytes) by its UUID.
@@ -1039,10 +1170,8 @@ impl StorageEngine {
         if let Some(ref old) = old_record {
             let old_ts = old.timestamp.to_be_bytes();
             let new_ts = record.timestamp.to_be_bytes();
-            let old_zone_key = Self::record_zone_key(old, record_id);
             let timestamp_changed = old_ts != new_ts;
             let creator_changed = old.creator_public_key != record.creator_public_key;
-            let zone_changed = old_zone_key != zone_key;
             if timestamp_changed || creator_changed {
                 // Remove stale timestamp index entry
                 let mut old_ts_key = Vec::with_capacity(8 + record_id.len());
@@ -1058,11 +1187,12 @@ impl StorageEngine {
                 old_creator_key.extend_from_slice(record_id.as_bytes());
                 batch.delete_cf(&self.try_cf(CF_IDX_CREATOR)?, &old_creator_key);
             }
-            // Zone-idx is keyed on (zone, ts, record_id). If any of those three
-            // shifts, the old entry would leak; delete it here so iter_zone never
-            // returns ghost record_ids.
-            if timestamp_changed || zone_changed {
-                let stale_zone_key = Self::zone_idx_key(&old_zone_key, old.timestamp, record_id);
+            // Zone-idx is keyed on (zone, ts, record_id), and the zone key the
+            // old row was written under is not derivable from `old` alone (R14:
+            // the hot path indexes under the registry-resolved leaf). Delete
+            // every row this record may own; the fresh row is put later in this
+            // same batch, so a same-key delete+put nets to the put.
+            for stale_zone_key in self.zone_idx_delete_candidates(old, record_id)? {
                 batch.delete_cf(&self.try_cf(CF_RECORD_BY_ZONE)?, &stale_zone_key);
             }
         }
@@ -1070,12 +1200,13 @@ impl StorageEngine {
         // Primary record
         batch.put_cf(&self.try_cf(CF_RECORDS)?, record_id.as_bytes(), &wire);
 
-        // Timestamp index: key = timestamp_be(8B) + record_id → empty
+        // Timestamp index: key = timestamp_be(8B) + record_id → 8B zone key
+        // (R14 hint: the key the CF_RECORD_BY_ZONE row below is written under)
         let ts_bytes = record.timestamp.to_be_bytes();
         let mut ts_key = Vec::with_capacity(8 + record_id.len());
         ts_key.extend_from_slice(&ts_bytes);
         ts_key.extend_from_slice(record_id.as_bytes());
-        batch.put_cf(&self.try_cf(CF_IDX_TIMESTAMP)?, &ts_key, b"");
+        batch.put_cf(&self.try_cf(CF_IDX_TIMESTAMP)?, &ts_key, zone_key);
 
         // Creator index: key = creator_hash_hex(64B) + timestamp_be(8B) + record_id → empty
         let creator_hash = crate::crypto::hash::sha3_256_hex(&record.creator_public_key);
@@ -1138,7 +1269,16 @@ impl StorageEngine {
     /// Used by the ingest hot path to halve RocksDB write operations per record.
     pub fn put_record_with_pk(&self, record_id: &str, record: &ValidationRecord, identity_hash: &str, pk: &[u8]) -> Result<()> {
         let zone_key = Self::record_zone_key(record, record_id);
-        self.put_record_with_pk_zone(record_id, record, identity_hash, pk, zone_key, None, None, None)
+        self.put_record_with_pk_zone(
+            record_id,
+            record,
+            identity_hash,
+            pk,
+            zone_key,
+            None,
+            RecordSideWrites::default(),
+            None,
+        )
     }
 
     /// Hot-path variant of `put_record_with_pk` that takes an explicit `zone_key`.
@@ -1162,7 +1302,7 @@ impl StorageEngine {
         pk: &[u8],
         zone_key: [u8; 8],
         slot_key: Option<&str>,
-        disc5_epoch_key: Option<&[u8]>,
+        side_writes: RecordSideWrites,
         rotation_op: Option<RotationBatchOp>,
     ) -> Result<()> {
         let wire = record.to_bytes();
@@ -1180,10 +1320,8 @@ impl StorageEngine {
         if let Some(ref old) = old_record {
             let old_ts = old.timestamp.to_be_bytes();
             let new_ts = record.timestamp.to_be_bytes();
-            let old_zone_key = Self::record_zone_key(old, record_id);
             let timestamp_changed = old_ts != new_ts;
             let creator_changed = old.creator_public_key != record.creator_public_key;
-            let zone_changed = old_zone_key != zone_key;
             if timestamp_changed || creator_changed {
                 let mut old_ts_key = Vec::with_capacity(8 + record_id.len());
                 old_ts_key.extend_from_slice(&old_ts);
@@ -1197,8 +1335,12 @@ impl StorageEngine {
                 old_creator_key.extend_from_slice(record_id.as_bytes());
                 batch.delete_cf(&self.try_cf(CF_IDX_CREATOR)?, &old_creator_key);
             }
-            if timestamp_changed || zone_changed {
-                let stale_zone_key = Self::zone_idx_key(&old_zone_key, old.timestamp, record_id);
+            // Zone-idx is keyed on (zone, ts, record_id), and the zone key the
+            // old row was written under is not derivable from `old` alone (R14:
+            // the hot path indexes under the registry-resolved leaf). Delete
+            // every row this record may own; the fresh row is put later in this
+            // same batch, so a same-key delete+put nets to the put.
+            for stale_zone_key in self.zone_idx_delete_candidates(old, record_id)? {
                 batch.delete_cf(&self.try_cf(CF_RECORD_BY_ZONE)?, &stale_zone_key);
             }
         }
@@ -1206,12 +1348,12 @@ impl StorageEngine {
         // Primary record
         batch.put_cf(&self.try_cf(CF_RECORDS)?, record_id.as_bytes(), &wire);
 
-        // Timestamp index
+        // Timestamp index (value = 8B zone key, the R14 hint — see put_record_with_zone)
         let ts_bytes = record.timestamp.to_be_bytes();
         let mut ts_key = Vec::with_capacity(8 + record_id.len());
         ts_key.extend_from_slice(&ts_bytes);
         ts_key.extend_from_slice(record_id.as_bytes());
-        batch.put_cf(&self.try_cf(CF_IDX_TIMESTAMP)?, &ts_key, b"");
+        batch.put_cf(&self.try_cf(CF_IDX_TIMESTAMP)?, &ts_key, zone_key);
 
         // Creator index
         let creator_hash = crate::crypto::hash::sha3_256_hex(&record.creator_public_key);
@@ -1291,9 +1433,14 @@ impl StorageEngine {
         // crash fate via this single WriteBatch). If a future change ever splits
         // the seal payload and its CF_EPOCHS index into SEPARATE batches, that
         // assumption breaks and the F-10 "Case B" epoch-repropose window reopens.
-        if let Some(epoch_key) = disc5_epoch_key {
-            batch.put_cf(&self.try_cf(CF_EPOCHS)?, epoch_key, b"");
-        }
+        //
+        // R2 (2026-09-02): the three rows are appended by ONE helper,
+        // `put_side_writes_to_batch`, shared with the boot backfill's
+        // `write_record_side_writes`; the keys arrive pre-derived from the one
+        // shared builder `network::side_writes::record_side_writes` (live
+        // ingest, bootstrap pull, backfill), and `delete_record` re-derives the
+        // identical keys through the same builder.
+        self.put_side_writes_to_batch(&mut batch, record_id, &side_writes)?;
 
         // KR-3 S2 (W2-A): rotation-finality side-write, atomic with the record's
         // own batch (same crash-fate as the DISC-5 index above). Only `Some`
@@ -1333,6 +1480,88 @@ impl StorageEngine {
             self.anchor_add_seq.fetch_add(1, std::sync::atomic::Ordering::Release);
         }
         Ok(())
+    }
+
+    /// `(epoch_number, normalised zone path)` from a record's raw seal
+    /// metadata — the `delete_record` fallback for a record that claims to be
+    /// a seal but that the current seal parser rejects. Same `ZoneId`
+    /// normalisation `extract_epoch_seal` applies (string → `ZoneId::new`,
+    /// legacy integer → `ZoneId::from_legacy`).
+    fn raw_seal_coords(rec: &ValidationRecord) -> Option<(u64, String)> {
+        if rec
+            .metadata
+            .get(crate::network::epoch::EPOCH_OP_KEY)
+            .and_then(|v| v.as_str())
+            != Some(crate::network::epoch::EPOCH_OP_SEAL)
+        {
+            return None;
+        }
+        let zone = match rec.metadata.get("epoch_zone")? {
+            v if v.is_string() => crate::ZoneId::new(v.as_str()?),
+            v => crate::ZoneId::from_legacy(v.as_u64()?),
+        };
+        let epoch = rec.metadata.get("epoch_number")?.as_u64()?;
+        Some((epoch, zone.path().to_string()))
+    }
+
+    /// The side rows one record owns, appended to `batch` — the ONLY place
+    /// their column families and values are decided (R2, 2026-09-02):
+    ///   * DISC-5 epoch existence key → CF_EPOCHS, empty value (presence is
+    ///     the signal). This replaced a standalone `put_cf_raw` in ingest that
+    ///     ran ~650 lines / several `.await`s after the record write; a crash
+    ///     in that gap stranded the seal with no index, and "the backfill
+    ///     repairs it" was false — the boot backfill is gated on
+    ///     `cf_epochs_size == 0`, so a partial gap is never repaired.
+    ///   * F2 creator-keyed equivocation witness row → CF_METADATA, value =
+    ///     the seal's `record_hash`, so the Phase-2 witness walk decides
+    ///     "different content at the same (creator, zone, epoch)" from the
+    ///     index alone (no sibling record load, no walk over OTHER creators'
+    ///     seals). Deleted alongside the record in `delete_record`.
+    ///   * F2 durable slash-offense marker → CF_METADATA, value = the slash
+    ///     record's id. `Some` only for a stored slash record carrying
+    ///     `beat_offense` (`network::slashing::create_slash_record`). Point
+    ///     lookup, never swept and never deleted with its record (the
+    ///     restart-proof dedup must outlive a GC'd slash record; residual R10).
+    ///
+    /// Callers: `put_record_with_pk_zone` (live ingest + bootstrap pull, the
+    /// record's own batch) and `write_record_side_writes` (boot backfill).
+    fn put_side_writes_to_batch(
+        &self,
+        batch: &mut rocksdb::WriteBatch,
+        record_id: &str,
+        side_writes: &RecordSideWrites,
+    ) -> Result<()> {
+        if let Some(epoch_key) = side_writes.disc5_epoch_key.as_deref() {
+            batch.put_cf(&self.try_cf(CF_EPOCHS)?, epoch_key, b"");
+        }
+        if let Some((eqv_key, record_hash)) = side_writes.equivocation_key.as_ref() {
+            batch.put_cf(&self.try_cf(CF_METADATA)?, eqv_key, record_hash);
+        }
+        if let Some(offense_key) = side_writes.slash_offense_key.as_deref() {
+            batch.put_cf(&self.try_cf(CF_METADATA)?, offense_key, record_id.as_bytes());
+        }
+        Ok(())
+    }
+
+    /// Write the side rows of an ALREADY-STORED record in one batch — the boot
+    /// backfill's path (`network::side_writes::backfill_side_rows`). Live
+    /// ingest and the bootstrap pull never call this: their rows ride the
+    /// record's own `put_record_with_pk_zone` batch (shared crash fate).
+    /// Idempotent (fixed-value puts keyed by the record); a no-op for a record
+    /// that owns no rows.
+    pub fn write_record_side_writes(
+        &self,
+        record_id: &str,
+        side_writes: &RecordSideWrites,
+    ) -> Result<()> {
+        if side_writes.is_empty() {
+            return Ok(());
+        }
+        let mut batch = rocksdb::WriteBatch::default();
+        self.put_side_writes_to_batch(&mut batch, record_id, side_writes)?;
+        self.db
+            .write(batch)
+            .map_err(|e| ElaraError::Storage(format!("record side-writes batch: {e}")))
     }
 
     /// Recalibrate the cached __record_count__ to match the actual number of
@@ -1436,6 +1665,24 @@ impl StorageEngine {
         until: Option<f64>,
         limit: usize,
     ) -> Vec<String> {
+        self.iter_zone_entries(zone_key, since, until, limit)
+            .into_iter()
+            .map(|(_, id)| id)
+            .collect()
+    }
+
+    /// R14-b (2026-09-02): [`Self::iter_zone`] plus the full index key of every
+    /// row. A caller that finds no record behind an entry (a ghost row leaked
+    /// by the pre-R14 delete path) can delete that exact key instead of
+    /// re-deriving one that may not match — `delete_record` cannot reach a row
+    /// whose record is already gone. Same prefix-bounded cost as `iter_zone`.
+    pub fn iter_zone_entries(
+        &self,
+        zone_key: &[u8; 8],
+        since: Option<f64>,
+        until: Option<f64>,
+        limit: usize,
+    ) -> Vec<(Vec<u8>, String)> {
         if limit == 0 {
             return Vec::new();
         }
@@ -1466,7 +1713,7 @@ impl StorageEngine {
             }
             // record_id is everything after the 16-byte (zone, ts) prefix.
             if let Ok(s) = std::str::from_utf8(&key[16..]) {
-                out.push(s.to_string());
+                out.push((key.to_vec(), s.to_string()));
                 if out.len() >= limit {
                     break;
                 }
@@ -1673,6 +1920,171 @@ impl StorageEngine {
             .count()
     }
 
+    /// R14-b (2026-09-02): delete zone-index rows by their exact key. Used for
+    /// ghost rows — entries whose record no longer exists, which no
+    /// record-driven delete path can reach. Point deletes only; a key that is
+    /// already gone is a no-op. Returns the number of keys submitted.
+    pub fn delete_zone_idx_rows(&self, keys: &[Vec<u8>]) -> Result<usize> {
+        if keys.is_empty() {
+            return Ok(0);
+        }
+        let cf = self.try_cf(CF_RECORD_BY_ZONE)?;
+        let mut batch = rocksdb::WriteBatch::default();
+        for key in keys {
+            batch.delete_cf(&cf, key);
+        }
+        self.db
+            .write(batch)
+            .map_err(|e| ElaraError::Storage(format!("delete_zone_idx_rows: {e}")))?;
+        Ok(keys.len())
+    }
+
+    /// R14-b: one bounded step of the zone-index reconcile walk. Examines at
+    /// most `max_rows` rows of `CF_RECORD_BY_ZONE` after the exclusive cursor
+    /// `start_after` (`None` = start of the CF) and deletes every row with no
+    /// record behind it (or a malformed key): the ghosts leaked by the pre-R14
+    /// delete path. Cost is O(max_rows) bloom-filtered point reads + one
+    /// WriteBatch — never O(index) — so the GC loop runs it every cycle on a
+    /// node with millions of rows; `next_cursor` resumes the walk and `None`
+    /// means the end of the CF was reached (the next step starts over).
+    ///
+    /// Rows of a LIVE record under a non-canonical zone are not ghosts and are
+    /// left alone: the storage layer cannot resolve a record's canonical zone,
+    /// and no such row can arise after R14's overwrite cleanup.
+    ///
+    /// Race guard: a record ingested between this step's existence check and
+    /// its delete writes its row under this SAME key (the put batch carries
+    /// body + row), so every deleted key is re-checked afterwards and the row
+    /// restored when the record is now present. The walk can therefore leave
+    /// a benign transient ghost (record deleted right after the re-check —
+    /// swept by a later pass) but never a live record unindexed.
+    pub fn reconcile_zone_index_chunk(
+        &self,
+        start_after: Option<&[u8]>,
+        max_rows: usize,
+    ) -> Result<ZoneIdxReconcileChunk> {
+        let mut out = ZoneIdxReconcileChunk::default();
+        if max_rows == 0 {
+            out.next_cursor = start_after.map(<[u8]>::to_vec);
+            return Ok(out);
+        }
+        let cf_zone = self.try_cf(CF_RECORD_BY_ZONE)?;
+        let cf_records = self.try_cf(CF_RECORDS)?;
+        let mode = match start_after {
+            Some(after) => rocksdb::IteratorMode::From(after, rocksdb::Direction::Forward),
+            None => rocksdb::IteratorMode::Start,
+        };
+        // (row key, parsed record id — `None` for a malformed key)
+        let mut ghosts: Vec<(Vec<u8>, Option<String>)> = Vec::new();
+        let mut last_key: Option<Vec<u8>> = None;
+        let mut reached_end = true;
+        for kv in self.db.iterator_cf(&cf_zone, mode) {
+            let (key, _) = kv.map_err(|e| {
+                ElaraError::Storage(format!("reconcile_zone_index_chunk iter: {e}"))
+            })?;
+            if start_after.is_some_and(|after| &*key == after) {
+                continue; // exclusive cursor: the seek lands ON the previous last key
+            }
+            out.scanned += 1;
+            let record_id = key
+                .get(16..)
+                .and_then(|tail| std::str::from_utf8(tail).ok())
+                .filter(|id| !id.is_empty())
+                .map(str::to_string);
+            let live = match &record_id {
+                Some(id) => self
+                    .db
+                    .get_pinned_cf(&cf_records, id.as_bytes())
+                    .map_err(|e| {
+                        ElaraError::Storage(format!("reconcile_zone_index_chunk get: {e}"))
+                    })?
+                    .is_some(),
+                None => false,
+            };
+            if !live {
+                ghosts.push((key.to_vec(), record_id));
+            }
+            last_key = Some(key.to_vec());
+            if out.scanned >= max_rows {
+                reached_end = false;
+                break;
+            }
+        }
+        if !ghosts.is_empty() {
+            let mut batch = rocksdb::WriteBatch::default();
+            for (key, _) in &ghosts {
+                batch.delete_cf(&cf_zone, key);
+            }
+            self.db.write(batch).map_err(|e| {
+                ElaraError::Storage(format!("reconcile_zone_index_chunk delete: {e}"))
+            })?;
+            out.ghosts_deleted = ghosts.len();
+            let mut restore = rocksdb::WriteBatch::default();
+            for (key, record_id) in &ghosts {
+                let Some(id) = record_id else { continue };
+                let present = self
+                    .db
+                    .get_pinned_cf(&cf_records, id.as_bytes())
+                    .map_err(|e| {
+                        ElaraError::Storage(format!("reconcile_zone_index_chunk recheck: {e}"))
+                    })?
+                    .is_some();
+                if present {
+                    restore.put_cf(&cf_zone, key, b"");
+                    out.reput += 1;
+                }
+            }
+            if out.reput > 0 {
+                self.db.write(restore).map_err(|e| {
+                    ElaraError::Storage(format!("reconcile_zone_index_chunk restore: {e}"))
+                })?;
+            }
+        }
+        out.next_cursor = if reached_end { None } else { last_key };
+        Ok(out)
+    }
+
+    /// R14-b: resume key of the zone-index reconcile walk (`None` = start over).
+    pub fn load_zone_idx_reconcile_cursor(&self) -> Option<Vec<u8>> {
+        let cf = match self.try_cf(CF_METADATA) {
+            Ok(cf) => cf,
+            Err(e) => {
+                tracing::warn!("load_zone_idx_reconcile_cursor: {e}");
+                return None;
+            }
+        };
+        match self.db.get_cf(&cf, ZONE_IDX_RECONCILE_CURSOR_KEY) {
+            Ok(Some(bytes)) if !bytes.is_empty() => Some(bytes),
+            Ok(_) => None,
+            Err(e) => {
+                tracing::warn!("load_zone_idx_reconcile_cursor: {e}");
+                None
+            }
+        }
+    }
+
+    /// R14-b: persist the reconcile cursor so the walk resumes across
+    /// restarts; `None` clears it (pass complete — the next step starts at the
+    /// top of the CF).
+    pub fn save_zone_idx_reconcile_cursor(&self, cursor: Option<&[u8]>) -> Result<()> {
+        let cf = self.try_cf(CF_METADATA)?;
+        let res = match cursor {
+            Some(key) => self.db.put_cf(&cf, ZONE_IDX_RECONCILE_CURSOR_KEY, key),
+            None => self.db.delete_cf(&cf, ZONE_IDX_RECONCILE_CURSOR_KEY),
+        };
+        res.map_err(|e| ElaraError::Storage(format!("save_zone_idx_reconcile_cursor: {e}")))
+    }
+
+    /// Test-only: plant a raw `CF_RECORD_BY_ZONE` row (a ghost when no record
+    /// carries the id inside `key`) to exercise the R14-b sweeps.
+    #[cfg(test)]
+    pub(crate) fn plant_zone_idx_row_for_test(&self, key: &[u8]) -> Result<()> {
+        let cf = self.try_cf(CF_RECORD_BY_ZONE)?;
+        self.db
+            .put_cf(&cf, key, b"")
+            .map_err(|e| ElaraError::Storage(format!("plant_zone_idx_row_for_test: {e}")))
+    }
+
     /// Distinct zones present in the zone-idx CF — fleet-wide observability gauge.
     /// O(total_records); cheap on testnet (~120K), expensive on mainnet — caller
     /// must throttle (e.g., once per metrics interval).
@@ -1694,86 +2106,6 @@ impl StorageEngine {
             }
         }
         count
-    }
-
-    /// Backfill `CF_RECORD_BY_ZONE` from the primary records CF.
-    ///
-    /// Iterates one chunk at a time so an upgraded binary can build the index
-    /// incrementally over many ticks without blocking ingest. Resumable:
-    ///   - Pass `start_after = None` for the first call.
-    ///   - Pass back the `(progress, last_record_id)` from the previous call
-    ///     to continue.
-    ///
-    /// For each record found in `CF_RECORDS` whose `(zone_key, timestamp,
-    /// record_id)` is missing from `CF_RECORD_BY_ZONE`, writes the entry.
-    /// Records that already have an entry are skipped (idempotent).
-    ///
-    /// Returns `(processed_in_chunk, last_record_id_processed)`. When
-    /// `last_record_id_processed` is `None`, the iteration is complete.
-    pub fn backfill_zone_index_chunk(
-        &self,
-        start_after: Option<&str>,
-        chunk_limit: usize,
-    ) -> Result<(usize, Option<String>)> {
-        let cf_records = self.try_cf(CF_RECORDS)?;
-        let cf_zone = self.try_cf(CF_RECORD_BY_ZONE)?;
-        let mode = match start_after {
-            Some(after) => {
-                // Seek past `after` — RocksDB Forward starts AT the key, so we
-                // skip the first match below.
-                rocksdb::IteratorMode::From(after.as_bytes(), rocksdb::Direction::Forward)
-            }
-            None => rocksdb::IteratorMode::Start,
-        };
-        let skip_first = start_after.is_some();
-        let mut batch = rocksdb::WriteBatch::default();
-        let mut processed = 0usize;
-        let mut last_id: Option<String> = None;
-        let mut iter_done = true;
-
-        for (i, kv) in self.db.iterator_cf(&cf_records, mode).enumerate() {
-            let Ok((key, value)) = kv else { continue };
-            if i == 0 && skip_first {
-                continue;
-            }
-            // Skip non-record keys (markers, ban: ban entries, finalized: keys, …)
-            if key.starts_with(b"finalized:")
-                || key.starts_with(b"ban:")
-                || key.starts_with(b"blocked_term:")
-                || key.starts_with(b"tombstone:")
-                || &*key == b"__record_count__"
-                || &*key == b"__full_pull_cursor__"
-            {
-                continue;
-            }
-            let record_id = match std::str::from_utf8(&key) {
-                Ok(s) => s.to_string(),
-                Err(_) => continue,
-            };
-            let record = match ValidationRecord::from_bytes(&value) {
-                Ok(r) => r,
-                Err(_) => continue,
-            };
-            let zone_key = Self::record_zone_key(&record, &record_id);
-            let zk_full = Self::zone_idx_key(&zone_key, record.timestamp, &record_id);
-            // Idempotent: only write if missing.
-            if self.db.get_cf(&cf_zone, &zk_full).ok().flatten().is_none() {
-                batch.put_cf(&cf_zone, &zk_full, b"");
-            }
-            processed += 1;
-            last_id = Some(record_id);
-            if processed >= chunk_limit {
-                iter_done = false;
-                break;
-            }
-        }
-
-        if !batch.is_empty() {
-            self.db.write(batch)
-                .map_err(|e| ElaraError::Storage(format!("backfill_zone_index batch: {e}")))?;
-        }
-
-        Ok((processed, if iter_done { None } else { last_id }))
     }
 
     // ── Slot index CF (MESH-BFT Phase 3 Stage 1C) ───────────────────────────
@@ -2002,10 +2334,12 @@ impl StorageEngine {
             let record_hash_hex = hex::encode(rec.record_hash());
             batch.delete_cf(&self.try_cf(CF_IDX_RECORD_HASH)?, record_hash_hex.as_bytes());
 
-            // Zone-keyed secondary index (ZSP Phase B)
-            let old_zone_key = Self::record_zone_key(rec, record_id);
-            let zone_full_key = Self::zone_idx_key(&old_zone_key, rec.timestamp, record_id);
-            batch.delete_cf(&self.try_cf(CF_RECORD_BY_ZONE)?, &zone_full_key);
+            // Zone-keyed secondary index (ZSP Phase B). The row lives under the
+            // key the WRITER chose (registry-resolved leaf on the hot path), so
+            // R14 reads the stored hint + fallbacks instead of re-deriving one key.
+            for zone_full_key in self.zone_idx_delete_candidates(rec, record_id)? {
+                batch.delete_cf(&self.try_cf(CF_RECORD_BY_ZONE)?, &zone_full_key);
+            }
 
             // Finalized index (prevent orphaned finalized: keys after GC)
             // Tier 4.5: lives in CF_METADATA
@@ -2013,34 +2347,52 @@ impl StorageEngine {
             let finalized_key = format!("finalized:{record_id}");
             batch.delete_cf(&cf_meta, finalized_key.as_bytes());
 
-            // Gap 3: CF_EPOCHS DISC-5 index — written on seal ingest at
-            // network/ingest.rs:2090-2110 with key
-            // `disc5_index_key(epoch_number, zone_path, record_id)`. Without
-            // this, pruning a seal leaks ~50 bytes/seal in CF_EPOCHS forever.
-            // At 1M zones × 720 seals/day × 365 days = 263B keys × 50 B ≈
-            // 13TB/year of stale index — the same scale problem the seal
-            // pruning is meant to solve. Cleaning it here is idempotent
-            // (delete of a missing key is a no-op) so non-seal records pay
-            // a single 1-byte allocation worth of overhead per delete.
-            if let Some(epoch_op) = rec.metadata.get("epoch_op").and_then(|v| v.as_str()) {
-                if epoch_op == "seal" {
-                    let zone_path = rec
-                        .metadata
-                        .get("epoch_zone")
-                        .and_then(|v| {
-                            v.as_str()
-                                .map(|s| s.to_string())
-                                .or_else(|| v.as_u64().map(|n| n.to_string()))
-                        });
-                    let epoch_number = rec
-                        .metadata
-                        .get("epoch_number")
-                        .and_then(|v| v.as_u64());
-                    if let (Some(zone), Some(epoch)) = (zone_path, epoch_number) {
-                        let disc5_key = crate::network::epoch::disc5_index_key(
-                            epoch, &zone, record_id,
+            // Gap 3 + F2 + R2 (2026-09-02): the DISC-5 epoch-index row and
+            // the creator-keyed equivocation witness row are re-derived by the
+            // SAME builder that wrote them
+            // (`network::side_writes::record_side_writes`), so the deleted key
+            // is byte-identical to the stored key — including the `ZoneId`
+            // normalisation of `epoch_zone`. The raw-metadata parse this
+            // replaced deleted `…"Medical/EU"…` while the stored row was
+            // `…"medical/eu"…`, orphaning the row (an orphan DISC-5 row is a
+            // dangling index entry the durable-heal walk counts as
+            // `siblings_divergent`, a must-stay-0 canary). Scale: without this
+            // cleanup, pruning a seal leaks ~50 bytes/seal in CF_EPOCHS forever
+            // (1M zones × 720 seals/day × 365 days ≈ 13 TB/year of stale
+            // index). Idempotent (delete of a missing key is a no-op); a
+            // non-seal record pays two metadata lookups.
+            //
+            // Fallback: a record that CLAIMS `epoch_op == "seal"` but that the
+            // current seal parser rejects owns no builder-derived rows — the
+            // writers never store rows for such a record — yet if a looser
+            // earlier writer did, the normalised raw coordinates still remove
+            // them, so a parser tightening can never start leaking rows.
+            //
+            // The slash-offense marker is deliberately NOT deleted here (R10):
+            // it is the restart-proof dedup for an offense already punished
+            // and must outlive a GC'd slash record.
+            match crate::network::side_writes::record_side_writes(rec).side_writes {
+                RecordSideWrites {
+                    disc5_epoch_key: Some(disc5_key),
+                    equivocation_key,
+                    ..
+                } => {
+                    batch.delete_cf(&self.try_cf(CF_EPOCHS)?, &disc5_key);
+                    if let Some((eqv_key, _)) = equivocation_key {
+                        batch.delete_cf(&cf_meta, &eqv_key);
+                    }
+                }
+                _ => {
+                    if let Some((epoch, zone)) = Self::raw_seal_coords(rec) {
+                        let creator = crate::crypto::hash::sha3_256_hex(&rec.creator_public_key);
+                        batch.delete_cf(
+                            &self.try_cf(CF_EPOCHS)?,
+                            crate::network::epoch::disc5_index_key(epoch, &zone, record_id),
                         );
-                        batch.delete_cf(&self.try_cf(CF_EPOCHS)?, &disc5_key);
+                        batch.delete_cf(
+                            &cf_meta,
+                            Self::equivocation_index_key(epoch, &zone, &creator, record_id),
+                        );
                     }
                 }
             }
@@ -2503,6 +2855,131 @@ impl StorageEngine {
             .ok()
             .flatten()
             .is_some()
+    }
+
+    // ---- F2 equivocation witness index + durable slash-offense marker ------
+    //
+    // internal design notes. Both live
+    // in CF_METADATA under text prefixes (the `rot_pending_hash:` precedent).
+    //
+    // Witness row key layout (byte-exact, pinned by tests):
+    //   b"eqv:" || epoch:u64_be(8) || zone_path_utf8 || 0x00 || creator_hex || 0x00 || record_id_utf8
+    // Value: the seal's 32-byte `record_hash`.
+    //
+    // Keyed by CREATOR (not by (zone, epoch) like DISC-5) on purpose: the
+    // witness walk for an incoming seal seeks `eqv:{epoch}{zone}\0{creator}\0`
+    // and stops at the first row whose value differs from the seal's own
+    // hash. An honest creator holds one row per (zone, epoch) — the walk reads
+    // exactly it. An adversary that plants N foreign seals at the same
+    // (zone, epoch) never enters this prefix, so it cannot push the rival out
+    // of a capped walk (the T-F10 no-sibling-cap ruling's attack shape,
+    // internal design notes line 13); an
+    // adversary that plants N of ITS OWN seals is caught at the first
+    // differing row. There is therefore NO cap — only a `keys_read` count the
+    // caller exports and warns on above `DURABLE_HEAL_SIBLINGS_WARN`.
+
+    const EQUIVOCATION_INDEX_PREFIX: &'static [u8] = b"eqv:";
+    const SLASH_OFFENSE_PREFIX: &'static [u8] = b"slash_offense:";
+
+    /// Prefix shared by every witness row of one (epoch, zone, creator).
+    pub fn equivocation_index_prefix(epoch: u64, zone_path: &str, creator: &str) -> Vec<u8> {
+        let mut k = Vec::with_capacity(
+            Self::EQUIVOCATION_INDEX_PREFIX.len() + 8 + zone_path.len() + 1 + creator.len() + 1,
+        );
+        k.extend_from_slice(Self::EQUIVOCATION_INDEX_PREFIX);
+        k.extend_from_slice(&epoch.to_be_bytes());
+        k.extend_from_slice(zone_path.as_bytes());
+        k.push(0u8);
+        k.extend_from_slice(creator.as_bytes());
+        k.push(0u8);
+        k
+    }
+
+    /// Full witness row key for one seal record.
+    pub fn equivocation_index_key(
+        epoch: u64,
+        zone_path: &str,
+        creator: &str,
+        record_id: &str,
+    ) -> Vec<u8> {
+        let mut k = Self::equivocation_index_prefix(epoch, zone_path, creator);
+        k.extend_from_slice(record_id.as_bytes());
+        k
+    }
+
+    /// Durable slash-offense marker key for an offense digest
+    /// (`network::slashing::offense_digest`, 64 lowercase hex chars).
+    pub fn slash_offense_key(offense_digest: &str) -> Vec<u8> {
+        let mut k = Self::SLASH_OFFENSE_PREFIX.to_vec();
+        k.extend_from_slice(offense_digest.as_bytes());
+        k
+    }
+
+    /// Walk the creator's own witness slot at (epoch, zone) and return the
+    /// first OTHER seal whose stored `record_hash` differs from `own_hash`.
+    ///
+    /// Called from ingest Phase 2 AFTER the seal's own batch write on the same
+    /// engine handle: a batch whose `write()` returned `Ok` is visible to any
+    /// later iterator on this handle, so two concurrent conflicting ingests
+    /// cannot both miss each other (each seeks after its own write — the
+    /// argument is per-closure program order plus linearizable batch
+    /// visibility, independent of how many state-core workers run). Seeking
+    /// BEFORE the write would reopen that race — keep the order.
+    pub fn find_equivocation_witness(
+        &self,
+        epoch: u64,
+        zone_path: &str,
+        creator: &str,
+        own_record_id: &str,
+        own_hash: &[u8; 32],
+    ) -> EquivocationScan {
+        let mut out = EquivocationScan::default();
+        let Ok(cf) = self.try_cf(CF_METADATA) else {
+            return out;
+        };
+        let prefix = Self::equivocation_index_prefix(epoch, zone_path, creator);
+        let it = self.db.iterator_cf(
+            &cf,
+            rocksdb::IteratorMode::From(&prefix, rocksdb::Direction::Forward),
+        );
+        for item in it {
+            let Ok((key, value)) = item else {
+                break;
+            };
+            if !key.starts_with(&prefix) {
+                break;
+            }
+            out.keys_read += 1;
+            let Ok(record_id) = std::str::from_utf8(&key[prefix.len()..]) else {
+                continue;
+            };
+            if record_id == own_record_id {
+                continue;
+            }
+            if value.len() != 32 {
+                out.malformed_rows += 1;
+                continue;
+            }
+            let mut stored = [0u8; 32];
+            stored.copy_from_slice(&value);
+            if stored != *own_hash {
+                out.witness = Some((record_id.to_string(), stored));
+                break;
+            }
+        }
+        out
+    }
+
+    /// Point lookup of the durable slash-offense marker: `Some(slash_record_id)`
+    /// iff a slash record for this offense digest was stored on this node.
+    pub fn slash_offense_record(&self, offense_digest: &str) -> Option<String> {
+        let cf = self.try_cf(CF_METADATA).ok()?;
+        let v = self
+            .db
+            .get_cf(&cf, Self::slash_offense_key(offense_digest))
+            .ok()
+            .flatten()?;
+        String::from_utf8(v.to_vec()).ok()
     }
 
     // ---- W2 durable-marker rows (§3-3) --------------------------------------
@@ -3274,6 +3751,61 @@ impl StorageEngine {
             }
         }
         out
+    }
+
+    /// T-REVOCATION-EXPORT: one bounded page of revocations, keyed forward from
+    /// an exclusive cursor. The 128-hex composite key (mandate_id_hash ‖
+    /// revoker_identity_hash — see [`CF_REVOCATION`]) is RocksDB's iteration
+    /// order, so `cursor = last key of the previous page` resumes deterministically
+    /// across restarts. `limit` is clamped to [1, 1000] (DESIGN-FOR-MILLIONS: this
+    /// is the incremental alternative to `collect_revocations`' full scan — never
+    /// call THAT on a request path). Returns the page plus `next_cursor` =
+    /// `Some(last_key)` iff the page filled (more may follow); a short page ends
+    /// the walk. Malformed stored keys are skipped (same tolerance as
+    /// `collect_revocations`); cursor VALIDATION is the caller's job.
+    pub fn revocations_page(
+        &self,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> (Vec<(String, crate::mandate::RevocationEntry)>, Option<String>) {
+        let limit = limit.clamp(1, 1000);
+        let mut out: Vec<(String, crate::mandate::RevocationEntry)> = Vec::new();
+        let Ok(cf) = self.try_cf(CF_REVOCATION) else {
+            return (out, None);
+        };
+        let mode = match cursor {
+            Some(c) => rocksdb::IteratorMode::From(c.as_bytes(), rocksdb::Direction::Forward),
+            None => rocksdb::IteratorMode::Start,
+        };
+        for (k, v) in self.db.iterator_cf(&cf, mode).flatten() {
+            let Ok(key) = std::str::from_utf8(&k) else {
+                continue;
+            };
+            // Shape guard (same predicate as `apply_revocations`): consumers
+            // slice the composite into its 64+64 halves, so a malformed stored
+            // key must never leave this walk.
+            if key.len() != 128 || !key.bytes().all(|b| b.is_ascii_hexdigit()) {
+                continue;
+            }
+            // `From` is inclusive — the cursor names the LAST key already
+            // served, so skip it and resume strictly after.
+            if cursor == Some(key) {
+                continue;
+            }
+            let Ok(e) = serde_json::from_slice::<crate::mandate::RevocationEntry>(&v) else {
+                continue;
+            };
+            out.push((key.to_string(), e));
+            if out.len() >= limit {
+                break;
+            }
+        }
+        let next_cursor = if out.len() >= limit {
+            out.last().map(|(k, _)| k.clone())
+        } else {
+            None
+        };
+        (out, next_cursor)
     }
 
     /// Bulk-apply mandates from a snapshot baseline (bootstrap). Canonicalizes
@@ -5288,8 +5820,10 @@ impl StorageEngine {
                 Err(_) => continue, // Not a record, skip
             };
 
-            // Never delete epoch seals, ledger ops, governance ops
-            if rec.metadata.contains_key("epoch_op")
+            // Never delete epoch seals, ledger ops, governance ops.
+            // R1 (2026-09-02, verdict F3): only a KNOWN `epoch_op` value is
+            // exempt — an unknown value is an ordinary orphan candidate.
+            if crate::network::epoch::is_known_epoch_op_record(&rec)
                 || rec.metadata.contains_key("beat_op")
                 || rec.metadata.contains_key("governance_op")
             {
@@ -5615,6 +6149,11 @@ impl StorageEngine {
 
 impl super::Storage for StorageEngine {
     fn insert(&mut self, record: &ValidationRecord) -> Result<String> {
+        // Bare store: payload + zone index only — no identity/pk row, no slot
+        // claim, no DISC-5 / witness / offense side rows. Reachable only via
+        // `DamVm::insert` (tests). The node's writers (live ingest, bootstrap
+        // pull) use `put_record_with_pk_zone` with builder-derived side rows
+        // (R2, 2026-09-02).
         self.put_record(&record.id, record)?;
         Ok(record.id.clone())
     }
@@ -6204,14 +6743,18 @@ impl StorageEngine {
             // seal_pruned counter is bumped at the delete site by
             // re-checking the metadata key (cheaper than threading a
             // flag through).
-            if rec.metadata.contains_key("epoch_op")
+            // R1 (2026-09-02, verdict F3): the gate keys on a KNOWN
+            // `epoch_op` value. The bare key made `{"epoch_op":"junk"}`
+            // GC-immortal on every node; an unknown value now falls through
+            // to the ordinary retention / stale branches below.
+            if crate::network::epoch::is_known_epoch_op_record(&rec)
                 && !is_prunable_seal_record(&rec, seal_pruning_floor)
             {
                 continue;
             }
 
             let finalized = is_finalized(record_id);
-            let is_seal = rec.metadata.contains_key("epoch_op");
+            let is_seal = crate::network::epoch::is_known_epoch_op_record(&rec);
 
             // Check explicit expiration
             if super::super::network::gc::is_expired(&rec, scan_until) {
@@ -6275,8 +6818,12 @@ impl StorageEngine {
 
             // Stale unfinalized records: older than 2x retention, never got
             // witnessed. These will never be finalized — prune as abandoned.
-            // Seals are always finalized once registered, so this branch
-            // never fires for seals — keep the counter unconditional.
+            // Seals reach this point only when floor-prunable (the epoch-op
+            // gate above `continue`s for every other epoch op), and on a
+            // quorum-less node seals are NOT finalized (R1 verdict F5,
+            // 2026-09-02: `seal_member_finalized_durable_total 0` on the authority seed),
+            // so a floor-prunable unfinalized seal exits here as
+            // `stale_pruned` — the counter stays unconditional on purpose.
             if ts < stale_cutoff {
                 deleted_ids.push(record_id.to_string());
                 result.stale_pruned += 1;
@@ -8373,8 +8920,16 @@ fn num_cpus() -> i32 {
 /// lookups), no allocation, no extraction-and-validation. The cheap
 /// signal is `record.metadata`:
 ///
-/// - `vrf_registration` true with `node_type == "anchor"` (or absent,
-///   defaulting to `"anchor"` per `vrf_registry::extract_vrf_registration`)
+/// - `vrf_registration` true with `node_type == "anchor"` — or ABSENT: the
+///   put-time default below is deliberately KEPT even though
+///   `vrf_registry::extract_vrf_registration` stopped defaulting an absent
+///   `node_type` to `"anchor"` (R1-X1-V, 2026-09-02). A tier is assigned once
+///   and never re-derived, so flipping it is flag-day-class (nodes that
+///   ingested a field-less registration before the flip would hold a
+///   different anchor CF from nodes joining after — a split
+///   `staked_anchor_view`, the LIVENESS-1 class). Harmless for the
+///   fast-forward gate: a field-less record is never VRF-registered after
+///   R1-X1-V, so it never reaches it. Re-tier migration/fence = R1-X1-V-S.
 ///   → ANCHOR CF. We don't re-validate the VRF PK bytes here; the
 ///   broader ingest flow (`extract_vrf_registration`) does that, and a
 ///   record that fails validation simply means the PK is in the wrong
@@ -8485,6 +9040,78 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let engine = StorageEngine::open(dir.path()).unwrap();
         (engine, dir)
+    }
+
+    // ─── T-REVOCATION-EXPORT: revocations_page ───────────────────────────────
+
+    fn seed_revocations(e: &StorageEngine, n: usize) -> Vec<String> {
+        // Distinct mandate ids sort by their hash-derived key; collect the
+        // stored composite keys in iteration (lexical) order via a full read.
+        for i in 0..n {
+            e.put_revocation(&format!("{i:064x}"), &"ab".repeat(32), 1_000 + i as u64)
+                .unwrap();
+        }
+        e.collect_revocations().into_keys().collect()
+    }
+
+    #[test]
+    fn revocations_page_empty_store() {
+        let (e, _d) = test_engine();
+        let (page, next) = e.revocations_page(None, 10);
+        assert!(page.is_empty());
+        assert!(next.is_none());
+    }
+
+    #[test]
+    fn revocations_page_partial_and_full_pages() {
+        let (e, _d) = test_engine();
+        let keys = seed_revocations(&e, 7);
+        // Full page of 5 → next_cursor = 5th key.
+        let (p1, n1) = e.revocations_page(None, 5);
+        assert_eq!(p1.len(), 5);
+        assert_eq!(n1.as_deref(), Some(keys[4].as_str()));
+        assert_eq!(p1.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(), &keys[..5]);
+        // Resume: exclusive cursor → remaining 2, short page ends the walk.
+        let (p2, n2) = e.revocations_page(n1.as_deref(), 5);
+        assert_eq!(p2.len(), 2);
+        assert_eq!(p2.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(), &keys[5..]);
+        assert!(n2.is_none());
+        // No overlap, no gap: union == all keys.
+        let walked: Vec<&str> =
+            p1.iter().chain(p2.iter()).map(|(k, _)| k.as_str()).collect();
+        assert_eq!(walked, keys.iter().map(String::as_str).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn revocations_page_cursor_stable_across_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let cursor;
+        let expected_rest: Vec<String>;
+        {
+            let e = StorageEngine::open(dir.path()).unwrap();
+            let keys = seed_revocations(&e, 6);
+            let (_, n) = e.revocations_page(None, 3);
+            cursor = n.unwrap();
+            expected_rest = keys[3..].to_vec();
+        }
+        // Reopen the SAME store: the cursor must resume identically.
+        let e2 = StorageEngine::open(dir.path()).unwrap();
+        let (p, n) = e2.revocations_page(Some(&cursor), 10);
+        assert_eq!(
+            p.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(),
+            expected_rest.iter().map(String::as_str).collect::<Vec<_>>()
+        );
+        assert!(n.is_none());
+    }
+
+    #[test]
+    fn revocations_page_limit_clamped() {
+        let (e, _d) = test_engine();
+        seed_revocations(&e, 3);
+        // limit=0 clamps to 1 — never an unbounded or zero-progress walk.
+        let (p, n) = e.revocations_page(None, 0);
+        assert_eq!(p.len(), 1);
+        assert!(n.is_some());
     }
 
     // F2 PSR-1: the persistent gov-rebuild marker set→read→clear roundtrip.
@@ -8910,7 +9537,7 @@ mod tests {
                 &rot.creator_public_key,
                 [0; 8],
                 None,
-                None,
+                RecordSideWrites::default(),
                 Some(RotationBatchOp::RotationHopAdmit {
                     record_hash_hex: hash_hex.clone(),
                     record_id: rot.id.clone(),
@@ -8979,7 +9606,7 @@ mod tests {
                 &seal.creator_public_key,
                 [0; 8],
                 None,
-                None,
+                RecordSideWrites::default(),
                 Some(RotationBatchOp::ArmSealMarker {
                     zone: "medical/eu".into(),
                     epoch: 9,
@@ -9009,7 +9636,7 @@ mod tests {
                 &rec.creator_public_key,
                 [0; 8],
                 None,
-                None,
+                RecordSideWrites::default(),
                 None,
             )
             .unwrap();
@@ -10013,7 +10640,7 @@ mod tests {
                 &rec_alpha.creator_public_key,
                 [0; 8],
                 Some(slot_alpha),
-                None,
+                RecordSideWrites::default(),
                 None,
             )
             .unwrap();
@@ -10038,7 +10665,7 @@ mod tests {
                 &rec_beta.creator_public_key,
                 [0; 8],
                 None,
-                None,
+                RecordSideWrites::default(),
                 None,
             )
             .unwrap();
@@ -10074,7 +10701,7 @@ mod tests {
                 &rec.creator_public_key,
                 [0; 8],
                 None,
-                Some(&key),
+                RecordSideWrites::disc5(key.clone()),
                 None,
             )
             .unwrap();
@@ -10150,7 +10777,7 @@ mod tests {
                 &seal_rec.creator_public_key,
                 [0; 8],
                 None,
-                Some(&disc5_key),
+                RecordSideWrites::disc5(disc5_key.clone()),
                 None,
             )
             .unwrap();
@@ -10182,7 +10809,7 @@ mod tests {
                 &plain_rec.creator_public_key,
                 [0; 8],
                 None,
-                None,
+                RecordSideWrites::default(),
                 None,
             )
             .unwrap();
@@ -10225,7 +10852,7 @@ mod tests {
                     &rec.creator_public_key,
                     [0; 8],
                     None,
-                    Some(&disc5_key),
+                    RecordSideWrites::disc5(disc5_key.clone()),
                     None,
                 )
                 .unwrap();
@@ -12639,7 +13266,7 @@ mod tests {
             &rec.creator_public_key.clone(),
             leaf_key,
             None,
-            None,
+            RecordSideWrites::default(),
             None,
         ).unwrap();
 
@@ -12697,6 +13324,174 @@ mod tests {
         engine.delete_record("r1", DeleteIntent::GcPrune).unwrap();
         let remaining = engine.iter_zone(&zk, None, None, 100);
         assert_eq!(remaining, vec!["r2".to_string()]);
+    }
+
+    /// R14 (2026-09-02): the hot path indexes under the registry-resolved leaf —
+    /// an explicit key the record itself does not carry (`zone: None`). Before
+    /// R14 `delete_record` re-derived `for_record(id)` and missed that row on
+    /// every retention prune; the stored hint makes the delete exact.
+    #[test]
+    fn r14_delete_purges_zone_row_written_under_explicit_key() {
+        let (engine, _dir) = test_engine();
+        let id = "r14-explicit-key-rec";
+        let mut rec = zoned_record(id, "r14/unused", 1_700_000_000.0);
+        rec.zone = None;
+        let leaf = crate::ZoneId::new("r14/leaf/after-split").to_key_bytes();
+        assert_ne!(leaf, crate::ZoneId::for_record(id).to_key_bytes());
+        engine.put_record_with_zone(id, &rec, leaf).unwrap();
+
+        // The put stores the zone key as the timestamp-row value (the hint).
+        let mut ts_key = rec.timestamp.to_be_bytes().to_vec();
+        ts_key.extend_from_slice(id.as_bytes());
+        let hint = engine
+            .db
+            .get_cf(&engine.try_cf(CF_IDX_TIMESTAMP).unwrap(), &ts_key)
+            .unwrap()
+            .expect("ts row present");
+        assert_eq!(hint.as_slice(), &leaf[..]);
+        assert_eq!(engine.iter_zone(&leaf, None, None, 10), vec![id.to_string()]);
+        assert_eq!(engine.zone_idx_total_entries(), 1);
+
+        engine.delete_record(id, DeleteIntent::GcPrune).unwrap();
+        assert!(engine.iter_zone(&leaf, None, None, 10).is_empty());
+        assert_eq!(engine.zone_idx_total_entries(), 0);
+    }
+
+    /// R14: an overwrite that moves a record to a new explicit key must drop the
+    /// row under the PREVIOUS explicit key, even when the record's own `zone`
+    /// literal names a third zone (the pre-R14 cleanup only looked at the literal).
+    #[test]
+    fn r14_overwrite_under_new_key_cleans_row_under_previous_key() {
+        let (engine, _dir) = test_engine();
+        let id = "r14-overwrite-rec";
+        let rec = zoned_record(id, "r14/literal", 500.0);
+        let z_lit = crate::ZoneId::new("r14/literal").to_key_bytes();
+        let z_b = crate::ZoneId::new("r14/leaf/b").to_key_bytes();
+        let z_c = crate::ZoneId::new("r14/leaf/c").to_key_bytes();
+
+        engine.put_record_with_zone(id, &rec, z_b).unwrap();
+        engine.put_record_with_zone(id, &rec, z_c).unwrap();
+        assert_eq!(engine.count_zone(&z_lit), 0);
+        assert_eq!(engine.count_zone(&z_b), 0);
+        assert_eq!(engine.count_zone(&z_c), 1);
+        assert_eq!(engine.zone_idx_total_entries(), 1);
+
+        // Duplicate re-put under the same key + timestamp (gossip re-delivery)
+        // nets to a single row: the batch deletes then re-puts the same key.
+        engine.put_record_with_zone(id, &rec, z_c).unwrap();
+        assert_eq!(engine.iter_zone(&z_c, None, None, 10), vec![id.to_string()]);
+        assert_eq!(engine.zone_idx_total_entries(), 1);
+    }
+
+    /// R14: rows written before the hint existed have an empty timestamp-row
+    /// value. A hot-path row of that vintage sits under the count-derived key,
+    /// which the delete path now tries as a fallback candidate.
+    #[test]
+    fn r14_legacy_row_without_hint_is_cleaned_via_current_count_key() {
+        let (engine, _dir) = test_engine();
+        // Prefer an id whose count-derived key differs from the content-derived
+        // one, so the fallback (not the content path) is what proves the point;
+        // with a 256-zone count in this process they coincide and the test
+        // degrades to the content path, still deterministic.
+        let mut chosen = String::from("r14-legacy-0");
+        for i in 0..64u32 {
+            let cand = format!("r14-legacy-{i}");
+            let naive = crate::network::consensus::zone_for_record(&cand).to_key_bytes();
+            if naive != crate::ZoneId::for_record(&cand).to_key_bytes() {
+                chosen = cand;
+                break;
+            }
+        }
+        let id = chosen.as_str();
+        let mut rec = zoned_record(id, "r14/unused", 900.0);
+        rec.zone = None;
+        let naive = crate::network::consensus::zone_for_record(id).to_key_bytes();
+        engine.put_record_with_zone(id, &rec, naive).unwrap();
+
+        // Simulate a pre-R14 row: blank the hint.
+        let mut ts_key = rec.timestamp.to_be_bytes().to_vec();
+        ts_key.extend_from_slice(id.as_bytes());
+        let ts_cf = engine.try_cf(CF_IDX_TIMESTAMP).unwrap();
+        engine.db.put_cf(&ts_cf, &ts_key, b"").unwrap();
+        assert!(engine.db.get_cf(&ts_cf, &ts_key).unwrap().unwrap().is_empty());
+        assert_eq!(engine.count_zone(&naive), 1);
+
+        engine.delete_record(id, DeleteIntent::GcPrune).unwrap();
+        assert_eq!(engine.count_zone(&naive), 0);
+        assert_eq!(engine.zone_idx_total_entries(), 0);
+    }
+
+    /// R14-b: the reconcile walk deletes exactly the rows with no record behind
+    /// them (plus malformed keys), leaves live rows alone, and resumes across
+    /// cursor steps until it reports the end of the CF.
+    #[test]
+    fn r14b_reconcile_walk_deletes_only_ghost_rows_across_cursor_steps() {
+        let (engine, _dir) = test_engine();
+        let z_a = crate::ZoneId::new("r14b/a").to_key_bytes();
+        let z_b = crate::ZoneId::new("r14b/b").to_key_bytes();
+        let live_a = zoned_record("r14b-live-a", "r14b/a", 100.0);
+        let live_b = zoned_record("r14b-live-b", "r14b/b", 200.0);
+        engine.put_record_with_zone(&live_a.id, &live_a, z_a).unwrap();
+        engine.put_record_with_zone(&live_b.id, &live_b, z_b).unwrap();
+        // Ghosts: rows whose ids have no record, in both zones, plus a
+        // malformed key shorter than the 16-byte (zone, ts) prefix.
+        let ghost_keys = [
+            StorageEngine::zone_idx_key(&z_a, 50.0, "r14b-ghost-1"),
+            StorageEngine::zone_idx_key(&z_a, 150.0, "r14b-ghost-2"),
+            StorageEngine::zone_idx_key(&z_b, 250.0, "r14b-ghost-3"),
+            b"short".to_vec(),
+        ];
+        for key in &ghost_keys {
+            engine.plant_zone_idx_row_for_test(key).unwrap();
+        }
+        assert_eq!(engine.zone_idx_total_entries(), 6);
+
+        // Walk in steps of 2 rows, resuming from the returned cursor.
+        let mut cursor: Option<Vec<u8>> = None;
+        let (mut scanned, mut ghosts, mut steps) = (0usize, 0usize, 0usize);
+        loop {
+            let chunk = engine
+                .reconcile_zone_index_chunk(cursor.as_deref(), 2)
+                .unwrap();
+            scanned += chunk.scanned;
+            ghosts += chunk.ghosts_deleted;
+            assert_eq!(chunk.reput, 0);
+            steps += 1;
+            assert!(steps <= 10, "walk must terminate");
+            match chunk.next_cursor {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
+        }
+        assert_eq!((scanned, ghosts), (6, 4));
+        assert_eq!(engine.zone_idx_total_entries(), 2);
+        assert_eq!(engine.iter_zone(&z_a, None, None, 10), vec![live_a.id.clone()]);
+        assert_eq!(engine.iter_zone(&z_b, None, None, 10), vec![live_b.id.clone()]);
+        // A second full pass finds nothing to do.
+        let clean = engine.reconcile_zone_index_chunk(None, 100).unwrap();
+        assert_eq!(
+            (clean.scanned, clean.ghosts_deleted, clean.next_cursor),
+            (2, 0, None)
+        );
+        // Zero budget is a no-op that preserves the cursor.
+        let noop = engine
+            .reconcile_zone_index_chunk(Some(b"cursor"), 0)
+            .unwrap();
+        assert_eq!(
+            noop,
+            ZoneIdxReconcileChunk { next_cursor: Some(b"cursor".to_vec()), ..Default::default() }
+        );
+    }
+
+    /// R14-b: the walk cursor survives in CF_METADATA and clears on `None`.
+    #[test]
+    fn r14b_reconcile_cursor_round_trips_and_clears() {
+        let (engine, _dir) = test_engine();
+        assert_eq!(engine.load_zone_idx_reconcile_cursor(), None);
+        engine.save_zone_idx_reconcile_cursor(Some(b"k1")).unwrap();
+        assert_eq!(engine.load_zone_idx_reconcile_cursor(), Some(b"k1".to_vec()));
+        engine.save_zone_idx_reconcile_cursor(None).unwrap();
+        assert_eq!(engine.load_zone_idx_reconcile_cursor(), None);
     }
 
     #[test]
@@ -13097,96 +13892,6 @@ mod tests {
         let us = engine.iter_zone(&z_us.to_key_bytes(), None, None, 100);
         assert_eq!(eu, vec!["e1".to_string()]);
         assert_eq!(us, vec!["u1".to_string()]);
-    }
-
-    #[test]
-    fn zsp_b_backfill_populates_missing_entries() {
-        let (engine, _dir) = test_engine();
-        // Simulate "pre-Phase-B" records: write to primary CF directly,
-        // bypassing put_record so the zone-idx is empty for these.
-        let cf_records = engine.cf(CF_RECORDS);
-        for i in 0..5 {
-            let id = format!("legacy-{i}");
-            let rec = zoned_record(&id, "zone/legacy", i as f64);
-            engine.db.put_cf(&cf_records, id.as_bytes(), rec.to_bytes()).unwrap();
-        }
-        let z = crate::ZoneId::new("zone/legacy");
-        // Pre-backfill: zone-idx empty for legacy zone.
-        assert_eq!(engine.count_zone(&z.to_key_bytes()), 0);
-
-        // Run backfill in one chunk.
-        let (n, last) = engine.backfill_zone_index_chunk(None, 100).unwrap();
-        assert_eq!(n, 5);
-        assert!(last.is_none(), "all 5 records processed in one shot");
-
-        // Post-backfill: all 5 are reachable via zone iter.
-        let ids = engine.iter_zone(&z.to_key_bytes(), None, None, 100);
-        assert_eq!(ids.len(), 5);
-    }
-
-    #[test]
-    fn zsp_b_backfill_is_resumable_in_chunks() {
-        let (engine, _dir) = test_engine();
-        // Write 12 records via primary CF (simulate pre-Phase-B state).
-        let cf_records = engine.cf(CF_RECORDS);
-        for i in 0..12 {
-            let id = format!("rec-{i:02}");
-            let rec = zoned_record(&id, "zone/chunk", i as f64);
-            engine.db.put_cf(&cf_records, id.as_bytes(), rec.to_bytes()).unwrap();
-        }
-        let z = crate::ZoneId::new("zone/chunk");
-        let zk = z.to_key_bytes();
-        assert_eq!(engine.count_zone(&zk), 0);
-
-        // Chunk 1: process 5
-        let (n1, after1) = engine.backfill_zone_index_chunk(None, 5).unwrap();
-        assert_eq!(n1, 5);
-        let after1 = after1.expect("chunk did not complete");
-        assert_eq!(engine.count_zone(&zk), 5);
-
-        // Chunk 2: continue from after1, process next 5
-        let (n2, after2) = engine.backfill_zone_index_chunk(Some(&after1), 5).unwrap();
-        assert_eq!(n2, 5);
-        let after2 = after2.expect("chunk 2 did not complete");
-        assert_eq!(engine.count_zone(&zk), 10);
-
-        // Chunk 3: process the remaining 2
-        let (n3, after3) = engine.backfill_zone_index_chunk(Some(&after2), 5).unwrap();
-        assert_eq!(n3, 2);
-        assert!(after3.is_none(), "all records processed");
-        assert_eq!(engine.count_zone(&zk), 12);
-    }
-
-    #[test]
-    fn zsp_b_backfill_is_idempotent() {
-        let (engine, _dir) = test_engine();
-        let z = crate::ZoneId::new("zone/idem");
-        // Write through put_record (zone-idx already populated).
-        for i in 0..3 {
-            let id = format!("r{i}");
-            engine.put_record(&id, &zoned_record(&id, "zone/idem", i as f64)).unwrap();
-        }
-        let before = engine.count_zone(&z.to_key_bytes());
-        assert_eq!(before, 3);
-
-        // Run backfill — must not duplicate.
-        let (n, last) = engine.backfill_zone_index_chunk(None, 100).unwrap();
-        assert_eq!(n, 3);
-        assert!(last.is_none());
-        assert_eq!(engine.count_zone(&z.to_key_bytes()), 3, "idempotent: no duplicates");
-    }
-
-    #[test]
-    fn backfill_zone_index_chunk_returns_ok_on_empty_engine() {
-        // Regression guard: backfill_zone_index_chunk uses try_cf so a missing
-        // CF returns Err instead of panicking. On a normal engine with all CFs
-        // open, an empty DB returns Ok((0, None)).
-        let (engine, _dir) = test_engine();
-        let result = engine.backfill_zone_index_chunk(None, 10);
-        assert!(result.is_ok(), "backfill_zone_index_chunk must not panic on empty engine");
-        let (n, last) = result.unwrap();
-        assert_eq!(n, 0);
-        assert_eq!(last, None);
     }
 
     // ── Identity Partitioning Phase A — class-tagged CFs ──────────────
@@ -14261,7 +14966,7 @@ mod tests {
 
     #[test]
     fn batch_x_is_prunable_seal_record_requires_seal_op_known_zone_and_epoch_strictly_below_floor() {
-        // `is_prunable_seal_record` at rocks.rs:3650 gates the seal-archival
+        // `is_prunable_seal_record` (defined above in this module) gates the seal-archival
         // sweep. It returns true ONLY when every condition holds:
         //
         //   1. `epoch_op == "seal"` (anchor records, attestations, etc.
@@ -15312,6 +16017,337 @@ mod tests {
         assert_eq!(
             engine.list_acts_for_mandate(&mandate, None, 10).unwrap().0,
             vec!["rec-x"]
+        );
+    }
+
+    // ── F2 (2026-09-02): durable creator-keyed equivocation witness index ──
+    // internal design notes
+
+    /// Builds a seal-shaped record: `epoch_op=seal`, `epoch_zone`,
+    /// `epoch_number` — the same metadata the delete path parses to derive
+    /// the DISC-5 and `eqv:` keys it removes.
+    fn f2_seal_record(id: &str, zone_path: &str, epoch: u64, salt: u8) -> ValidationRecord {
+        let mut r = test_record(id);
+        r.metadata.insert("epoch_op".into(), serde_json::json!("seal"));
+        r.metadata.insert("epoch_zone".into(), serde_json::json!(zone_path));
+        r.metadata.insert("epoch_number".into(), serde_json::json!(epoch));
+        // Distinct content per salt so record_hash differs between "seals".
+        r.content_hash = sha3_256(&[id.as_bytes(), &[salt]].concat()).to_vec();
+        r
+    }
+
+    fn f2_creator(r: &ValidationRecord) -> String {
+        crate::crypto::hash::sha3_256_hex(&r.creator_public_key)
+    }
+
+    /// Stores a seal with its witness row in ONE batch (the ingest Phase-2
+    /// shape) and returns the record hash the row carries.
+    fn f2_put_seal(engine: &StorageEngine, r: &ValidationRecord, zone_path: &str, epoch: u64) -> [u8; 32] {
+        let creator = f2_creator(r);
+        let h = r.record_hash();
+        let side = RecordSideWrites {
+            disc5_epoch_key: Some(crate::network::epoch::disc5_index_key(epoch, zone_path, &r.id)),
+            equivocation_key: Some((
+                StorageEngine::equivocation_index_key(epoch, zone_path, &creator, &r.id),
+                h,
+            )),
+            slash_offense_key: None,
+        };
+        engine
+            .put_record_with_pk_zone(&r.id, r, &creator, &r.creator_public_key, [0; 8], None, side, None)
+            .unwrap();
+        h
+    }
+
+    /// Byte layout pinned: `eqv:` || epoch_be8 || zone_path || 0 || creator || 0 || record_id.
+    /// A layout drift silently breaks the delete-path symmetry (it rebuilds
+    /// the same key from metadata) and the prefix walk's `starts_with` guard.
+    #[test]
+    fn f2_witness_key_layout_pinned() {
+        let key = StorageEngine::equivocation_index_key(7, "a/b", "cafe", "rid-1");
+        let mut expect = b"eqv:".to_vec();
+        expect.extend_from_slice(&7u64.to_be_bytes());
+        expect.extend_from_slice(b"a/b");
+        expect.push(0);
+        expect.extend_from_slice(b"cafe");
+        expect.push(0);
+        expect.extend_from_slice(b"rid-1");
+        assert_eq!(key, expect);
+        let prefix = StorageEngine::equivocation_index_prefix(7, "a/b", "cafe");
+        assert!(key.starts_with(&prefix));
+        assert_eq!(prefix.len(), expect.len() - b"rid-1".len());
+        // Epoch is big-endian so lexical order == numeric order (range GC).
+        assert!(StorageEngine::equivocation_index_prefix(8, "a/b", "cafe") > prefix);
+        assert!(StorageEngine::equivocation_index_prefix(256, "a/b", "cafe")
+            > StorageEngine::equivocation_index_prefix(255, "a/b", "cafe"));
+        // Slash-offense marker layout.
+        assert_eq!(
+            StorageEngine::slash_offense_key("00ff"),
+            b"slash_offense:00ff".to_vec()
+        );
+    }
+
+    /// Two seals by ONE creator at one (zone, epoch) with different content:
+    /// the second seal's scan finds the first as witness (and symmetrically).
+    #[test]
+    fn f2_equivocation_witness_found_via_creator_index() {
+        let (engine, _dir) = test_engine();
+        let zone = "medical/eu";
+        let a = f2_seal_record("seal-a", zone, 42, 1);
+        let b = f2_seal_record("seal-b", zone, 42, 2);
+        let creator = f2_creator(&a);
+        assert_eq!(creator, f2_creator(&b), "fixture: same creator");
+        let ha = f2_put_seal(&engine, &a, zone, 42);
+        // First seal: nothing else in the creator's slot.
+        let scan = engine.find_equivocation_witness(42, zone, &creator, &a.id, &ha);
+        assert!(scan.witness.is_none());
+        assert_eq!(scan.keys_read, 1, "own row only");
+        assert_eq!(scan.malformed_rows, 0);
+
+        let hb = f2_put_seal(&engine, &b, zone, 42);
+        assert_ne!(ha, hb, "fixture: differing content");
+        let scan = engine.find_equivocation_witness(42, zone, &creator, &b.id, &hb);
+        assert_eq!(scan.witness, Some((a.id.clone(), ha)));
+        assert!(scan.keys_read <= 2);
+        // Symmetric: a's own scan now sees b.
+        let scan = engine.find_equivocation_witness(42, zone, &creator, &a.id, &ha);
+        assert_eq!(scan.witness, Some((b.id.clone(), hb)));
+    }
+
+    /// No witness for: a re-store of the same content under a new id (same
+    /// hash — a duplicate, not an equivocation), a different creator at the
+    /// same (zone, epoch), the same creator at another epoch or zone.
+    /// Other creators never enter the walked prefix (keys_read stays at the
+    /// creator's own rows).
+    #[test]
+    fn f2_equivocation_witness_ignores_same_hash_and_other_creators() {
+        let (engine, _dir) = test_engine();
+        let zone = "z";
+        let a = f2_seal_record("seal-a", zone, 5, 1);
+        let creator = f2_creator(&a);
+        let ha = f2_put_seal(&engine, &a, zone, 5);
+
+        // Re-store of the SAME seal (re-gossip / `should_reenter_stored_seal`
+        // re-flow) overwrites its own row: still one key, no witness.
+        f2_put_seal(&engine, &a, zone, 5);
+        let scan = engine.find_equivocation_witness(5, zone, &creator, &a.id, &ha);
+        assert!(scan.witness.is_none());
+        assert_eq!(scan.keys_read, 1);
+        // A row under another id carrying the SAME hash is not an equivocation
+        // (the predicate is hash inequality, exactly as the retired RAM map's).
+        engine
+            .put_cf_raw(
+                CF_METADATA,
+                &StorageEngine::equivocation_index_key(5, zone, &creator, "seal-a-samehash"),
+                &ha,
+            )
+            .unwrap();
+        let scan = engine.find_equivocation_witness(5, zone, &creator, &a.id, &ha);
+        assert!(scan.witness.is_none(), "identical hash is not an equivocation");
+        assert_eq!(scan.keys_read, 2);
+
+        // Different creator, same (zone, epoch), different content.
+        let mut other = f2_seal_record("seal-other", zone, 5, 9);
+        other.creator_public_key = vec![0xCC; 1952];
+        let other_creator = f2_creator(&other);
+        assert_ne!(other_creator, creator);
+        for _ in 0..40 {
+            // 40 rows from the other creator — must never be read.
+            let mut o = other.clone();
+            o.id = format!("seal-other-{}", o.content_hash[0]);
+            f2_put_seal(&engine, &o, zone, 5);
+            other.content_hash[0] = other.content_hash[0].wrapping_add(1);
+        }
+        let scan = engine.find_equivocation_witness(5, zone, &creator, &a.id, &ha);
+        assert!(scan.witness.is_none());
+        assert_eq!(scan.keys_read, 2, "other creators' rows are outside the prefix");
+
+        // Same creator, other epoch / other zone → separate slots.
+        let e6 = f2_seal_record("seal-e6", zone, 6, 3);
+        f2_put_seal(&engine, &e6, zone, 6);
+        let z2 = f2_seal_record("seal-z2", "z2", 5, 4);
+        f2_put_seal(&engine, &z2, "z2", 5);
+        let scan = engine.find_equivocation_witness(5, zone, &creator, &a.id, &ha);
+        assert!(scan.witness.is_none());
+        assert_eq!(scan.keys_read, 2);
+    }
+
+    /// The walk has NO sibling cap (banked T-F10 ruling): with > 32 rows in
+    /// one creator's slot the differing row beyond position 32 is still
+    /// found; `keys_read` reports the true count so the ingest canary can
+    /// warn. The walk also stops at the first differing hash (bounded cost
+    /// under a seal flood) and skips malformed values.
+    #[test]
+    fn f2_witness_walk_counts_keys_read_and_no_cap() {
+        let (engine, _dir) = test_engine();
+        let zone = "flood";
+        let base = f2_seal_record("seal-base", zone, 9, 1);
+        let creator = f2_creator(&base);
+        let hb = f2_put_seal(&engine, &base, zone, 9);
+        // 40 rows carrying the SAME hash under other ids (raw rows: a real
+        // record's hash covers its id, so this shape only arises from index
+        // damage — which is exactly what a cap-free walk must survive). Ids
+        // sort after "seal-base" so the walk crosses them before the rival.
+        for i in 0..40u8 {
+            engine
+                .put_cf_raw(
+                    CF_METADATA,
+                    &StorageEngine::equivocation_index_key(9, zone, &creator, &format!("seal-dup-{i:02}")),
+                    &hb,
+                )
+                .unwrap();
+        }
+        // One malformed row (wrong value width) inside the slot.
+        engine
+            .put_cf_raw(
+                CF_METADATA,
+                &StorageEngine::equivocation_index_key(9, zone, &creator, "seal-malformed"),
+                b"short",
+            )
+            .unwrap();
+        // The rival, sorted last.
+        let rival = f2_seal_record("seal-zz-rival", zone, 9, 7);
+        let hr = f2_put_seal(&engine, &rival, zone, 9);
+        assert_ne!(hr, hb);
+
+        let scan = engine.find_equivocation_witness(9, zone, &creator, &base.id, &hb);
+        assert_eq!(scan.witness, Some((rival.id.clone(), hr)), "found beyond 32 rows");
+        assert_eq!(scan.malformed_rows, 1);
+        assert_eq!(scan.keys_read, 1 + 40 + 1 + 1, "own + dups + malformed + rival");
+        assert!(scan.keys_read > crate::network::epoch::DURABLE_HEAL_SIBLINGS_WARN);
+
+        // Early stop: from the rival's perspective the very first row (base)
+        // already differs, so the walk ends there.
+        let scan = engine.find_equivocation_witness(9, zone, &creator, &rival.id, &hr);
+        assert_eq!(scan.witness, Some((base.id.clone(), hb)));
+        assert_eq!(scan.keys_read, 1);
+    }
+
+    /// Delete symmetry: pruning a seal removes its `eqv:` row (rebuilt from
+    /// metadata + creator pk, byte-identical to the put) alongside the
+    /// DISC-5 row, so a GC'd seal cannot keep serving as a witness.
+    #[test]
+    fn f2_delete_record_removes_equivocation_row() {
+        let (engine, _dir) = test_engine();
+        let zone = "gc/zone";
+        let a = f2_seal_record("seal-a", zone, 11, 1);
+        let creator = f2_creator(&a);
+        let ha = f2_put_seal(&engine, &a, zone, 11);
+        let key = StorageEngine::equivocation_index_key(11, zone, &creator, &a.id);
+        assert_eq!(engine.get_cf_raw(CF_METADATA, &key).unwrap().as_deref(), Some(&ha[..]));
+
+        engine.delete_record(&a.id, DeleteIntent::GcPrune).unwrap();
+        assert!(engine.get_record(&a.id).unwrap().is_none());
+        assert!(engine.get_cf_raw(CF_METADATA, &key).unwrap().is_none(), "eqv row must go with the seal");
+        let scan = engine.find_equivocation_witness(11, zone, &creator, "seal-b", &[0u8; 32]);
+        assert!(scan.witness.is_none());
+        assert_eq!(scan.keys_read, 0);
+        // Idempotent: deleting a missing record's rows is a no-op path.
+        let b = f2_seal_record("seal-b", zone, 11, 2);
+        let hb = f2_put_seal(&engine, &b, zone, 11);
+        let scan = engine.find_equivocation_witness(11, zone, &creator, &b.id, &hb);
+        assert!(scan.witness.is_none(), "pruned seal no longer witnesses");
+    }
+
+    /// Slash-offense marker: the side-write lands with the slash record in
+    /// one batch and `slash_offense_record` returns the record id; absent
+    /// digests return None; the marker key layout is pinned above.
+    #[test]
+    fn f2_slash_offense_marker_roundtrip() {
+        let (engine, _dir) = test_engine();
+        let digest = "ab".repeat(32);
+        assert!(engine.slash_offense_record(&digest).is_none());
+        let slash = test_record("slash-1");
+        let side = RecordSideWrites {
+            disc5_epoch_key: None,
+            equivocation_key: None,
+            slash_offense_key: Some(StorageEngine::slash_offense_key(&digest)),
+        };
+        engine
+            .put_record_with_pk_zone(&slash.id, &slash, "id-x", &slash.creator_public_key, [0; 8], None, side, None)
+            .unwrap();
+        assert_eq!(engine.slash_offense_record(&digest).as_deref(), Some("slash-1"));
+        assert!(engine.slash_offense_record(&"cd".repeat(32)).is_none());
+        // Default side-writes write nothing extra.
+        let plain = test_record("plain-1");
+        engine
+            .put_record_with_pk_zone(&plain.id, &plain, "id-y", &plain.creator_public_key, [0; 8], None, RecordSideWrites::default(), None)
+            .unwrap();
+        assert_eq!(engine.slash_offense_record(&digest).as_deref(), Some("slash-1"));
+    }
+
+    // ─── R2: delete derives the same keys the writers wrote ───
+    // internal design notes
+
+    /// T4: a seal whose `epoch_zone` literal is non-canonical ("Medical/EU")
+    /// is stored under the normalised key by the shared builder, and
+    /// `delete_record` removes exactly that key (the raw-parse delete this
+    /// replaced would have derived `…"Medical/EU"…` and orphaned both rows).
+    #[test]
+    fn r2_delete_seal_with_non_canonical_zone_removes_its_rows() {
+        let (engine, _dir) = test_engine();
+        let pk = vec![0xAA; 1952];
+        let seal = crate::network::side_writes::test_support::seal_record(
+            pk.clone(),
+            "Medical/EU",
+            9,
+            b"x",
+        );
+        let set = crate::network::side_writes::record_side_writes(&seal);
+        let disc5 = crate::network::epoch::disc5_index_key(9, "medical/eu", &seal.id);
+        let eqv = StorageEngine::equivocation_index_key(9, "medical/eu", &crate::crypto::hash::sha3_256_hex(&pk), &seal.id);
+        assert_eq!(set.side_writes.disc5_epoch_key.as_deref(), Some(&disc5[..]));
+        assert_eq!(set.side_writes.equivocation_key.as_ref().map(|(k, _)| k), Some(&eqv));
+        engine
+            .put_record_with_pk_zone(
+                &seal.id,
+                &seal,
+                &crate::crypto::hash::sha3_256_hex(&pk),
+                &pk,
+                crate::ZoneId::new("medical/eu").to_key_bytes(),
+                None,
+                set.side_writes,
+                None,
+            )
+            .unwrap();
+        assert!(engine.get_cf_raw(CF_EPOCHS, &disc5).unwrap().is_some());
+        assert!(engine.get_cf_raw(CF_METADATA, &eqv).unwrap().is_some());
+        assert_eq!(engine.seal_record_ids_at_zone_epoch(9, "medical/eu"), vec![seal.id.clone()]);
+
+        engine.delete_record(&seal.id, DeleteIntent::GcPrune).unwrap();
+        assert!(engine.get_cf_raw(CF_EPOCHS, &disc5).unwrap().is_none(), "DISC-5 row orphaned");
+        assert!(engine.get_cf_raw(CF_METADATA, &eqv).unwrap().is_none(), "witness row orphaned");
+        assert!(engine.seal_record_ids_at_zone_epoch(9, "medical/eu").is_empty());
+    }
+
+    /// R10 contract: deleting a slash record keeps its durable offense marker
+    /// (the restart-proof dedup must outlive a GC'd slash record).
+    #[test]
+    fn r2_delete_slash_record_keeps_offense_marker() {
+        let (engine, _dir) = test_engine();
+        let digest = "ab".repeat(32);
+        let slash = crate::network::side_writes::test_support::slash_record(vec![0xAA; 1952], &digest);
+        let set = crate::network::side_writes::record_side_writes(&slash);
+        assert!(set.side_writes.slash_offense_key.is_some());
+        engine
+            .put_record_with_pk_zone(
+                &slash.id,
+                &slash,
+                &crate::crypto::hash::sha3_256_hex(&slash.creator_public_key),
+                &slash.creator_public_key,
+                crate::ZoneId::for_record(&slash.id).to_key_bytes(),
+                None,
+                set.side_writes,
+                None,
+            )
+            .unwrap();
+        assert_eq!(engine.slash_offense_record(&digest), Some(slash.id.clone()));
+        engine.delete_record(&slash.id, DeleteIntent::GcPrune).unwrap();
+        assert!(!engine.record_exists(&slash.id).unwrap());
+        assert_eq!(
+            engine.slash_offense_record(&digest),
+            Some(slash.id.clone()),
+            "marker must survive the slash record's deletion (R10)"
         );
     }
 }

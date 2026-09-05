@@ -1,11 +1,11 @@
-# Receipted agent acts in deepseek-harness (dsh) — via `elara-mcp`
+# Proven agent acts in deepseek-harness (dsh) — via `elara-mcp`
 
 [deepseek-harness](https://github.com/deepseek-ai/deepseek-harness) (dsh) speaks MCP
 natively: one plugin instance per external server, tools surfacing to the model as
 `mcp__<serverName>__<toolName>`. [`elara-mcp`](../../crates/elara-mcp) is a stdio MCP
-server that gives an agent a **receipted, revocable, post-quantum-signed mandate** on an
+server that gives an agent a **proof-backed, revocable, post-quantum-signed mandate** on an
 Elara chain. Put together, every consequential act your dsh agent takes can carry an
-offline-verifiable receipt: *which human authorized which agent, for what, revocable,
+offline-verifiable proof: *which human authorized which agent, for what, revocable,
 and post-revocation provable*.
 
 ## The config (60 seconds, assuming the 15-minute issuer quickstart is done)
@@ -36,7 +36,7 @@ these are the exact registered names):
 
 | Tool (as dsh names it) | What it does |
 |---|---|
-| `mcp__elara__mandate_act_emit` | Record a receipted, signed act under the configured mandate — the server hashes the real content itself (SHA3-256 of canonical JSON); a pre-computed hash is refused, so receipts bind to content, not claims |
+| `mcp__elara__mandate_act_emit` | Record a proven, signed act under the configured mandate — the server hashes the real content itself (SHA3-256 of canonical JSON); a pre-computed hash is refused, so proofs bind to content, not claims |
 | `mcp__elara__mandate_act_status` | Authorization verdict for any submitted record id (flag, lineage, completeness) |
 | `mcp__elara__mandate_my_mandate` | The agent's own mandate: scope, window, live-or-revoked |
 | `mcp__elara__mandate_bundle_verify` | Verify a committed mandate bundle — touches no network at all |
@@ -44,7 +44,7 @@ these are the exact registered names):
 (Node reachability isn't a tool: an unreachable or wrong-network chain surfaces as a
 loud startup refusal or per-call error — see the fail-closed note below.)
 
-Then anyone — your user, your auditor, a stranger — verifies a receipt **offline**:
+Then anyone — your user, your auditor, a stranger — verifies a proof **offline**:
 
 ```
 elara-verify record <record-id>.bin --anchor <anchor-pubkey>
@@ -52,11 +52,11 @@ elara-verify record <record-id>.bin --anchor <anchor-pubkey>
 
 ## Why bother
 
-dsh logs what the agent did. A receipt proves what the agent **was allowed to do** —
+dsh logs what the agent did. A proof shows what the agent **was allowed to do** —
 checkable without trusting the harness, the operator, or us. Revoke the mandate and
 post-revocation acts are provably distinct from pre-revocation ones. The whole layer is
 Apache/MIT; the maintainer of this repo is itself an AI agent operating under exactly
-such a mandate, receipts public: <https://navigatorbuilds.github.io/elara-mesh/receipts.html>
+such a mandate, proofs public: <https://navigatorbuilds.github.io/elara-mesh/receipts.html>
 
 ## Honesty notes
 
@@ -75,5 +75,5 @@ such a mandate, receipts public: <https://navigatorbuilds.github.io/elara-mesh/r
   run the full harness, we'd genuinely like to hear what broke or didn't: open an issue.
 - Fail-closed by design: wrong network, revoked mandate, missing identity file, or a
   spent daily budget refuse loudly at startup or call time — never a silent wrong-chain
-  receipt. Mandate scope strings are recorded and signed but not yet enforced
+  proof. Mandate scope strings are recorded and signed but not yet enforced
   (`scope_deferred`) — don't represent scope as enforced policy.

@@ -93,6 +93,10 @@ pub struct LoopStatus {
     /// Staleness threshold (seconds). A loop whose last heartbeat is older than
     /// this reads [`LoopState::Stale`]. Should be ~3-4× the loop's own interval.
     stale_after_secs: u64,
+    /// `mono_secs()+1` at registration (same +1 convention as `last_tick_mono`).
+    /// Lets staleness cover a loop that wedges BEFORE its first heartbeat (W-O):
+    /// never-ticked is exempt only while young.
+    registered_mono: u64,
 }
 
 impl LoopStatus {
@@ -103,6 +107,7 @@ impl LoopStatus {
             restarts: AtomicU64::new(0),
             state: AtomicU8::new(LoopState::Running as u8),
             stale_after_secs,
+            registered_mono: mono_secs() + 1,
         }
     }
 
@@ -140,16 +145,31 @@ impl LoopStatus {
     /// heartbeat is older than `stale_after_secs` is reported `Stale` (catches
     /// HANGS the panic-supervisor can't see). `Dead`/`Disabled` are sticky.
     pub fn state(&self) -> LoopState {
+        self.state_at(mono_secs() + 1)
+    }
+
+    /// Inner, time-injected form of [`Self::state`] so the staleness transitions
+    /// are testable without wall-clock sleeps. `now_p1` = `mono_secs() + 1`.
+    fn state_at(&self, now_p1: u64) -> LoopState {
         let base = LoopState::from_u8(self.state.load(Ordering::Relaxed));
         if base != LoopState::Running {
             return base; // Dead/Disabled/Stale-already are terminal-ish; don't override
         }
         let last = self.last_tick_mono.load(Ordering::Relaxed);
         if last == 0 {
-            return LoopState::Running; // just spawned, hasn't ticked yet — not stale
+            // W-O: a never-ticked loop is exempt from staleness only while YOUNG.
+            // Past its own threshold measured from REGISTRATION it is a
+            // pre-first-tick hang (setup/first-await wedge), not "just spawned" —
+            // without this, a loop that wedges before its first heartbeat reads
+            // Running/-1 forever and any_degraded() never fires for it.
+            return if now_p1.saturating_sub(self.registered_mono) > self.stale_after_secs {
+                LoopState::Stale
+            } else {
+                LoopState::Running
+            };
         }
         // `last` is mono_secs()+1, so age = (now+1) - last (see heartbeat()).
-        if (mono_secs() + 1).saturating_sub(last) > self.stale_after_secs {
+        if now_p1.saturating_sub(last) > self.stale_after_secs {
             LoopState::Stale
         } else {
             LoopState::Running
@@ -258,7 +278,7 @@ impl LoopRegistry {
             ));
         }
         out.push_str(
-            "# HELP elara_loop_last_tick_age_seconds Seconds since a supervised loop last stamped a heartbeat (catches HANGS the panic path can't see). -1 = never ticked yet.\n\
+            "# HELP elara_loop_last_tick_age_seconds Seconds since a supervised loop last stamped a heartbeat (catches HANGS the panic path can't see). -1 = never ticked; read with elara_loop_state: (3,-1)=off-by-design, (1,-1)=pre-first-tick hang.\n\
              # TYPE elara_loop_last_tick_age_seconds gauge\n",
         );
         for (name, _state, age, _restarts) in &snap {
@@ -395,6 +415,28 @@ mod tests {
         // A heartbeat clears it back to Running (a re-registered/recovered loop).
         s.heartbeat();
         assert_eq!(s.state(), LoopState::Running);
+    }
+
+    #[test]
+    fn pre_first_tick_hang_goes_stale_at_registration_age() {
+        // W-O: never-ticked exempts staleness only while YOUNG.
+        let s = LoopStatus::new("t", 10);
+        let reg = s.registered_mono;
+        assert_eq!(s.state_at(reg), LoopState::Running); // just spawned
+        assert_eq!(s.state_at(reg + 10), LoopState::Running); // at threshold, not past
+        assert_eq!(s.state_at(reg + 11), LoopState::Stale); // past → pre-first-tick hang
+        // A first heartbeat rescues it onto the normal last-tick clock.
+        s.heartbeat();
+        assert_eq!(s.state(), LoopState::Running);
+        // Disabled-before-first-tick stays sticky even when old (config-off loops
+        // must never flip stale from mere age — the live pex/seed_reconnect case).
+        let d = LoopStatus::new("d", 10);
+        d.set_disabled();
+        assert_eq!(d.state_at(d.registered_mono + 100), LoopState::Disabled);
+        // Dead likewise sticky.
+        let x = LoopStatus::new("x", 10);
+        x.set_dead();
+        assert_eq!(x.state_at(x.registered_mono + 100), LoopState::Dead);
     }
 
     #[test]

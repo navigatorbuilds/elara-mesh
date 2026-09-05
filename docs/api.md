@@ -8,7 +8,8 @@ All responses are JSON unless otherwise noted. CORS is enabled for all origins.
 > the `--listen` port — liveness/meta (`/ping` `/status` `/health` `/alive` `/metrics`
 > `/version`), the light-client / account reads (`/proof/account/{id}`,
 > `/headers/from/{epoch}`, `/snapshot/state-delta`, `/seal/progress/{id}`,
-> `/records/by-hash/{hash}`, `/mandate`, `/governance/upgrade_outcomes`), and the
+> `/records/by-hash/{hash}`, `/mandate`, `/revocations/since/{cursor}`,
+> `/governance/upgrade_outcomes`), and the
 > read-only block explorer (`/explorer` plus `/epochs` `/consensus/status` `/dag/stats`
 > `/dag/tips` `/transactions/recent` `/record/{id}` `/account/{identity}`), plus the
 > `/pq-ws` post-quantum WebSocket (see [WebSocket](#websocket-pq-ws) below). Every
@@ -273,6 +274,20 @@ Query records by timestamp.
 | `limit` | int | 100 | Max records (max 1000) |
 
 Returns hex-encoded wire bytes.
+
+### `GET /revocations/since/{cursor}`
+
+Bounded incremental export of mandate-revocation state (public verification
+facts; the per-mandate view is `GET /mandate/{id}`). Walk the full set by
+following `next_cursor` until it returns `null`.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `{cursor}` | path | — | `0` to start; else the previous page's `next_cursor` (128 hex chars). Anything else: 400 |
+| `limit` | int | 1000 | Max entries per page (max 1000) |
+
+Response: `{ "count": n, "revocations": [{ "mandate_id_hash", "revoker_identity_hash",
+"revoked_at_ms", "version" }], "next_cursor": "…"|null }`.
 
 ### `GET /record/{id}`
 

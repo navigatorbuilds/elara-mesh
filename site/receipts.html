@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>The maintainer's receipts — Elara</title>
-<meta name="description" content="Elara's maintainer is an AI agent. Its human-facing acts and its build agent's commits and deploys are receipted on the mesh it maintains — two disclosed mandates from one human principal, checkable from any node, or offline.">
+<title>The maintainer's proof log — Elara</title>
+<meta name="description" content="Elara's maintainer is an AI agent. Its human-facing acts and its build agent's commits and deploys carry proofs on the mesh it maintains — two disclosed mandates from one human principal, checkable from any node, or offline.">
 <link rel="stylesheet" href="style.css">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='38' fill='none' stroke='%2336e2c4' stroke-width='9'/><circle cx='50' cy='50' r='10' fill='%2336e2c4'/></svg>">
 <script src="reveal.js" defer></script>
@@ -32,7 +32,7 @@
     <a href="how.html">How it works</a>
     <a href="usecases.html">Use cases</a>
     <a href="verify/">Verify</a>
-    <a href="receipts.html" class="nav-on">Receipts</a>
+    <a href="receipts.html" class="nav-on">Proof log</a>
     <a class="nav-gh" href="https://github.com/navigatorbuilds/elara-mesh" rel="noopener">GitHub →</a>
   </nav>
 </header>
@@ -41,8 +41,8 @@
 
 <header class="page-head">
   <p class="hero-kicker">Dogfood</p>
-  <h1>The maintainer's receipts.</h1>
-  <p class="hero-sub">Elara's maintainer is an AI agent. Its acts are receipted on the mesh it
+  <h1>The maintainer's proof log.</h1>
+  <p class="hero-sub">Elara's maintainer is an AI agent. Its acts carry proofs on the mesh it
   maintains — signed under public, revocable mandates issued by one human principal: the
   maintainer's mandate (<code>605d8e66…</code>) covers its human-facing acts, and since
   2026-08-20 a disclosed build-agent identity carries the commit/deploy bookkeeping under its own
@@ -52,24 +52,24 @@
 
 <section class="reveal" style="border:1px solid rgba(54,226,196,0.35);border-radius:12px;padding:1.1rem 1.3rem;">
   <h2 style="margin-top:0">Check one yourself — under a minute, in your browser</h2>
-  <p><strong>« 1 »</strong> Pick a receipt below that carries a
+  <p><strong>« 1 »</strong> Pick a proof below that carries a
   <span class="rc-badge">verify in your browser</span> link — it's a real act by the AI
   maintainer, bundled with an epoch seal from the live chain.<br>
-  <strong>« 2 »</strong> The link opens the in-browser verifier with that receipt pre-loaded.
+  <strong>« 2 »</strong> The link opens the in-browser verifier with that proof pre-loaded.
   <strong>Nothing is verified yet</strong> — you press the button.<br>
   <strong>« 3 »</strong> Read the verdict. The post-quantum signature checks
   (ML-DSA-65 — FIPS 204, "Dilithium3" — plus SPHINCS+) cover the record <em>including its embedded mandate reference</em>;
   the mandate's own status — validity window, revocation, authorization — is the
   <span class="rc-mono">/mandate/status</span> check in every row, or the verifier page's
   mandate-bundle box. Green never means more than the ✓ lines say.</p>
-  <p class="rc-note">Receipting is best-effort machinery and this list is a snapshot — it cannot
+  <p class="rc-note">Proof emission is best-effort machinery and this list is a snapshot — it cannot
   prove completeness. That is exactly why every row also carries the commands to bypass this page
   and this site entirely.</p>
 </section>
 
 <section class="reveal">
   <h2>What this page is — and is not</h2>
-  <p>Each receipt is a signed <span class="rc-mono">agent_audit</span> record on the mesh,
+  <p>Each proof is a signed <span class="rc-mono">agent_audit</span> record on the mesh,
   carrying the tool, the action, and a hash that binds it to a public git commit. The acts are
   performed under a <strong>mandate</strong> — an on-mesh grant from a human principal to the
   agent's key — so every act resolves to an authority-to-act verdict
@@ -83,7 +83,7 @@
 </section>
 
 <section id="receipts" class="reveal">
-  <h2>Latest receipts</h2>
+  <h2>Latest proofs</h2>
   <div id="rc-meta" class="rc-note"></div>
   <div id="rc-list" class="rc-list"><noscript><p>JavaScript is off — read the raw feed at
   <a href="receipts.json">receipts.json</a>; every entry is independently checkable per the
@@ -91,7 +91,7 @@
 </section>
 
 <section class="reveal">
-  <h2>Check a receipt yourself</h2>
+  <h2>Check a proof yourself</h2>
   <p>Three independent checks, strongest last. Replace <span class="rc-mono">&lt;record_id&gt;</span>
   and <span class="rc-mono">&lt;node&gt;</span> (any mesh node you run or trust —
   <span class="rc-mono">http://127.0.0.1:9474</span> if you've joined).</p>
@@ -99,8 +99,8 @@
     curl &lt;node&gt;/record/&lt;record_id&gt;
     curl &lt;node&gt;/mandate/status/&lt;record_id&gt;
 
-« 2 » What a commit proof binds — the receipt's args_hash is
-    SHA3-256 of the full 40-char commit sha it receipts:
+« 2 » What a commit proof binds — the proof's args_hash is
+    SHA3-256 of the full 40-char commit sha it covers:
     printf '%s' &lt;commit_sha&gt; | python3 -c 'import sys,hashlib; print(hashlib.sha3_256(sys.stdin.buffer.read()).hexdigest())'
     Honest scope: those commits live in the DEVELOPMENT repository, whose
     history is not published — so this PER-COMMIT binding is checkable by
@@ -110,7 +110,7 @@
     each mirror push emits a chained mirror_publish_act whose window root is
     recomputable from public history alone — see “The publish chain” below.
     The boundary is content vs ordering: the publish act binds WHAT became
-    public, per publish window; these per-commit receipts remain the finer
+    public, per publish window; these per-commit proofs remain the finer
     instrument for private ordering and rewritten-history forensics. The
     act narrows that gap; it never subsumes it.
 
@@ -123,7 +123,7 @@
       --expected-hash  "$(jq -r '.expected_hash'  &lt;record_id&gt;.pins.json)"
     # no jq? drop the two pin flags — you get an honest ⚠ PARTIAL (signatures
     #   proven; the seal bind stays unpinned until you supply pins — never a faked green)
-    # no CLI handy? paste the receipt into the in-browser verifier: <a href="verify/">/verify</a>
+    # no CLI handy? paste the proof into the in-browser verifier: <a href="verify/">/verify</a>
     # have a reachable node? cross-check any LIVE row too:
     #   curl &lt;node&gt;/record/&lt;record_id&gt;/wire &gt; r.bin &amp;&amp; elara-verify --receipt r.bin
     # what exactly is signed — the preimage rule, the naming trap, scope_deferred:
@@ -131,7 +131,7 @@
 </section>
 
 <section class="reveal">
-  <h2>The publish chain — mirror pushes, receipted</h2>
+  <h2>The publish chain — mirror pushes, proven</h2>
   <p>From <strong>2026-08-25</strong> onward, every push of the public mirror emits a
   <span class="rc-mono">mirror_publish_act</span>: a signed record binding that push to the mesh.
   <strong>Forward-only from that date</strong> — earlier publishes are recorded in the private
@@ -172,8 +172,8 @@ git show &lt;prev_mirror_commit&gt;:site/receipts.json   # … minus these = the
   and <em>when</em> — the content claims are checkable exactly as far as the recomputation above
   reaches, no further. <span class="rc-mono">mirror_commit</span> is a git sha1 and is disclosed
   as a pointer, never claimed as the cryptographic binding — the SHA3 fields are. And the chain
-  proves publishes that <em>did</em> emit acts; the per-commit receipts and their mandate
-  machinery above are what receipts the day-to-day work between publishes.</p>
+  proves publishes that <em>did</em> emit acts; the per-commit proofs and their mandate
+  machinery above are what prove the day-to-day work between publishes.</p>
 </section>
 
 </main>
@@ -208,7 +208,7 @@ git show &lt;prev_mirror_commit&gt;:site/receipts.json   # … minus these = the
   }
   fetch('receipts.json').then(function (r) { return r.json(); }).then(function (d) {
     if (!d || !d.count) {
-      list.innerHTML = '<div class="rc-empty"><p><strong>No public receipts yet.</strong> ' +
+      list.innerHTML = '<div class="rc-empty"><p><strong>No public proofs yet.</strong> ' +
         esc((d && d.note) || 'The maintainer identity and mandate are minted at public genesis.') +
         '</p></div>';
       return;
@@ -251,7 +251,7 @@ git show &lt;prev_mirror_commit&gt;:site/receipts.json   # … minus these = the
         (a.mandate_ref ? 'mandate: ' + esc(shortHex(a.mandate_ref)) + '<br>' : '') +
         (a.scope_deferred === true ? 'scope_deferred: true — this mandate’s op/zone/amount scope was recorded, NOT enforced (v0 checks who / when / revocation only)<br>' : '') +
         (a.scope_deferred === false ? 'scope_deferred: false — wildcard scope, nothing to enforce (not evidence scope was checked)<br>' : '') +
-        (a.browser_verify ? 'in-browser: <a href="verify/?act=' + encodeURIComponent(a.record_id) + '">verify/?act=' + esc(shortHex(a.record_id)) + '</a> (same receipt+seal, checked on your machine)<br>' +
+        (a.browser_verify ? 'in-browser: <a href="verify/?act=' + encodeURIComponent(a.record_id) + '">verify/?act=' + esc(shortHex(a.record_id)) + '</a> (same proof+seal, checked on your machine)<br>' +
           'offline (CLI, no server after the two downloads): ' + cliBlock(a.record_id) : '') +
         (a.archived
           ? '<pre>archived: this act has aged out of the node’s bounded hot tier (records prune\ninto sealed history by design), so the live /record route no longer serves it.' +

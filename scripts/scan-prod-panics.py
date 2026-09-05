@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+''':'
+exec /usr/bin/env python3 "$0" "$@"  # bash-proof: `bash this.py` re-execs under python3; without it bash ran `import os` as ImageMagick screen-capture (2026-09-04)
+'''
 """Measure the *production* panic surface of src/ + crates/ — the real Lane-2 metric.
 
 A naive `grep -c unwrap src/` reports ~8000 hits and is useless: the

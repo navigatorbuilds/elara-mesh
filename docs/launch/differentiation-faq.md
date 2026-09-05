@@ -98,7 +98,7 @@ outcomes). Second, its signatures are **classical** (the reference suites use
 RS256) with **no published post-quantum roadmap** — the same PQ gap the Verifiable
 Credentials section above describes, because AP2 mandates *are* VCs.
 
-The gap both leave open is the same one: **neither receipts the agent's
+The gap both leave open is the same one: **neither proves the agent's
 *non-payment* acts** — the commit, the deploy, the model it published, the config
 it changed. That is not a criticism; it is out of scope by design. It is also
 exactly the seam the STARK-receipt draft names for itself: its `action_ref` field
@@ -107,8 +107,8 @@ is 32 **opaque** bytes whose preimage "the receipt format does not interpret …
 
 So, precisely: x402 settles agent payments and its community standardizes *payment*
 receipts; AP2 — FIDO-governed — produces *authorization* evidence for commerce on
-classical signatures with no published PQ roadmap; **neither receipts the
-non-payment act.** Elara is a shipped work-layer receipt for any signed agent act —
+classical signatures with no published PQ roadmap; **neither proves the
+non-payment act.** Elara is shipped work-layer proof for any signed agent act —
 post-quantum (FIPS 204 ML-DSA / FIPS 205 SLH-DSA), bound to a revocable on-mesh
 mandate from a named principal, verifiable fully offline by a signing-incapable
 MIT/Apache verifier — that plugs into `action_ref` and **composes with those

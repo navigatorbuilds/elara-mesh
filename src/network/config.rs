@@ -881,6 +881,18 @@ pub struct NodeConfig {
     #[serde(default)]
     pub use_committee_v2: bool,
 
+    /// NL-1 (adaptive seal-gate, Step 2) — when true, the epoch loop pre-checks
+    /// `now - latest_seal_end[zone] >= zone_adaptive_interval[zone]` before
+    /// proposing a seal, so a zone seals on its own adaptive cadence instead of
+    /// every eligible tick. Default false → the `should_propose_seal` path is
+    /// byte-for-byte unchanged (merge-dark). Inert in production until VERDICT-C
+    /// holds (≥2 staked nodes · sustained >20 rec/s · floor_pinned>0). The flip
+    /// is restart-only, never mid-epoch (self-equivocation hazard: AlreadySealed
+    /// guards but does not fully close a mid-epoch cadence change). Spec:
+    /// internal design notes.
+    #[serde(default)]
+    pub use_adaptive_seal_gate: bool,
+
     /// KR-3 S2 — enable finalized-causal ordering for rotation-class records
     /// (`key_rotation` / `sphincs_key_rotation` / `key_revocation` /
     /// future `authority_transfer`). When ON, rotation-class effect timing
@@ -1418,6 +1430,7 @@ impl Default for NodeConfig {
             committee_resolver_cache_size: default_committee_resolver_cache_size(),
             enforce_per_zone_vrf: false,
             use_committee_v2: false,
+            use_adaptive_seal_gate: false,
             s2_rotation_ordering_enabled: false,
             enforce_ledger_content_hash_v2: false,
             uptime_vesting_enabled: false,
@@ -1980,6 +1993,11 @@ impl NodeConfig {
         // Gap 5 fleet toggle — flip to true once staked anchors > 10.
         if let Ok(v) = std::env::var("ELARA_USE_COMMITTEE_V2") {
             self.use_committee_v2 = matches!(v.as_str(), "1" | "true" | "TRUE" | "on" | "yes");
+        }
+        // NL-1 adaptive seal-gate (Step 2) — merge-dark; restart-only flip, never
+        // mid-epoch. Inert until VERDICT-C holds.
+        if let Ok(v) = std::env::var("ELARA_USE_ADAPTIVE_SEAL_GATE") {
+            self.use_adaptive_seal_gate = matches!(v.as_str(), "1" | "true" | "TRUE" | "on" | "yes");
         }
         // KR-3 S2 rotation-class finalized-causal ordering — default OFF; the
         // full W1/W2 + routing + seal-gate surface must ship (and, for mainnet,
@@ -3451,6 +3469,37 @@ mod tests {
         c2.apply_env_overrides();
         assert!(!c2.use_committee_v2, "ELARA_USE_COMMITTEE_V2=0 must keep v2 off");
         std::env::remove_var("ELARA_USE_COMMITTEE_V2");
+    }
+
+    #[test]
+    fn test_use_adaptive_seal_gate_default_false_and_env_override() {
+        // Default MUST be false — the adaptive seal-gate (NL-1, Step 2) is
+        // merge-dark: with the flag off, `should_propose_seal` is byte-for-byte
+        // unchanged. The flip is an explicit operator action, restart-only, after
+        // VERDICT-C holds (≥2 staked nodes · sustained >20 rec/s · floor_pinned>0).
+        let c = NodeConfig::default();
+        assert!(
+            !c.use_adaptive_seal_gate,
+            "default must be false until VERDICT-C flag-on"
+        );
+
+        let mut c2 = NodeConfig::default();
+        for truthy in ["1", "true", "TRUE", "on", "yes"] {
+            std::env::set_var("ELARA_USE_ADAPTIVE_SEAL_GATE", truthy);
+            c2.apply_env_overrides();
+            assert!(
+                c2.use_adaptive_seal_gate,
+                "ELARA_USE_ADAPTIVE_SEAL_GATE={truthy} must enable the gate"
+            );
+            c2.use_adaptive_seal_gate = false; // reset for next iteration
+        }
+        std::env::set_var("ELARA_USE_ADAPTIVE_SEAL_GATE", "0");
+        c2.apply_env_overrides();
+        assert!(
+            !c2.use_adaptive_seal_gate,
+            "ELARA_USE_ADAPTIVE_SEAL_GATE=0 must keep the gate off"
+        );
+        std::env::remove_var("ELARA_USE_ADAPTIVE_SEAL_GATE");
     }
 
     #[test]

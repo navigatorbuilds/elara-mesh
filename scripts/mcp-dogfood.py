@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+''':'
+exec /usr/bin/env python3 "$0" "$@"  # bash-proof: `bash this.py` re-execs under python3; without it bash ran `import os` as ImageMagick screen-capture (2026-09-04)
+'''
 """elara-mcp stdio dogfood — drives the release binary over real JSON-RPC
 exactly as an MCP client would, against a LIVE node, and emits one real
 receipted act. This is the crate's acceptance harness (v0 gate per

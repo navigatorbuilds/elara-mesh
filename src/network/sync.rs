@@ -352,6 +352,16 @@ impl MerkleTree {
     /// keeps the failure legible and version-driven, not hash-driven).
     #[inline]
     pub fn verify_seal_proof_for(seal_wire_version: u16, proof: &MerkleProof) -> bool {
+        // A10adj (audit 2026-08-30): 0 = "unknown, pre-fold-tag era" per the
+        // header contract (light.rs seal_wire_version docs) and MUST NOT act
+        // as a fold selector. Pre-fix, 0 fell into the `else` and silently
+        // selected the v1 recipe — live since the v7 flip. Fail closed: an
+        // unknown-era seal cannot be recipe-verified trustworthily; callers
+        // with a REAL version (1..=6 → v1 recipe, ≥7 → v2) are unaffected,
+        // so genuine v1-era headers from modern seeds still verify.
+        if seal_wire_version == 0 {
+            return false;
+        }
         if seal_wire_version >= FOLD_V2_MIN_WIRE_VERSION {
             proof.fold_version == 2 && Self::verify_proof_v2_seal(proof)
         } else {
@@ -2775,6 +2785,35 @@ pub async fn initial_sync_with_fast_path(state: &Arc<NodeState>) {
 
 #[cfg(test)]
 mod tests {
+    /// A10adj: seal_wire_version 0 is "unknown", never a fold selector.
+    #[test]
+    fn a10adj_zero_wire_version_never_selects_a_fold_recipe() {
+        use super::{MerkleProof, MerkleTree};
+        for fv in [0u16, 1, 2] {
+            let p = MerkleProof {
+                leaf: [7u8; 32],
+                siblings: vec![],
+                root: [7u8; 32],
+                fold_version: fv,
+            };
+            assert!(
+                !MerkleTree::verify_seal_proof_for(0, &p),
+                "seal_wire_version=0 must fail closed (proof fold_version={fv})"
+            );
+        }
+    }
+
+    /// A10adj guard-rail: a REAL pre-v7 version still routes the v1 recipe
+    /// (single-leaf tree: root == leaf verifies under v1).
+    #[test]
+    fn a10adj_real_v1_era_version_still_verifies() {
+        use super::{MerkleProof, MerkleTree};
+        let leaf = [42u8; 32];
+        let p = MerkleProof { leaf, siblings: vec![], root: leaf, fold_version: 1 };
+        assert!(MerkleTree::verify_seal_proof_for(5, &p));
+        // And the same explicit-version proof still refuses the v2 lane.
+        assert!(!MerkleTree::verify_seal_proof_for(7, &p));
+    }
     use super::*;
 
     // ── delta-sync cross-page cursor: build_delta_page (I1/I2/C2 pins) ────

@@ -722,7 +722,11 @@ pub fn determine_readiness(
 }
 
 /// Background health monitor loop. Periodically evaluates health and logs warnings.
-pub async fn health_check_loop(state: Arc<NodeState>, mut shutdown: watch::Receiver<()>) {
+pub async fn health_check_loop(
+    state: Arc<NodeState>,
+    mut shutdown: watch::Receiver<()>,
+    hb: Arc<super::supervision::LoopStatus>,
+) {
     let interval = Duration::from_secs(state.config.health_check_interval_secs);
     if interval.is_zero() {
         debug!("health monitor disabled (interval = 0)");
@@ -739,6 +743,9 @@ pub async fn health_check_loop(state: Arc<NodeState>, mut shutdown: watch::Recei
                 return;
             }
         }
+        // W-P: without this, a panic in evaluate() leaves cached_health serving
+        // the last report forever — /health frozen-green with the monitor dead.
+        hb.heartbeat();
 
         // Stage 6 cooperative scheduler (Protocol §11.10).
         super::system_load::coop_yield_if_busy(&state.system_load).await;
@@ -981,9 +988,16 @@ async fn run_auto_scale_tick(state: &Arc<NodeState>) -> crate::errors::Result<()
         return Ok(());
     }
 
-    // Choose target_epoch a few epochs in the future so every node has time
-    // to receive the transition record before it fires.
-    let target_epoch = current_max_epoch + 3;
+    // Choose target_epoch far enough in the future that every node has time
+    // to receive the transition record before it fires. Step 0c (2026-08-29
+    // seal-gate verdict): the arrival lead is the dispute window — derive it
+    // from the wall-clock floor, not a bare epoch count (at 60 s cadence this
+    // is exactly the old `+ 3`; at the 5 s adaptive floor a bare `+ 3` would
+    // be a 15 s delivery window no fleet can meet).
+    let target_epoch = current_max_epoch
+        + super::zone_transition_seal::dispute_window_epochs(
+            state.config.epoch_seal_interval_secs,
+        );
     let meta = super::epoch::zone_transition_metadata(target_epoch, current_zone_count, new_count);
     let parents = super::server::dag_tip_parents(state, 3).await;
     let content_str =
@@ -1138,6 +1152,7 @@ async fn run_auto_scale_tick(state: &Arc<NodeState>) -> crate::errors::Result<()
         &decision,
         &per_zone_activity_for_picker,
         current_epoch,
+        state.config.epoch_seal_interval_secs,
         &candidates,
         super::zone_committee::DEFAULT_COMMITTEE_SIZE,
     );
@@ -1192,6 +1207,11 @@ async fn run_auto_scale_tick(state: &Arc<NodeState>) -> crate::errors::Result<()
             // logged at the decision level above.
         }
         Err(e) => {
+            // A3 (audit 2026-08-30): counted, not just logged — a proposer
+            // that self-rejects must be observable on /metrics.
+            state
+                .transitions_orchestrator_propose_failed_total
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             warn!("auto_scale: propose_transition_from_decision failed: {e}");
         }
     }
@@ -1786,7 +1806,13 @@ async fn run_zone_subscription_tick(state: &Arc<NodeState>) -> crate::errors::Re
 
     // Decide whether we need to (re)publish: only emit if we have no current
     // subscription OR ours is within the refresh margin of expiring.
-    let validity_epochs = state.config.zone_subscription_validity_epochs.max(10);
+    // Step 0c (2026-08-29 seal-gate verdict): validity derived through the
+    // wall-clock floor — a no-op at today's 60 s cadence, a real bound once
+    // per-zone cadence diverges (see SUBSCRIPTION_VALIDITY_FLOOR_SECS).
+    let validity_epochs = super::zone_subscription::validity_epochs_with_floor(
+        state.config.zone_subscription_validity_epochs.max(10),
+        state.config.epoch_seal_interval_secs,
+    );
     let refresh_margin = state
         .config
         .zone_subscription_refresh_margin

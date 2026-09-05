@@ -16,13 +16,13 @@
 (*      (current_allowed_rank), up to MAX_VIEW_DEPTH = 7 ranks. Lower rank   *)
 (*      = earlier eligibility.                                              *)
 (*   2. SETTLEMENT — a LEADERLESS 2/3 attestation snapshot. is_settled      *)
-(*      (consensus.rs:2515) / is_global_seal_settled (:4134): a seal        *)
-(*      finalizes when attestations reach 2/3 of eligible (non-creator)     *)
+(*      (consensus.rs:2706, is_settled) / is_global_seal_settled (:4519): a *)
+(*      seal finalizes when attestations reach 2/3 of eligible (non-creator)*)
 (*      stake. ANY honest witness may attest; the proposer's identity is    *)
 (*      irrelevant to settlement.                                          *)
 (*   3. STALL RECOVERY — NOT view-change messages. The ladder unlocks       *)
 (*      higher ranks purely by elapsed time. If ALL ranks time out          *)
-(*      (elapsed > (2^7 - 1)*base, is_zone_stuck aggregator.rs:224) a        *)
+(*      (elapsed > (2^7 - 1)*base, is_zone_stuck aggregator.rs:232) a        *)
 (*      CROSS-ZONE GLOBAL ESCALATION fires (escalation_decision :350):       *)
 (*      honest anchors in OTHER zones emit a global quorum seal that         *)
 (*      unsticks the zone. That escalation is itself a 2/3 quorum of         *)
@@ -63,7 +63,7 @@
 (* (Phase E) has NO in-zone analogue.                                      *)
 (*                                                                         *)
 (* THE BOOTSTRAP FREEZE TRAP (the one scenario NOTHING rescues). When        *)
-(* staked.len() < 3, the carve-out at aggregator.rs:755 collapses the        *)
+(* staked.len() < 3, the carve-out at aggregator.rs:316 collapses the       *)
 (* ladder: ONLY the genesis authority may propose, and escalation has no     *)
 (* bootstrap path (escalation_decision :346). MCInZoneLiveBootstrap models   *)
 (* this as HonestRanks = {} (Byzantine genesis) + EscalationAvailable =      *)
@@ -75,7 +75,7 @@
 (* checks ONE epoch's seal. A single epoch can be adversarially stuck (all   *)
 (* low ranks Byzantine), needing escalation. CHAIN progress — every epoch    *)
 (* eventually seals, []<>sealed — rests on the CHAINED VRF BEACON            *)
-(* chained_beacon(prev_seal_hash, epoch, zone) (aggregator.rs:310): the      *)
+(* chained_beacon(prev_seal_hash, epoch, zone) (aggregator.rs:172): the     *)
 (* proposer ranks RE-RANDOMIZE every epoch off the previous seal hash, so    *)
 (* an adversary cannot GRIND or SUSTAIN a worst-case rank assignment across  *)
 (* epochs. The worst-case single epoch modelled here is therefore an upper   *)
@@ -154,7 +154,7 @@ vars == << phase, proposedByHonest, attest, gst, extGst, extAttest, escalated, s
 \* abstraction of elapsed >= (2^k - 1)*base_timeout: only the ORDER matters.
 RankEligible(k) == phase >= k
 \* Escalation is eligible only AFTER the whole local ladder is exhausted
-\* (is_zone_stuck: elapsed > (2^MAX_VIEW_DEPTH - 1)*base, aggregator.rs:224).
+\* (is_zone_stuck: elapsed > (2^MAX_VIEW_DEPTH - 1)*base, aggregator.rs:232).
 EscalEligible   == phase >= NumRanks
 
 \* Count-based 2/3 quorums. Local == is_settled (uniform stake, creator_stake=0).

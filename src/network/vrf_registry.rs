@@ -141,11 +141,22 @@ pub fn extract_vrf_registration(record: &ValidationRecord) -> Option<VrfRegistra
         return None;
     }
 
+    // R1-X1-V (2026-09-02): an ABSENT `node_type` is NOT an anchor. The old
+    // `"anchor"` default granted the anchor-only VRF-key privilege to any
+    // field-less record — a self-declared-anchor vector (a registration's
+    // node_type is asserted by the record itself). The producer
+    // (`vrf_registration_metadata`) has written the field explicitly since the
+    // registry shipped (2026-03-24, before the live chain's genesis), so no
+    // honest record depends on the default. Replay-safe: this is the ONLY
+    // production extraction (ingest, first sight); `rehydrate_registry`
+    // deserializes persisted rows and never re-extracts. The storage-tier twin
+    // in `rocks::identity_tier_for_record` deliberately KEEPS its put-time
+    // default (flag-day-class to flip — R1-X1-V-S).
     let node_type = record
         .metadata
         .get("node_type")
         .and_then(|v| v.as_str())
-        .unwrap_or("anchor")
+        .unwrap_or("leaf")
         .to_string();
 
     // Only anchors can register VRF keys (Protocol §11.12).
@@ -714,6 +725,36 @@ mod tests {
         assert_eq!(legacy.vrf_full_public_key_hex, String::new());
         assert_eq!(legacy.record_id, "legacy");
         assert_eq!(legacy.vrf_public_key_hex, hex::encode([0x33u8; 32]));
+    }
+
+    #[test]
+    fn r1x1v_absent_node_type_is_leaf_never_anchor() {
+        // R1-X1-V (2026-09-02): a registration that does not declare `node_type`
+        // must NOT register (the old `"anchor"` default granted the anchor-only
+        // VRF-key privilege to any field-less record); an explicit "anchor"
+        // still does, and any other declared tier still does not.
+        let make = |node_type: Option<&str>| {
+            let mut r = ValidationRecord::fixture_shell();
+            r.id = "r1x1v-reg".into();
+            r.version = crate::wire::CURRENT_SIGNING_VERSION;
+            r.content_hash = vec![0u8; 32];
+            r.creator_public_key = vec![0u8; 1952];
+            r.timestamp = 1000.0;
+            r.classification = crate::record::Classification::Public;
+            let mut m = std::collections::BTreeMap::new();
+            m.insert(VRF_REGISTRATION_KEY.into(), serde_json::json!(true));
+            m.insert("vrf_public_key".into(), serde_json::json!(hex::encode([0xAAu8; 32])));
+            if let Some(nt) = node_type {
+                m.insert("node_type".into(), serde_json::json!(nt));
+            }
+            r.metadata = m;
+            r
+        };
+        assert!(extract_vrf_registration(&make(None)).is_none(), "field-less registration must not register");
+        assert!(extract_vrf_registration(&make(Some("leaf"))).is_none());
+        assert!(extract_vrf_registration(&make(Some("witness"))).is_none());
+        let reg = extract_vrf_registration(&make(Some("anchor"))).expect("explicit anchor registers");
+        assert_eq!(reg.node_type, "anchor");
     }
 
     #[test]

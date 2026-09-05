@@ -1,12 +1,12 @@
-# Receipted agent acts in AWS Strands — via `elara-mcp`
+# Proven agent acts in AWS Strands — via `elara-mcp`
 
 [Strands Agents](https://github.com/strands-agents/sdk-python) is AWS's open-source
 agent SDK. It speaks MCP natively: an `MCPClient` spawns an external MCP server and
 surfaces its tools straight into an `Agent`'s toolset.
 [`elara-mcp`](../../crates/elara-mcp) is a stdio MCP server that gives an agent a
-**receipted, revocable, post-quantum-signed mandate** on an Elara chain. Put together,
+**proof-backed, revocable, post-quantum-signed mandate** on an Elara chain. Put together,
 every consequential act your Strands agent takes can carry an offline-verifiable
-receipt: *which human authorized which agent, for what, revocable, and post-revocation
+proof: *which human authorized which agent, for what, revocable, and post-revocation
 provable*.
 
 ## The config (60 seconds, assuming the 15-minute issuer quickstart is done)
@@ -35,7 +35,7 @@ elara = MCPClient(lambda: stdio_client(StdioServerParameters(
 
 with elara:                                  # the context manager owns the subprocess
     agent = Agent(tools=elara.list_tools_sync())
-    agent("Record that you finished the migration, then show me the receipt.")
+    agent("Record that you finished the migration, then show me the proof.")
 ```
 
 Your model now sees four tools (verified live against `strands-agents` 1.53.0 with the
@@ -43,7 +43,7 @@ Your model now sees four tools (verified live against `strands-agents` 1.53.0 wi
 
 | Tool | What it does |
 |---|---|
-| `mandate_act_emit` | Record a receipted, signed act under the configured mandate — the server hashes the real content itself (SHA3-256 of canonical JSON); a pre-computed hash is refused, so receipts bind to content, not claims |
+| `mandate_act_emit` | Record a proven, signed act under the configured mandate — the server hashes the real content itself (SHA3-256 of canonical JSON); a pre-computed hash is refused, so proofs bind to content, not claims |
 | `mandate_act_status` | Authorization verdict for any submitted record id (flag, lineage, completeness) |
 | `mandate_my_mandate` | The agent's own mandate: scope, window, live-or-revoked |
 | `mandate_bundle_verify` | Verify a committed mandate bundle — touches no network at all |
@@ -51,7 +51,7 @@ Your model now sees four tools (verified live against `strands-agents` 1.53.0 wi
 (Node reachability isn't a tool: an unreachable or wrong-network chain surfaces as a
 loud startup refusal or per-call error — see the fail-closed note below.)
 
-Then anyone — your user, your auditor, a stranger — verifies a receipt **offline**:
+Then anyone — your user, your auditor, a stranger — verifies a proof **offline**:
 
 ```
 elara-verify record <record-id>.bin --anchor <anchor-pubkey>
@@ -59,11 +59,11 @@ elara-verify record <record-id>.bin --anchor <anchor-pubkey>
 
 ## Why bother
 
-Strands logs what the agent did. A receipt proves what the agent **was allowed to do** —
+Strands logs what the agent did. A proof shows what the agent **was allowed to do** —
 checkable without trusting the SDK, the operator, or us. Revoke the mandate and
 post-revocation acts are provably distinct from pre-revocation ones. The whole layer is
 Apache/MIT; the maintainer of this repo is itself an AI agent operating under exactly
-such a mandate, receipts public: <https://navigatorbuilds.github.io/elara-mesh/receipts.html>
+such a mandate, proofs public: <https://navigatorbuilds.github.io/elara-mesh/receipts.html>
 
 ## Honesty notes
 
@@ -86,5 +86,5 @@ such a mandate, receipts public: <https://navigatorbuilds.github.io/elara-mesh/r
   what broke or didn't — open an issue.
 - Fail-closed by design: wrong network, revoked mandate, missing identity file, or a
   spent daily budget refuse loudly at startup or call time — never a silent wrong-chain
-  receipt. Mandate scope strings are recorded and signed but not yet enforced
+  proof. Mandate scope strings are recorded and signed but not yet enforced
   (`scope_deferred`) — don't represent scope as enforced policy.

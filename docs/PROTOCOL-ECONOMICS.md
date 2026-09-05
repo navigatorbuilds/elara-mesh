@@ -151,6 +151,7 @@ creator-funded rewards were removed as a theft vector.) *Source:
 Slashing is **challenge-triggered** (fisherman dispute), not automatic
 per-block validator penalty. *Source: `src/accounting/types.rs` (`Slash`,
 `MAX_SLASH_PERCENTAGE`, `SLASH_*_FRACTION`).*
+> ⚠ 2026-09-02 (F2 residual R5): the implementation ALSO auto-slashes without a challenge on the genesis authority — epoch-seal equivocation (durable creator-keyed witness, `src/network/slashing.rs::check_seal_equivocation`), liveness failure (`apply_liveness_slash`) and geo fraud (`apply_geo_fraud_slash`), each 25 % of the largest active stake (liveness 1 %), deduped per offense in RAM and by a durable `slash_offense:` marker. The fisherman challenge path described here is the manual route, not the only one. Record: the F2 slashing-witness design brief (2026-09-02, internal design notes).
 
 - **Hard cap: 50% of stake per violation** (`MAX_SLASH_PERCENTAGE`).
 - **Distribution of a slash:** 50% → Conservation Pool · 30% → challenger ·

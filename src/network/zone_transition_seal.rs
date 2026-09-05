@@ -65,6 +65,26 @@ pub const MERGE_ANCHOR_THRESHOLD: usize = 7;
 /// which any node may publish a counter-record to veto the transition.
 pub const TRANSITION_DISPUTE_WINDOW_EPOCHS: u64 = 3;
 
+/// Dispute/arrival window wall-clock floor (step 0c, 2026-08-29 seal-gate
+/// verdict): epoch NUMBERS advance per-zone once cadence varies, so a window
+/// counted only in epochs races shut under fast cadence (at the 5 s adaptive
+/// floor, "3 epochs" is 15 s — no node fleet can receive-and-veto in that).
+/// 180 s = 3 × today's uniform 60 s tick → identical window now, honest
+/// window later. Same pattern as `ROTATION_DISPUTE_WINDOW_FLOOR_SECS` (§6.4).
+pub const TRANSITION_DISPUTE_WINDOW_FLOOR_SECS: u64 = 180;
+
+/// Effective dispute/arrival window in epochs for the given epoch cadence:
+/// `max(TRANSITION_DISPUTE_WINDOW_EPOCHS, ceil(floor_secs / interval_secs))`.
+/// Proposer-side only — the chosen `effective_epoch` / `target_epoch` rides
+/// the seal/record and is self-describing to every verifier (no wire change).
+#[inline]
+pub fn dispute_window_epochs(epoch_interval_secs: u64) -> u64 {
+    let interval = epoch_interval_secs.max(1);
+    TRANSITION_DISPUTE_WINDOW_FLOOR_SECS
+        .div_ceil(interval)
+        .max(TRANSITION_DISPUTE_WINDOW_EPOCHS)
+}
+
 /// Upper bound on the number of anchor signatures a single seal may carry.
 /// `required_threshold()` is 4 for splits and 7 for merges; the real N per
 /// committee is a small constant (single-digit anchors per zone). 32 leaves
@@ -1570,4 +1590,24 @@ mod tests {
         assert!(unknown.signing_preimage().is_err(), "unknown domain fails closed");
     }
 
+    #[test]
+    fn step0c_dispute_window_noop_at_uniform_cadence() {
+        // 60 s cadence: floor/interval = 3 == the epoch constant — today's
+        // behavior is bit-identical to the pre-0c `+ 3`.
+        assert_eq!(dispute_window_epochs(60), TRANSITION_DISPUTE_WINDOW_EPOCHS);
+    }
+
+    #[test]
+    fn step0c_dispute_window_floor_binds_at_adaptive_floor() {
+        // 5 s cadence (MIN_ADAPTIVE_EPOCH_SECS): 180/5 = 36 epochs — the
+        // wall-clock floor holds the window open.
+        assert_eq!(dispute_window_epochs(5), 36);
+        // Degenerate zero interval clamps to 1 s, never divides by zero.
+        assert_eq!(dispute_window_epochs(0), TRANSITION_DISPUTE_WINDOW_FLOOR_SECS);
+        // Very slow cadence: the epoch constant is the floor.
+        assert_eq!(dispute_window_epochs(1_000), TRANSITION_DISPUTE_WINDOW_EPOCHS);
+        // 120 s legacy default cadence (T-STEP0A-REMAINDER pin): ceil(180/120)=2
+        // loses to the epoch constant — behavior identical there too.
+        assert_eq!(dispute_window_epochs(120), TRANSITION_DISPUTE_WINDOW_EPOCHS);
+    }
 }

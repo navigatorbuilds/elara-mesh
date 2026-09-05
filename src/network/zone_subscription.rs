@@ -38,6 +38,26 @@ pub const EPOCH_OP_ZONE_SUBSCRIPTION: &str = "zone_subscription";
 /// Maximum entries pruned per `prune()` call to bound health-loop cost.
 const MAX_PRUNE_PER_CALL: usize = 1024;
 
+/// Subscription-validity wall-clock floor (step 0c, 2026-08-29 seal-gate
+/// verdict): `valid_until` is epoch-denominated on the wire, but epoch
+/// NUMBERS advance per-zone once cadence varies — a validity counted only in
+/// epochs expires in 50 s at the 5 s adaptive floor, churning re-emits
+/// network-wide. 600 s = 10 × today's uniform 60 s tick → identical validity
+/// now, honest validity later. Same pattern as
+/// `TRANSITION_DISPUTE_WINDOW_FLOOR_SECS` / `ROTATION_DISPUTE_WINDOW_FLOOR_SECS`.
+pub const SUBSCRIPTION_VALIDITY_FLOOR_SECS: u64 = 600;
+
+/// Effective subscription validity in epochs for the given cadence:
+/// `max(configured_epochs, ceil(floor_secs / interval_secs))`. Emitter-side
+/// only — the chosen `valid_until` rides the record and is self-describing.
+#[inline]
+pub fn validity_epochs_with_floor(configured_epochs: u64, epoch_interval_secs: u64) -> u64 {
+    let interval = epoch_interval_secs.max(1);
+    SUBSCRIPTION_VALIDITY_FLOOR_SECS
+        .div_ceil(interval)
+        .max(configured_epochs)
+}
+
 /// A single zone-subscription declaration published by a witness.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ZoneSubscription {
@@ -805,5 +825,21 @@ mod tests {
         // zone_counts is empty on fresh registry.
         let empty = ZoneSubscriptionRegistry::new();
         assert!(empty.zone_counts().is_empty());
+    }
+    #[test]
+    fn step0c_validity_noop_at_uniform_cadence() {
+        assert_eq!(validity_epochs_with_floor(10, 60), 10);
+        // Configured value above the floor dominates unchanged.
+        assert_eq!(validity_epochs_with_floor(50, 60), 50);
+    }
+
+    #[test]
+    fn step0c_validity_floor_binds_at_adaptive_floor() {
+        // 5 s cadence: 600/5 = 120 epochs keep validity at 600 wall seconds.
+        assert_eq!(validity_epochs_with_floor(10, 5), 120);
+        // 120 s legacy default cadence (T-STEP0A-REMAINDER pin): ceil(600/120)=5
+        // loses to the configured 10 — behavior identical.
+        assert_eq!(validity_epochs_with_floor(10, 120), 10);
+        assert_eq!(validity_epochs_with_floor(10, 0), SUBSCRIPTION_VALIDITY_FLOOR_SECS);
     }
 }

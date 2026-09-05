@@ -8,17 +8,26 @@
 //!    collectively controlling > 40% zone stake — indicates Sybil collusion.
 //!    (Detected via fisherman challenges, not auto-slash.)
 //!
+//! Detection (F2, 2026-09-02 — internal design notes):
+//! the durable, creator-keyed witness index in CF_METADATA
+//! (`StorageEngine::find_equivocation_witness`), scanned in ingest Phase 2
+//! right after the seal's own batch write. There is no RAM seal window any
+//! more: detection survives restart, costs one bounded seek per seal, and never
+//! walks other creators' seals. Dedup is OFFENSE-keyed (one slash per
+//! (creator, zone, epoch)), guarded in RAM by
+//! [`SlashingMonitor::reserve_offense`] (single-lock check-and-mark) and on
+//! disk by the `slash_offense:` marker written in the slash record's own batch.
+//!
 //! The fisherman challenge path (challenge → jury → verdict → slash) is
 //! separately wired in ingest.rs and handles manual violations.
 //!
 //! Only the genesis authority node auto-creates slash records.
 //! Slash amount: 25% of offender's largest active stake (capped at 50% by ledger).
-
 //!
 //! Spec references:
-//!   @spec economics §10
+//!   @spec economics §8
 
-use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::Ordering::Relaxed;
 
@@ -28,6 +37,7 @@ use crate::ZoneId;
 use crate::identity::Identity;
 use crate::record::{Classification, ValidationRecord};
 use crate::accounting::types::slash_metadata;
+use crate::storage::rocks::StorageEngine;
 
 use super::geo_fraud::{FraudScanInput, FraudVerdict, scan_witness_set};
 use super::liveness_proof::{LivenessFailureProof, LIVENESS_SLASH_PERCENT};
@@ -38,17 +48,69 @@ use super::LockRecover;
 /// Default slash percentage of the offender's largest stake.
 const DEFAULT_SLASH_PERCENT: f64 = 0.25;
 
-/// Track epoch seals per anchor for equivocation detection.
+/// Metadata key carried by every auto-slash record: the offense digest
+/// ([`offense_digest`], 64 lowercase hex chars). Signed and content-hash
+/// covered via `canonical_ledger_preimage_v2` (which iterates ALL metadata, so
+/// an older binary recomputes the identical preimage — no wire-format change).
+/// Registered in `content_safety::ALLOWED_KEYS`; deliberately NOT in
+/// `TEXT_LIMITS` (fixed 64 B, under the 256 B default value cap). Ingest
+/// Phase 2 derives the durable `slash_offense:` marker from it for any stored
+/// slash record (`slash_offense_side_key`).
+pub const BEAT_OFFENSE_KEY: &str = "beat_offense";
+
+/// Offense digest: sha3-256 hex of `"{kind}:{creator}:{detail}"`.
 ///
-/// Equivocation = same anchor produces two different seals for the same
-/// (zone, epoch_number). This is a BFT safety violation.
+/// Fixed width on purpose (F2 blocker B3): the raw tuple with a deep zone path
+/// could exceed the 256-byte metadata value cap and hard-reject the slash
+/// record on every node.
+pub fn offense_digest(kind: &str, creator: &str, detail: &str) -> String {
+    crate::crypto::hash::sha3_256_hex(format!("{kind}:{creator}:{detail}").as_bytes())
+}
+
+/// Offense digest for seal equivocation at one (creator, zone, epoch).
+///
+/// Keyed by the OFFENSE, not by the seal pair: seals A, B, C by one creator at
+/// one (zone, epoch) are ONE offense and slash once. The pre-F2 pair key
+/// `creator:A:C` was fresh after `creator:A:B` and slashed the same offense
+/// twice.
+pub fn seal_equivocation_offense(creator: &str, zone_path: &str, epoch_number: u64) -> String {
+    offense_digest("seal_equivocation", creator, &format!("{zone_path}:{epoch_number}"))
+}
+
+/// Durable slash-offense marker key for a record about to be stored: `Some`
+/// iff the record is a slash carrying a well-formed `beat_offense` digest.
+/// Threaded into the record's own Phase-2 `WriteBatch` through
+/// `RecordSideWrites::slash_offense_key` (shared crash fate with the record).
+/// Two metadata lookups; `None` for every other record.
+pub fn slash_offense_side_key(record: &ValidationRecord) -> Option<Vec<u8>> {
+    let op = record
+        .metadata
+        .get(crate::accounting::types::BEAT_OP_KEY)?
+        .as_str()?;
+    if op != "slash" {
+        return None;
+    }
+    let digest = record.metadata.get(BEAT_OFFENSE_KEY)?.as_str()?;
+    // Canonical form only (lowercase hex, as `offense_digest` emits): a
+    // mixed-case variant would be a second, distinct marker for one offense.
+    if digest.len() != 64 || !digest.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+        return None;
+    }
+    Some(StorageEngine::slash_offense_key(digest))
+}
+
+/// In-process dedup of auto-slash offenses.
+///
+/// F2 (2026-09-02): the per-(creator, zone, epoch) seal map is gone — detection
+/// reads the durable witness index instead (`find_equivocation_witness`). What
+/// remains is the offense set: digests reserved (in flight) or executed by
+/// THIS process, consulted under ONE lock acquisition (`reserve_offense`) so
+/// two of the up-to-64 state-core workers cannot both claim the same offense.
+/// The durable `slash_offense:` marker is the cross-restart layer behind it.
 pub struct SlashingMonitor {
-    /// (creator_hash, zone, epoch_number) → (seal_record_id, content_hash)
-    /// If a second seal arrives with different content_hash, it's equivocation.
-    seals: HashMap<(String, ZoneId, u64), (String, [u8; 32])>,
-    /// Already-slashed keys to avoid repeat slashes.
-    slashed: std::collections::HashSet<String>,
-    /// Total auto-slashes executed.
+    /// Offense digests reserved or executed ([`offense_digest`]).
+    slashed: HashSet<String>,
+    /// Total auto-slashes executed by this process (`count_executed`).
     pub slash_count: u64,
 }
 
@@ -61,87 +123,99 @@ impl Default for SlashingMonitor {
 impl SlashingMonitor {
     pub fn new() -> Self {
         Self {
-            seals: HashMap::new(),
-            slashed: std::collections::HashSet::new(),
+            slashed: HashSet::new(),
             slash_count: 0,
         }
     }
 
-    /// Record an epoch seal and check for equivocation.
-    ///
-    /// Returns `Some((conflicting_seal_id, conflicting_hash))` if this anchor
-    /// already produced a different seal for the same (zone, epoch_number).
-    pub fn record_seal(
-        &mut self,
-        creator_hash: &str,
-        zone: &ZoneId,
-        epoch_number: u64,
-        seal_record_id: &str,
-        content_hash: [u8; 32],
-    ) -> Option<(String, [u8; 32])> {
-        let key = (creator_hash.to_string(), zone.clone(), epoch_number);
-
-        if let Some((existing_id, existing_hash)) = self.seals.get(&key) {
-            if *existing_hash != content_hash && existing_id != seal_record_id {
-                // Different content for same (creator, zone, epoch) = equivocation
-                return Some((existing_id.clone(), *existing_hash));
-            }
-            // Same content or same record ID (duplicate/re-gossip) — not equivocation
-            return None;
-        }
-
-        self.seals.insert(key, (seal_record_id.to_string(), content_hash));
-        None
+    /// True iff the offense is reserved or executed in this process.
+    pub fn already_slashed(&self, offense: &str) -> bool {
+        self.slashed.contains(offense)
     }
 
-    /// Check if this anchor was already slashed for this equivocation.
-    pub fn already_slashed(&self, creator: &str, seal_a: &str, seal_b: &str) -> bool {
-        let key = slash_dedup_key(creator, seal_a, seal_b);
-        self.slashed.contains(&key)
+    /// Check-and-mark under the caller's single lock acquisition: `true` iff
+    /// the offense was absent and is now reserved by the caller. Idempotent
+    /// on the set. Never touches `slash_count` — counting is
+    /// [`Self::count_executed`] (F2 blocker B6 split the old bundled
+    /// `mark_slashed`).
+    pub fn reserve_offense(&mut self, offense: &str) -> bool {
+        self.slashed.insert(offense.to_string())
     }
 
-    /// Mark a slash as executed.
-    pub fn mark_slashed(&mut self, creator: &str, seal_a: &str, seal_b: &str) {
-        let key = slash_dedup_key(creator, seal_a, seal_b);
-        self.slashed.insert(key);
+    /// Undo a reservation whose slash did not execute (no active stake, record
+    /// build or insert failure) so a later detection can retry.
+    pub fn release_offense(&mut self, offense: &str) {
+        self.slashed.remove(offense);
+    }
+
+    /// Count one executed slash. Called only after the slash record was
+    /// durably inserted, so `slash_count ≤ slashed_offense_count()` always
+    /// (an in-flight reservation or a durable-dedup hit keeps an offense in the
+    /// set without a local execution).
+    pub fn count_executed(&mut self) {
         self.slash_count += 1;
     }
 
-    /// Number of tracked seal entries.
-    pub fn tracked_seals(&self) -> usize {
-        self.seals.len()
-    }
-
-    /// Size of the already-slashed dedup set. Each entry is one
-    /// (creator, seal_a, seal_b) tuple that was already slashed once,
-    /// so a re-arrival of the same equivocation pair is short-circuited
-    /// in `already_slashed()`. Operator signal — pairs the lifetime
-    /// `slash_count` (rate of new slashes) with the resident dedup set
-    /// size (how many distinct equivocation pairs we've ever processed).
-    pub fn slashed_pair_count(&self) -> usize {
+    /// Size of the offense set (reserved + executed in this process).
+    /// `/metrics`: `elara_slashing_dedup_pairs` (series name kept; offense-keyed
+    /// since F2).
+    pub fn slashed_offense_count(&self) -> usize {
         self.slashed.len()
     }
+}
 
-    /// Prune seal entries older than a given epoch number per zone.
-    /// Called periodically to prevent unbounded growth.
-    pub fn prune_before_epoch(&mut self, zone: &ZoneId, min_epoch: u64) {
-        self.seals.retain(|(_, z, epoch), _| z != zone || *epoch >= min_epoch);
+/// Outcome of [`claim_offense`].
+pub enum OffenseClaim {
+    /// Reserved in RAM and absent on disk — the caller executes the slash and
+    /// must `release_offense` on any failure / `count_executed` on success.
+    Claimed,
+    /// Another in-flight or already-executed claim in this process.
+    AlreadyReserved,
+    /// The durable marker exists (slashed before a restart, or by the rebuild
+    /// path). The RAM reservation is KEPT so later detections short-circuit
+    /// without touching disk. Carries the stored slash record's id.
+    DurablySlashed(String),
+}
+
+/// Reserve an offense for slashing: single-lock RAM check-and-mark first (the
+/// in-flight guard across state-core workers), then the durable
+/// `slash_offense:` probe off the executor thread.
+///
+/// Order matters (F2 blocker B4): a RAM check → lock release → durable read →
+/// re-lock → mark sequence lets two workers both pass both checks and both
+/// insert. Reserving BEFORE the durable read closes that window; the durable
+/// layer only has to catch cross-restart repeats.
+pub async fn claim_offense(state: &Arc<NodeState>, offense: &str) -> OffenseClaim {
+    if !state.slashing.lock_recover().reserve_offense(offense) {
+        return OffenseClaim::AlreadyReserved;
+    }
+    let state2 = state.clone();
+    let digest = offense.to_string();
+    let hit = match tokio::task::spawn_blocking(move || state2.rocks.slash_offense_record(&digest))
+        .await
+    {
+        Ok(hit) => hit,
+        Err(e) => {
+            warn!("slash-offense durable probe join failed ({e}); proceeding on the RAM reservation alone");
+            None
+        }
+    };
+    match hit {
+        Some(record_id) => {
+            state.slashing_durable_dedup_hits_total.fetch_add(1, Relaxed);
+            OffenseClaim::DurablySlashed(record_id)
+        }
+        None => OffenseClaim::Claimed,
     }
 }
 
-/// Deterministic dedup key: sorted record IDs to handle (a,b) == (b,a).
-fn slash_dedup_key(creator: &str, seal_a: &str, seal_b: &str) -> String {
-    let (first, second) = if seal_a < seal_b {
-        (seal_a, seal_b)
-    } else {
-        (seal_b, seal_a)
-    };
-    format!("{creator}:{first}:{second}")
-}
-
-/// Check an incoming epoch seal for equivocation and auto-slash if detected.
+/// Execute the auto-slash for a seal equivocation detected by the Phase-2
+/// witness scan (`StorageEngine::find_equivocation_witness`, consumed in
+/// ingest Phase 5 and dispatched after all sync locks are released).
 ///
-/// Called from the ingest pipeline when an epoch seal record is processed.
+/// `conflicting_seal_id` is the stored seal by the same creator at the same
+/// (zone, epoch) whose content differs from `seal_record_id`. Detection is
+/// NOT repeated here — the witness index is the single source of truth.
 /// Only the genesis authority creates slash records.
 pub async fn check_seal_equivocation(
     state: &Arc<NodeState>,
@@ -149,28 +223,28 @@ pub async fn check_seal_equivocation(
     zone: &ZoneId,
     epoch_number: u64,
     seal_record_id: &str,
-    content_hash: [u8; 32],
+    conflicting_seal_id: &str,
 ) {
     // Only genesis authority can auto-slash
     if state.identity.identity_hash != state.config.genesis_authority {
         return;
     }
 
-    // Check for equivocation
-    let conflict = {
-        let mut monitor = state.slashing.lock_recover();
-        let conflict = monitor.record_seal(creator_hash, zone, epoch_number, seal_record_id, content_hash);
-        if let Some((ref conflicting_id, _)) = conflict {
-            if monitor.already_slashed(creator_hash, seal_record_id, conflicting_id) {
-                return; // Already slashed this pair
-            }
+    let offense = seal_equivocation_offense(creator_hash, zone.path(), epoch_number);
+    match claim_offense(state, &offense).await {
+        OffenseClaim::Claimed => {}
+        OffenseClaim::AlreadyReserved => return,
+        OffenseClaim::DurablySlashed(prior) => {
+            warn!(
+                "seal equivocation by {} (zone {} epoch {}) already slashed durably by record {} — skipping (restart-safe dedup)",
+                &creator_hash[..creator_hash.len().min(16)],
+                zone,
+                epoch_number,
+                &prior[..prior.len().min(16)],
+            );
+            return;
         }
-        conflict
-    };
-
-    let Some((conflicting_seal_id, _conflicting_hash)) = conflict else {
-        return;
-    };
+    }
 
     warn!(
         "EPOCH SEAL EQUIVOCATION: anchor {} produced conflicting seals {} and {} for zone {} epoch {}",
@@ -193,6 +267,7 @@ pub async fn check_seal_equivocation(
             None => {
                 warn!("seal equivocation by {} but no active stake — cannot slash",
                     &creator_hash[..creator_hash.len().min(16)]);
+                state.slashing.lock_recover().release_offense(&offense);
                 return;
             }
         }
@@ -217,6 +292,7 @@ pub async fn check_seal_equivocation(
         reason: &reason,
         light_mode: state.config.light_mode,
         slot_nonce: state.next_slot_nonce(),
+        offense_key: Some(&offense),
     }) {
         Ok(slash_record) => {
             // IMPORTANT: Use insert_record_inner_direct instead of gossip::insert_record
@@ -226,9 +302,7 @@ pub async fn check_seal_equivocation(
             // the current one.
             match super::ingest::insert_record_inner_direct(state, slash_record.clone(), None, false).await {
                 Ok(_) => {
-                    state.slashing.lock_recover().mark_slashed(
-                        creator_hash, seal_record_id, &conflicting_seal_id,
-                    );
+                    state.slashing.lock_recover().count_executed();
                     state.auto_slashes_total.fetch_add(1, Relaxed);
 
                     info!(
@@ -241,10 +315,16 @@ pub async fn check_seal_equivocation(
 
                     super::state::NodeState::publish_record_with_fallback(state, &slash_record, None).await;
                 }
-                Err(e) => warn!("auto-slash insert failed: {e}"),
+                Err(e) => {
+                    state.slashing.lock_recover().release_offense(&offense);
+                    warn!("auto-slash insert failed: {e}");
+                }
             }
         }
-        Err(e) => warn!("auto-slash record creation failed: {e}"),
+        Err(e) => {
+            state.slashing.lock_recover().release_offense(&offense);
+            warn!("auto-slash record creation failed: {e}");
+        }
     }
 }
 
@@ -252,8 +332,9 @@ pub async fn check_seal_equivocation(
 /// active stake, build a 1% slash record, and insert it.
 ///
 /// Caller must have already run [`LivenessFailureProof::verify_with_stakers`]
-/// — this function trusts the proof and will NOT re-verify. Dedup key is
-/// `(offender, zone, epoch)` so one missed deadline can only slash once.
+/// — this function trusts the proof and will NOT re-verify. Offense key is
+/// `liveness:{offender}:{zone}:{epoch}` (digested) so one missed deadline can
+/// only slash once — in this process AND across restarts (F2 durable marker).
 ///
 /// Only the genesis authority creates slash records (matches the
 /// equivocation path in [`check_seal_equivocation`]).
@@ -262,16 +343,12 @@ pub async fn apply_liveness_slash(state: &Arc<NodeState>, proof: &LivenessFailur
         return;
     }
 
-    // Dedup: one liveness slash per (offender, zone, epoch). We reuse the
-    // `slashed` set on SlashingMonitor by encoding the dedup key as a
-    // synthetic "seal" pair, so this composes with the existing bookkeeping
-    // without adding a second table.
-    let dedup = proof.dedup_key();
-    {
-        let monitor = state.slashing.lock_recover();
-        if monitor.already_slashed(&proof.offender_identity_hash, "liveness", &dedup) {
-            return;
-        }
+    // Dedup: one liveness slash per (offender, zone, epoch) — same offense
+    // set + durable marker as the equivocation path (F2).
+    let offense = offense_digest("liveness", &proof.offender_identity_hash, &proof.dedup_key());
+    match claim_offense(state, &offense).await {
+        OffenseClaim::Claimed => {}
+        OffenseClaim::AlreadyReserved | OffenseClaim::DurablySlashed(_) => return,
     }
 
     let offender = &proof.offender_identity_hash;
@@ -290,6 +367,7 @@ pub async fn apply_liveness_slash(state: &Arc<NodeState>, proof: &LivenessFailur
                     "liveness failure by {} but no active stake — cannot slash",
                     &offender[..offender.len().min(16)]
                 );
+                state.slashing.lock_recover().release_offense(&offense);
                 return;
             }
         }
@@ -311,6 +389,7 @@ pub async fn apply_liveness_slash(state: &Arc<NodeState>, proof: &LivenessFailur
         reason: &reason,
         light_mode: state.config.light_mode,
         slot_nonce: state.next_slot_nonce(),
+        offense_key: Some(&offense),
     }) {
         Ok(slash_record) => {
             match super::ingest::insert_record_inner_direct(
@@ -322,11 +401,7 @@ pub async fn apply_liveness_slash(state: &Arc<NodeState>, proof: &LivenessFailur
             .await
             {
                 Ok(_) => {
-                    state.slashing.lock_recover().mark_slashed(
-                        offender,
-                        "liveness",
-                        &dedup,
-                    );
+                    state.slashing.lock_recover().count_executed();
                     state.auto_slashes_total.fetch_add(1, Relaxed);
 
                     info!(
@@ -344,10 +419,16 @@ pub async fn apply_liveness_slash(state: &Arc<NodeState>, proof: &LivenessFailur
                     )
                     .await;
                 }
-                Err(e) => warn!("liveness-slash insert failed: {e}"),
+                Err(e) => {
+                    state.slashing.lock_recover().release_offense(&offense);
+                    warn!("liveness-slash insert failed: {e}");
+                }
             }
         }
-        Err(e) => warn!("liveness-slash record creation failed: {e}"),
+        Err(e) => {
+            state.slashing.lock_recover().release_offense(&offense);
+            warn!("liveness-slash record creation failed: {e}");
+        }
     }
 }
 
@@ -378,6 +459,11 @@ pub struct SlashRecordParams<'a> {
     /// record — reusing nonce=0 here caused the same SLOT EQUIVOCATION
     /// that was firing on Helsinki.
     pub slot_nonce: u64,
+    /// F2: offense digest ([`offense_digest`]) for auto-slash records — lands
+    /// in metadata as [`BEAT_OFFENSE_KEY`] and drives the durable
+    /// `slash_offense:` marker. `None` for fisherman (jury-verdict) slashes,
+    /// which are deduped by their challenge record.
+    pub offense_key: Option<&'a str>,
 }
 
 /// Create a slash `ValidationRecord`.
@@ -394,9 +480,13 @@ pub fn create_slash_record(
         reason,
         light_mode,
         slot_nonce,
+        offense_key,
     } = params;
 
-    let metadata = slash_metadata(amount, offender, challenger, jury, stake_record_id, reason);
+    let mut metadata = slash_metadata(amount, offender, challenger, jury, stake_record_id, reason);
+    if let Some(digest) = offense_key {
+        metadata.insert(BEAT_OFFENSE_KEY.into(), serde_json::json!(digest));
+    }
     // Canonical v2 ledger preimage (audit 2026-07-06): the old bespoke
     // "auto_slash:{offender}:{stake_record_id}" form was amount- and
     // nonce-blind and would fail the ingest enforcement gate.
@@ -445,9 +535,10 @@ pub fn geo_fraud_slash_amount(largest_stake: u64) -> u64 {
 /// Apply a proven geographic-fraud verdict: find the offender's largest
 /// active stake, build a slash record, and insert it.
 ///
-/// Dedup key: `(peer_id, epoch, claimed_zone, reason_tag)` — one slash per
-/// (offender, epoch, zone, category) so a single scan cannot double-slash
-/// and re-scanning the same epoch is idempotent.
+/// Offense key: `geo_fraud:{peer_id}:{epoch}:{claimed_zone}:{reason_tag}`
+/// (digested) — one slash per (offender, epoch, zone, category) so a single
+/// scan cannot double-slash and re-scanning the same epoch is idempotent, in
+/// this process and across restarts (F2 durable marker).
 ///
 /// Caller must have already run [`scan_witness_set`] on verified RTT and witness
 /// data — this function trusts the verdict and will NOT re-verify.
@@ -462,12 +553,10 @@ pub async fn apply_geo_fraud_slash(
         return;
     }
 
-    let dedup = verdict.dedup_key(epoch_number);
-    {
-        let monitor = state.slashing.lock_recover();
-        if monitor.already_slashed(&verdict.peer_id, "geo_fraud", &dedup) {
-            return;
-        }
+    let offense = offense_digest("geo_fraud", &verdict.peer_id, &verdict.dedup_key(epoch_number));
+    match claim_offense(state, &offense).await {
+        OffenseClaim::Claimed => {}
+        OffenseClaim::AlreadyReserved | OffenseClaim::DurablySlashed(_) => return,
     }
 
     let offender = &verdict.peer_id;
@@ -485,6 +574,7 @@ pub async fn apply_geo_fraud_slash(
                     "geo fraud by {} but no active stake — cannot slash",
                     &offender[..offender.len().min(16)]
                 );
+                state.slashing.lock_recover().release_offense(&offense);
                 return;
             }
         }
@@ -509,6 +599,7 @@ pub async fn apply_geo_fraud_slash(
         reason: &reason,
         light_mode: state.config.light_mode,
         slot_nonce: state.next_slot_nonce(),
+        offense_key: Some(&offense),
     }) {
         Ok(slash_record) => {
             match super::ingest::insert_record_inner_direct(
@@ -520,11 +611,7 @@ pub async fn apply_geo_fraud_slash(
             .await
             {
                 Ok(_) => {
-                    state.slashing.lock_recover().mark_slashed(
-                        offender,
-                        "geo_fraud",
-                        &dedup,
-                    );
+                    state.slashing.lock_recover().count_executed();
                     state.auto_slashes_total.fetch_add(1, Relaxed);
 
                     info!(
@@ -543,10 +630,16 @@ pub async fn apply_geo_fraud_slash(
                     )
                     .await;
                 }
-                Err(e) => warn!("geo-fraud insert failed: {e}"),
+                Err(e) => {
+                    state.slashing.lock_recover().release_offense(&offense);
+                    warn!("geo-fraud insert failed: {e}");
+                }
             }
         }
-        Err(e) => warn!("geo-fraud record creation failed: {e}"),
+        Err(e) => {
+            state.slashing.lock_recover().release_offense(&offense);
+            warn!("geo-fraud record creation failed: {e}");
+        }
     }
 }
 
@@ -580,215 +673,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_monitor_no_equivocation_same_seal() {
-        let mut monitor = SlashingMonitor::new();
-        let zone = ZoneId::from_legacy(0);
-        let hash = [0xAA; 32];
-        // Same seal re-gossiped — not equivocation
-        assert!(monitor.record_seal("anchor1", &zone, 1, "seal_a", hash).is_none());
-        assert!(monitor.record_seal("anchor1", &zone, 1, "seal_a", hash).is_none());
-    }
-
-    #[test]
-    fn test_monitor_no_equivocation_different_anchors() {
-        let mut monitor = SlashingMonitor::new();
-        let zone = ZoneId::from_legacy(0);
-        // Different anchors sealing same zone+epoch — that's multi-anchor, not equivocation
-        assert!(monitor.record_seal("anchor1", &zone, 1, "seal_a", [0xAA; 32]).is_none());
-        assert!(monitor.record_seal("anchor2", &zone, 1, "seal_b", [0xBB; 32]).is_none());
-    }
-
-    #[test]
-    fn test_monitor_no_equivocation_different_epochs() {
-        let mut monitor = SlashingMonitor::new();
-        let zone = ZoneId::from_legacy(0);
-        // Same anchor, different epochs — normal progression
-        assert!(monitor.record_seal("anchor1", &zone, 1, "seal_a", [0xAA; 32]).is_none());
-        assert!(monitor.record_seal("anchor1", &zone, 2, "seal_b", [0xBB; 32]).is_none());
-    }
-
-    #[test]
-    fn test_monitor_detects_seal_equivocation() {
-        let mut monitor = SlashingMonitor::new();
-        let zone = ZoneId::from_legacy(0);
-        // Same anchor, same zone, same epoch, DIFFERENT content — equivocation!
-        assert!(monitor.record_seal("anchor1", &zone, 5, "seal_a", [0xAA; 32]).is_none());
-        let conflict = monitor.record_seal("anchor1", &zone, 5, "seal_b", [0xBB; 32]);
-        assert!(conflict.is_some());
-        let (conflicting_id, conflicting_hash) = conflict.unwrap();
-        assert_eq!(conflicting_id, "seal_a");
-        assert_eq!(conflicting_hash, [0xAA; 32]);
-    }
-
-    #[test]
-    fn test_monitor_no_equivocation_different_zones() {
-        let mut monitor = SlashingMonitor::new();
-        let zone0 = ZoneId::from_legacy(0);
-        let zone1 = ZoneId::from_legacy(1);
-        // Same anchor, same epoch, different zones — each zone gets its own seal
-        assert!(monitor.record_seal("anchor1", &zone0, 1, "seal_a", [0xAA; 32]).is_none());
-        assert!(monitor.record_seal("anchor1", &zone1, 1, "seal_b", [0xBB; 32]).is_none());
-    }
-
-    #[test]
-    fn test_dedup_key_symmetric() {
-        let k1 = slash_dedup_key("a1", "seal_a", "seal_b");
-        let k2 = slash_dedup_key("a1", "seal_b", "seal_a");
-        assert_eq!(k1, k2);
-    }
-
-    #[test]
-    fn test_already_slashed() {
-        let mut monitor = SlashingMonitor::new();
-        assert!(!monitor.already_slashed("a1", "s1", "s2"));
-        monitor.mark_slashed("a1", "s1", "s2");
-        assert!(monitor.already_slashed("a1", "s1", "s2"));
-        assert!(monitor.already_slashed("a1", "s2", "s1")); // symmetric
-        assert!(!monitor.already_slashed("a2", "s1", "s2")); // different anchor
-    }
-
-    #[test]
-    fn test_prune_old_epochs() {
-        let mut monitor = SlashingMonitor::new();
-        let zone = ZoneId::from_legacy(0);
-        monitor.record_seal("a1", &zone, 1, "s1", [0x01; 32]);
-        monitor.record_seal("a1", &zone, 5, "s5", [0x05; 32]);
-        monitor.record_seal("a1", &zone, 10, "s10", [0x0A; 32]);
-        assert_eq!(monitor.tracked_seals(), 3);
-
-        monitor.prune_before_epoch(&zone, 5);
-        assert_eq!(monitor.tracked_seals(), 2); // epochs 5 and 10 remain
-    }
-
-    /// Pin the three metric helpers' semantics across the full
-    /// slash lifecycle. The /metrics emission relies on:
-    ///   I1: empty monitor reports (slash_count=0, tracked_seals=0,
-    ///       slashed_pair_count=0).
-    ///   I2: `record_seal` (no conflict path) advances `tracked_seals`
-    ///       but NOT `slash_count` or `slashed_pair_count` (the slash
-    ///       only happens after `mark_slashed`).
-    ///   I3: a conflict detected via `record_seal` returning
-    ///       `Some(...)` does NOT itself increment `slash_count` —
-    ///       slashing is two-phase (detect, then mark). This test
-    ///       guards against future-me wiring `slash_count++` into
-    ///       `record_seal` and silently double-counting.
-    ///   I4: `mark_slashed` advances BOTH `slash_count` and
-    ///       `slashed_pair_count` by exactly 1 each call. The two
-    ///       gauges must agree in every state — divergence is a bug
-    ///       in slash bookkeeping.
-    ///   I5: `mark_slashed` is idempotent on the dedup set (same
-    ///       (creator, seal_a, seal_b) tuple inserted twice = one
-    ///       entry) but the `slash_count` field DOES still increment
-    ///       on each call — this is the documented behavior of
-    ///       `mark_slashed` (the caller is expected to gate on
-    ///       `already_slashed` first). The test pins this so future
-    ///       refactors of `mark_slashed` don't silently change
-    ///       semantics.
-    ///   I6: `prune_before_epoch` reaps `tracked_seals` entries but
-    ///       does NOT touch `slash_count` or `slashed_pair_count` —
-    ///       the operator must treat the lifetime counter and the
-    ///       dedup set as monotonic across prune cycles, the
-    ///       resident-set gauge as instantaneous.
-    #[test]
-    fn ops_49_metric_invariants_pin_slash_lifecycle() {
-        let mut monitor = SlashingMonitor::new();
-        let zone = ZoneId::from_legacy(0);
-
-        // I1: fresh monitor → all three metrics 0.
-        assert_eq!(monitor.slash_count, 0);
-        assert_eq!(monitor.tracked_seals(), 0);
-        assert_eq!(monitor.slashed_pair_count(), 0);
-
-        // I2: `record_seal` (no conflict) advances tracked_seals only.
-        let conflict = monitor.record_seal("a1", &zone, 1, "s1", [0x01; 32]);
-        assert!(conflict.is_none(), "first seal cannot conflict");
-        assert_eq!(monitor.tracked_seals(), 1);
-        assert_eq!(monitor.slash_count, 0, "I2: no slash yet");
-        assert_eq!(monitor.slashed_pair_count(), 0, "I2: no dedup yet");
-
-        // I3: a SECOND seal with different content for same (anchor, zone,
-        // epoch) returns Some — but slash_count and dedup are unchanged
-        // until mark_slashed is called. Slashing is intentionally two-phase.
-        let conflict = monitor.record_seal("a1", &zone, 1, "s2", [0x02; 32]);
-        assert!(conflict.is_some(), "I3: equivocation detected");
-        assert_eq!(
-            monitor.slash_count, 0,
-            "I3: detection must NOT auto-increment slash_count"
-        );
-        assert_eq!(
-            monitor.slashed_pair_count(),
-            0,
-            "I3: detection must NOT auto-add dedup entry"
-        );
-        assert_eq!(
-            monitor.tracked_seals(),
-            1,
-            "I3: conflicting seal does not insert (the original survives)"
-        );
-
-        // I4: mark_slashed advances BOTH slash_count and dedup by exactly 1.
-        monitor.mark_slashed("a1", "s1", "s2");
-        assert_eq!(monitor.slash_count, 1);
-        assert_eq!(monitor.slashed_pair_count(), 1);
-        assert!(monitor.already_slashed("a1", "s1", "s2"));
-
-        // I5: re-marking the same dedup key DOES increment slash_count
-        // (per the documented `mark_slashed` semantics — the caller is
-        // expected to gate on `already_slashed`) but the dedup set
-        // remains size 1 (HashSet idempotency). This is intentional —
-        // the gauge invariant in /metrics is `dedup_pairs ≤ slash_count`,
-        // NOT equality. Pin this so the dashboard alarm
-        // `executed_total ≠ dedup_pairs` survives a re-mark.
-        monitor.mark_slashed("a1", "s1", "s2");
-        assert_eq!(
-            monitor.slash_count, 2,
-            "I5: re-mark increments slash_count (caller gates dedup)"
-        );
-        assert_eq!(
-            monitor.slashed_pair_count(),
-            1,
-            "I5: HashSet idempotent, dedup unchanged"
-        );
-
-        // Also verify symmetric dedup: (a, s2, s1) maps to same key as
-        // (a, s1, s2) so a re-mark in flipped order is also idempotent.
-        monitor.mark_slashed("a1", "s2", "s1");
-        assert_eq!(monitor.slash_count, 3);
-        assert_eq!(
-            monitor.slashed_pair_count(),
-            1,
-            "I5: symmetric dedup key (a,s2,s1)==(a,s1,s2)"
-        );
-
-        // Add a second distinct equivocation pair to verify the dedup
-        // is keyed on the full tuple.
-        monitor.mark_slashed("a2", "x", "y");
-        assert_eq!(monitor.slash_count, 4);
-        assert_eq!(monitor.slashed_pair_count(), 2);
-
-        // I6: prune touches tracked_seals only.
-        let prev_count = monitor.slash_count;
-        let prev_dedup = monitor.slashed_pair_count();
-        monitor.record_seal("a1", &zone, 5, "s5", [0x05; 32]);
-        assert_eq!(monitor.tracked_seals(), 2);
-        monitor.prune_before_epoch(&zone, 5);
-        assert_eq!(
-            monitor.tracked_seals(),
-            1,
-            "epoch 1 reaped, epoch 5 survives"
-        );
-        assert_eq!(
-            monitor.slash_count, prev_count,
-            "I6: prune does NOT roll back slash_count"
-        );
-        assert_eq!(
-            monitor.slashed_pair_count(),
-            prev_dedup,
-            "I6: prune does NOT roll back dedup"
-        );
-    }
-
-    #[test]
     fn test_liveness_slash_amount_is_one_percent() {
         // 1M base units stake → 10K base units slash (1%).
         assert_eq!(liveness_slash_amount(1_000_000), 10_000);
@@ -818,10 +702,19 @@ mod tests {
             reason,
             light_mode: false,
             slot_nonce: 1,
+            offense_key: None,
         })
         .unwrap();
 
         assert!(record.signature.is_some());
+        assert!(
+            !record.metadata.contains_key(BEAT_OFFENSE_KEY),
+            "offense_key: None must not emit beat_offense"
+        );
+        assert!(
+            slash_offense_side_key(&record).is_none(),
+            "no beat_offense → no durable marker side-write"
+        );
         assert_eq!(
             record.metadata.get("beat_op").and_then(|v| v.as_str()),
             Some("slash"),
@@ -846,6 +739,7 @@ mod tests {
             crate::identity::CryptoProfile::ProfileB,
         ).unwrap();
 
+        let digest = seal_equivocation_offense("offender_hash", "0", 7);
         let record = create_slash_record(SlashRecordParams {
             identity: &identity,
             amount: 1_000_000,
@@ -856,9 +750,38 @@ mod tests {
             reason: "auto:seal_equivocation",
             light_mode: false,
             slot_nonce: 2,
+            offense_key: Some(&digest),
         }).unwrap();
 
         assert!(record.signature.is_some());
+        // F2: the offense digest rides in metadata, is allowlisted, and yields
+        // exactly the durable marker key ingest Phase 2 threads into the batch.
+        assert_eq!(
+            record.metadata.get(BEAT_OFFENSE_KEY).and_then(|v| v.as_str()),
+            Some(digest.as_str()),
+        );
+        assert!(crate::content_safety::is_known_key(BEAT_OFFENSE_KEY));
+        assert_eq!(
+            slash_offense_side_key(&record),
+            Some(StorageEngine::slash_offense_key(&digest)),
+        );
+        // The digest is covered by the signed preimage: mutating it must
+        // invalidate the signature (no unsigned dedup channel).
+        let mut tampered = record.clone();
+        tampered.metadata.insert(
+            BEAT_OFFENSE_KEY.into(),
+            serde_json::json!(offense_digest("seal_equivocation", "other", "z:1")),
+        );
+        let sig = tampered.signature.clone().expect("signed");
+        assert!(
+            !crate::crypto::pqc::dilithium3_verify(
+                &tampered.signable_bytes(),
+                &sig,
+                &tampered.creator_public_key
+            )
+            .unwrap(),
+            "beat_offense must be signature-covered"
+        );
         assert_eq!(
             record.metadata.get("beat_op").and_then(|v| v.as_str()),
             Some("slash"),
@@ -989,76 +912,6 @@ mod tests {
         );
     }
 
-    /// **Axis 2**: pin `slash_dedup_key`'s exact wire format and
-    /// lex-ordering semantics.
-    ///
-    /// `test_dedup_key_symmetric` proves (a,b) == (b,a). This axis pins:
-    /// (i) the literal format `"{creator}:{first}:{second}"` so a
-    /// future-me refactor can't change the delimiter without breaking
-    /// every historical dedup entry; (ii) no-swap when seal_a < seal_b;
-    /// (iii) swap when seal_a > seal_b; (iv) the creator field is NEVER
-    /// folded into the lex-sort even when it'd lex above the seals;
-    /// (v) degenerate (seal, seal) doesn't panic.
-    #[test]
-    fn batch_b_slash_dedup_key_format_and_lex_ordering() {
-        assert_eq!(
-            slash_dedup_key("anchor1", "seal_a", "seal_b"),
-            "anchor1:seal_a:seal_b",
-            "format must be {{creator}}:{{first}}:{{second}} with ':' delim"
-        );
-        assert_eq!(
-            slash_dedup_key("anchor1", "seal_z", "seal_a"),
-            "anchor1:seal_a:seal_z",
-            "(z, a) must swap to (a, z) — lex-sorted second pair"
-        );
-        // Creator stays in slot 1 even when it'd lex above the seals.
-        assert_eq!(
-            slash_dedup_key("z_creator", "a_seal", "b_seal"),
-            "z_creator:a_seal:b_seal",
-        );
-        // Different creator → different key (creator partitions the
-        // dedup namespace; it is NOT folded into the lex-sort).
-        assert_ne!(
-            slash_dedup_key("creator_A", "s1", "s2"),
-            slash_dedup_key("creator_B", "s1", "s2"),
-        );
-        // Degenerate input (seal_a == seal_b): function must not panic
-        // and the key is deterministic — caller's responsibility to
-        // avoid this shape, but the helper survives.
-        assert_eq!(
-            slash_dedup_key("anchor1", "same", "same"),
-            "anchor1:same:same",
-        );
-    }
-
-    /// **Axis 3**: `SlashingMonitor::default()` must yield the same
-    /// observable state as `::new()` — fresh empty state with all three
-    /// metric helpers at 0.
-    ///
-    /// The Default impl is hand-written (forwards to `new()`). A future
-    /// derive(Default) refactor could silently switch to a different
-    /// init path; this test pins the equivalence so the /metrics
-    /// dashboard's "fresh monitor reports 0/0/0" assumption holds
-    /// across both construction paths.
-    #[test]
-    fn batch_b_slashing_monitor_default_matches_new_state() {
-        let from_new = SlashingMonitor::new();
-        let from_default = SlashingMonitor::default();
-
-        assert_eq!(from_new.slash_count, from_default.slash_count);
-        assert_eq!(from_new.tracked_seals(), from_default.tracked_seals());
-        assert_eq!(
-            from_new.slashed_pair_count(),
-            from_default.slashed_pair_count()
-        );
-        // Pin absolute values, not just equality.
-        assert_eq!(from_default.slash_count, 0);
-        assert_eq!(from_default.tracked_seals(), 0);
-        assert_eq!(from_default.slashed_pair_count(), 0);
-        // No-history monitor: `already_slashed` is false for every probe.
-        assert!(!from_default.already_slashed("any", "x", "y"));
-    }
-
     /// **Axis 4**: pin the coupling between `liveness_slash_amount`,
     /// `geo_fraud_slash_amount`, and the slash-percent constants —
     /// floor activation AND the above-floor 25:1 ratio.
@@ -1099,59 +952,202 @@ mod tests {
         assert!(liveness_slash_amount(u64::MAX) >= 1);
     }
 
-    /// **Axis 5**: `prune_before_epoch` must isolate its reap to the
-    /// target zone — entries in OTHER zones at the same `min_epoch`
-    /// survive.
-    ///
-    /// `test_prune_old_epochs` covers single-zone retention. This axis
-    /// pins cross-zone isolation: in a 1M-zone mainnet a per-zone prune
-    /// must never nuke the cross-shard equivocation detector for sibling
-    /// zones — that'd be a P0 safety bug. Also pins the `>= min_epoch`
-    /// boundary predicate (NOT `> min_epoch`).
+    // ── F2 (2026-09-02): offense-keyed dedup + durable marker ────────────
+
+    /// Two workers racing on the same offense: exactly one `reserve_offense`
+    /// wins, the set is idempotent, and `count_executed` is the only thing
+    /// that moves `slash_count` (blocker B6 split) — so
+    /// `slash_count ≤ slashed_offense_count()` holds through the lifecycle,
+    /// including release-after-failure.
     #[test]
-    fn batch_b_prune_before_epoch_isolates_to_target_zone() {
+    fn f2_reserve_offense_is_single_lock_check_and_mark() {
         let mut monitor = SlashingMonitor::new();
-        let zone_a = ZoneId::from_legacy(0);
-        let zone_b = ZoneId::from_legacy(1);
-        let zone_c = ZoneId::from_legacy(2);
+        let offense = seal_equivocation_offense("anchor1", "0", 5);
 
-        // Three zones × three epochs each = 9 seal entries.
-        for epoch in [1u64, 5, 10] {
-            monitor.record_seal("anchor1", &zone_a, epoch, &format!("a_s{epoch}"), [0x0A; 32]);
-            monitor.record_seal("anchor2", &zone_b, epoch, &format!("b_s{epoch}"), [0x0B; 32]);
-            monitor.record_seal("anchor3", &zone_c, epoch, &format!("c_s{epoch}"), [0x0C; 32]);
+        // I1: fresh monitor.
+        assert_eq!(monitor.slash_count, 0);
+        assert_eq!(monitor.slashed_offense_count(), 0);
+        assert!(!monitor.already_slashed(&offense));
+
+        // I2: first reservation wins; second (same offense) loses.
+        assert!(monitor.reserve_offense(&offense), "first claim wins");
+        assert!(!monitor.reserve_offense(&offense), "second claim loses");
+        assert!(monitor.already_slashed(&offense));
+        assert_eq!(monitor.slashed_offense_count(), 1);
+        assert_eq!(monitor.slash_count, 0, "reservation is not execution");
+
+        // I3: a different seal pair for the SAME (creator, zone, epoch) is the
+        // same offense — pre-F2 pair keys would have slashed twice here.
+        let same_offense = seal_equivocation_offense("anchor1", "0", 5);
+        assert_eq!(same_offense, offense);
+        assert!(!monitor.reserve_offense(&same_offense));
+
+        // I4: release re-opens the offense (stake missing / insert failed).
+        monitor.release_offense(&offense);
+        assert!(!monitor.already_slashed(&offense));
+        assert_eq!(monitor.slashed_offense_count(), 0);
+        monitor.release_offense(&offense); // no-op on absent
+        assert_eq!(monitor.slashed_offense_count(), 0);
+
+        // I5: reserve → execute → counted once; invariant executed ≤ offenses.
+        assert!(monitor.reserve_offense(&offense));
+        monitor.count_executed();
+        assert_eq!(monitor.slash_count, 1);
+        assert!(monitor.slash_count as usize <= monitor.slashed_offense_count());
+
+        // I6: a distinct offense (other epoch) is independent.
+        let other = seal_equivocation_offense("anchor1", "0", 6);
+        assert_ne!(other, offense);
+        assert!(monitor.reserve_offense(&other));
+        assert_eq!(monitor.slashed_offense_count(), 2);
+        assert_eq!(monitor.slash_count, 1);
+    }
+
+    /// Digest shape (blocker B3): 64 lowercase hex regardless of input length
+    /// (a deep zone path must not blow the 256-B metadata value cap), and the
+    /// `kind` prefix partitions the space so a liveness key can never collide
+    /// with an equivocation key for the same creator/detail.
+    #[test]
+    fn f2_offense_digest_is_fixed_width_and_kind_partitioned() {
+        let deep_zone = (0..40).map(|i| format!("z{i}")).collect::<Vec<_>>().join("/");
+        assert!(deep_zone.len() > 100);
+        let d = seal_equivocation_offense("creator", &deep_zone, 999_999);
+        assert_eq!(d.len(), 64);
+        assert!(d.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')));
+        assert!(d.len() <= 256, "under the default 256-B metadata value cap");
+
+        let a = offense_digest("liveness", "c", "0:5");
+        let b = offense_digest("geo_fraud", "c", "0:5");
+        let c = offense_digest("seal_equivocation", "c", "0:5");
+        assert_ne!(a, b);
+        assert_ne!(b, c);
+        assert_ne!(a, c);
+        // Deterministic across calls (restart-stable durable marker).
+        assert_eq!(a, offense_digest("liveness", "c", "0:5"));
+        // Creator and detail both participate.
+        assert_ne!(a, offense_digest("liveness", "d", "0:5"));
+        assert_ne!(a, offense_digest("liveness", "c", "0:6"));
+    }
+
+    /// Offense key is a function of (creator, zone, epoch) only — the seal
+    /// ids do not enter it, so A/B and A/C (and B/C, and C/A) collapse.
+    #[test]
+    fn f2_seal_equivocation_offense_is_pair_independent() {
+        let zone = ZoneId::from_legacy(3);
+        let k = seal_equivocation_offense("anchor", zone.path(), 42);
+        assert_eq!(k, seal_equivocation_offense("anchor", zone.path(), 42));
+        assert_ne!(k, seal_equivocation_offense("anchor", zone.path(), 43));
+        assert_ne!(k, seal_equivocation_offense("anchor2", zone.path(), 42));
+        assert_ne!(
+            k,
+            seal_equivocation_offense("anchor", ZoneId::from_legacy(4).path(), 42)
+        );
+    }
+
+    /// The durable marker side-write is derived only for well-formed slash
+    /// records: `beat_op == "slash"` AND a 64-hex `beat_offense`. Anything
+    /// else (non-slash op, missing key, malformed digest) → `None`, so a
+    /// hostile record cannot plant an arbitrary `slash_offense:` marker.
+    #[test]
+    fn f2_slash_offense_side_key_requires_slash_op_and_well_formed_digest() {
+        use crate::accounting::types::BEAT_OP_KEY;
+        let identity = crate::identity::Identity::generate(
+            crate::identity::EntityType::Device,
+            crate::identity::CryptoProfile::ProfileB,
+        )
+        .unwrap();
+        let digest = offense_digest("liveness", "off", "0:1");
+        let mut record = create_slash_record(SlashRecordParams {
+            identity: &identity,
+            amount: 5,
+            offender: "off",
+            challenger: "ch",
+            jury: &["ch".to_string()],
+            stake_record_id: "stake",
+            reason: "auto:liveness_failure",
+            light_mode: false,
+            slot_nonce: 3,
+            offense_key: Some(&digest),
+        })
+        .unwrap();
+        assert_eq!(
+            slash_offense_side_key(&record),
+            Some(StorageEngine::slash_offense_key(&digest))
+        );
+
+        // Non-slash op → None even with a digest present.
+        record.metadata.insert(BEAT_OP_KEY.into(), serde_json::json!("stake"));
+        assert!(slash_offense_side_key(&record).is_none());
+        record.metadata.insert(BEAT_OP_KEY.into(), serde_json::json!("slash"));
+
+        // Malformed digests → None.
+        for bad in ["", "abc", &"g".repeat(64), &"A".repeat(64), &"0".repeat(63), &"0".repeat(65)] {
+            record.metadata.insert(BEAT_OFFENSE_KEY.into(), serde_json::json!(bad));
+            assert!(slash_offense_side_key(&record).is_none(), "accepted {bad:?}");
         }
-        assert_eq!(monitor.tracked_seals(), 9, "9 entries seeded");
+        // Non-string value → None.
+        record.metadata.insert(BEAT_OFFENSE_KEY.into(), serde_json::json!(12));
+        assert!(slash_offense_side_key(&record).is_none());
+        // Missing key → None.
+        record.metadata.remove(BEAT_OFFENSE_KEY);
+        assert!(slash_offense_side_key(&record).is_none());
+    }
 
-        // Prune zone_A at min_epoch=5: zone_A {5, 10} survives, B+C untouched.
-        monitor.prune_before_epoch(&zone_a, 5);
+    /// `Default` and `new` agree, and a no-history monitor answers `false`
+    /// for every probe (post-F2 shape: offense set only).
+    #[test]
+    fn batch_b_slashing_monitor_default_matches_new_state() {
+        let from_new = SlashingMonitor::new();
+        let from_default = SlashingMonitor::default();
+        assert_eq!(from_new.slash_count, from_default.slash_count);
         assert_eq!(
-            monitor.tracked_seals(),
-            8,
-            "cross-zone isolation: only zone_A loses entries"
+            from_new.slashed_offense_count(),
+            from_default.slashed_offense_count()
         );
+        assert_eq!(from_default.slash_count, 0);
+        assert_eq!(from_default.slashed_offense_count(), 0);
+        assert!(!from_default.already_slashed("any"));
+    }
 
-        // Prune zone_B at min_epoch=10: zone_B drops to {10}; A+C unchanged.
-        monitor.prune_before_epoch(&zone_b, 10);
-        // zone_A {5, 10} + zone_B {10} + zone_C {1, 5, 10} = 2 + 1 + 3 = 6.
-        assert_eq!(monitor.tracked_seals(), 6);
+    /// `claim_offense` end-to-end against a real store: first claim is
+    /// `Claimed`; a pre-existing durable `slash_offense:` marker short-circuits
+    /// to `DurablySlashed(record_id)` while KEEPING the RAM reservation (so the
+    /// next detection never touches disk) and bumps the dedup-hit counter.
+    #[cfg(feature = "node-core")]
+    #[tokio::test]
+    async fn f2_claim_offense_durable_marker_short_circuits() {
+        let state = super::super::state::build_test_node_state();
+        let fresh = seal_equivocation_offense("anchor-fresh", "0", 1);
+        assert!(matches!(claim_offense(&state, &fresh).await, OffenseClaim::Claimed));
+        assert!(matches!(
+            claim_offense(&state, &fresh).await,
+            OffenseClaim::AlreadyReserved
+        ));
+        assert_eq!(state.slashing_durable_dedup_hits_total.load(Relaxed), 0);
 
-        // Prune zone_C with min_epoch above the highest tracked epoch
-        // empties it. Verifies the boundary condition.
-        monitor.prune_before_epoch(&zone_c, 999);
-        assert_eq!(monitor.tracked_seals(), 3, "zone_C fully reaped");
-
-        // Re-pruning zone_A at min_epoch == lowest surviving epoch is a
-        // no-op (predicate is `>= min_epoch`, NOT `> min_epoch`).
-        monitor.prune_before_epoch(&zone_a, 5);
-        assert_eq!(
-            monitor.tracked_seals(),
-            3,
-            "min_epoch==lowest must keep the boundary entry"
-        );
-
-        // Prune empty zone with min_epoch=0 — no-op.
-        monitor.prune_before_epoch(&zone_c, 0);
-        assert_eq!(monitor.tracked_seals(), 3);
+        // Plant the durable marker as a prior (pre-restart) slash would have.
+        let durable = seal_equivocation_offense("anchor-durable", "0", 1);
+        state
+            .rocks
+            .put_cf_raw(
+                crate::storage::rocks::CF_METADATA,
+                &StorageEngine::slash_offense_key(&durable),
+                b"slash-rid-1",
+            )
+            .unwrap();
+        match claim_offense(&state, &durable).await {
+            OffenseClaim::DurablySlashed(rid) => assert_eq!(rid, "slash-rid-1"),
+            _ => panic!("durable marker must short-circuit"),
+        }
+        assert_eq!(state.slashing_durable_dedup_hits_total.load(Relaxed), 1);
+        // Reservation kept: the second probe never reaches the store.
+        assert!(matches!(
+            claim_offense(&state, &durable).await,
+            OffenseClaim::AlreadyReserved
+        ));
+        assert_eq!(state.slashing_durable_dedup_hits_total.load(Relaxed), 1);
+        let m = state.slashing.lock_recover();
+        assert_eq!(m.slashed_offense_count(), 2);
+        assert_eq!(m.slash_count, 0, "no execution happened");
     }
 }

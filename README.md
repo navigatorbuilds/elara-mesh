@@ -421,7 +421,7 @@ pip install -e sdks/python
 See [`sdks/python/README.md`](sdks/python/README.md) for the three-line `Agent`
 quickstart and the endpoints it wraps — and
 [`docs/QUICKSTART-ISSUER.md`](docs/QUICKSTART-ISSUER.md) to give **your own
-agent** a signed, revocable, receipted mandate on your own chain in fifteen
+agent** a signed, revocable, proof-backed mandate on your own chain in fifteen
 minutes (issue → act → authority check → revoke → offline verify).
 
 Deploying agents that will face the EU AI Act's high-risk obligations

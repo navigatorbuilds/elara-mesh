@@ -273,13 +273,20 @@ pub(crate) fn recount_oldest_from_buf(
 /// `ledger.staked(witness_hash)`, drains and replays attestations when the
 /// stake row has caught up, and evicts entries past
 /// `PENDING_HARD_DISCARD_TIMEOUT_SECS` (genuinely-low-stake or sybil entries).
-pub async fn low_stake_replay_loop(state: Arc<NodeState>) {
+pub async fn low_stake_replay_loop(
+    state: Arc<NodeState>,
+    hb: Arc<super::supervision::LoopStatus>,
+) {
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(
         SWEEP_INTERVAL_SECS,
     ));
     interval.tick().await; // immediate first fire after the spawn returns
     loop {
         interval.tick().await;
+        // W-Q: registration-only visibility (hang/death via staleness). The
+        // spawn stays RAW — supervision-restart is verdict-gated on the
+        // drain-reorder (Jul-19 verdict; do not reorder the drain here).
+        hb.heartbeat();
         // Stage 6 cooperative scheduler (Protocol §11.10): extra backoff
         // when host is saturated. The sweep snapshots witness_hashes under
         // a lock and then re-checks ledger.staked() per-witness — a busy

@@ -3712,6 +3712,7 @@ fn public_route_prefixes_is_the_exact_blessed_set() {
         "/version",
         "/proof/account",
         "/headers",
+        "/revocations/since",
         "/mandate",
         "/records/by-hash",
         "/snapshot/state-delta",
@@ -3856,6 +3857,7 @@ fn test_admin_tracker_locks_after_max_failures() {
     for _ in 0..MAX_ADMIN_FAILURES - 1 {
         assert!(!tracker.record_failure(ip));
     }
+
     // The Nth failure should trigger lockout
     assert!(tracker.record_failure(ip));
     assert!(tracker.is_locked_out(ip));
@@ -5640,4 +5642,24 @@ async fn t65_missing_network_header_counted_then_gated_by_knob() {
     let v = json_of(resp).await;
     assert_eq!(v["reason"], "network_mismatch");
     assert_eq!(v["our_network"], "t65-net");
+}
+
+/// W-M: every public-listener prefix must be documented in docs/api.md (the
+/// reference that ships in the public mirror). Substring check, not structural
+/// parse — survives prose rewraps; the observed failure mode (W-L:
+/// /revocations/since live but absent entirely) is exactly what it catches.
+/// Doc-reading pin precedent: the 4e-iv verdict-string <-> README coupling.
+#[test]
+fn public_route_prefixes_all_documented_in_api_md() {
+    let api_md =
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/api.md"))
+            .expect("docs/api.md must exist (ships in the public mirror)");
+    for prefix in PUBLIC_ROUTE_PREFIXES {
+        assert!(
+            api_md.contains(prefix),
+            "public prefix `{prefix}` is served on the public listener but undocumented \
+             in docs/api.md - document it (two-listener inventory line + endpoint \
+             section); the reference ships in the mirror"
+        );
+    }
 }

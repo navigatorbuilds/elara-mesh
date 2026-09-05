@@ -59,6 +59,7 @@ pub mod gc;
 pub mod identity_fetcher;
 pub mod record_hash_fetcher;
 pub mod ingest;
+pub mod side_writes;
 pub mod low_stake_replay;
 pub mod pending_drain;
 pub mod key_rotation;

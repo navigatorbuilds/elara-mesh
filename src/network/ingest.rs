@@ -797,17 +797,11 @@ pub(crate) fn effective_daily_limit(
     staked_micro: u64,
     stake_ratio: u64,
     trust_limit: Option<u32>,
-    reinc_flagged: bool,
 ) -> u32 {
-    let base = if staked_micro > 0 {
+    if staked_micro > 0 {
         ((staked_micro / stake_ratio.max(1)) as u32).max(crate::accounting::trust::TIER_0_DAILY)
     } else {
         trust_limit.unwrap_or(crate::accounting::trust::TIER_0_DAILY)
-    };
-    if reinc_flagged {
-        base.min(crate::accounting::trust::TIER_0_DAILY)
-    } else {
-        base
     }
 }
 
@@ -989,6 +983,12 @@ pub async fn insert_record_synced(state: &Arc<NodeState>, record: ValidationReco
 }
 
 /// Direct insert — bypasses the state core channel. Only called BY the state core itself.
+/// F2: Phase-2 equivocation witness — `(conflicting_seal_id, conflicting_record_hash)`
+/// found in the durable creator-keyed index right after the seal's own write.
+type Phase2Witness = Option<(String, [u8; 32])>;
+/// Deferred seal-equivocation slash: `(creator_hash, zone, epoch, seal_id, conflicting_seal_id)`.
+type SealEquivocation = (String, crate::ZoneId, u64, String, String);
+
 pub async fn insert_record_inner_direct(state: &Arc<NodeState>, record: ValidationRecord, origin_hint: Option<u64>, skip_timestamp_defense: bool) -> crate::errors::Result<String> {
     insert_record_inner(state, record, origin_hint, skip_timestamp_defense).await
 }
@@ -1288,26 +1288,6 @@ async fn apply_ledger_op_phase4(
             if matches!(op_str, "stake" | "unstake" | "slash") {
                 let mut consensus = state.consensus.lock_recover();
                 consensus.register_stakes_from_ledger(&ledger);
-            }
-
-            // Mark slashed identities as abandoned for reincarnation detection (Protocol §6.4).
-            // When an identity is slashed, any future identity with a similar behavioral
-            // fingerprint will be flagged as a suspected reincarnation.
-            if op_str == "slash" {
-                if let Some(offender) = record.metadata.get("beat_offender").and_then(|v| v.as_str()) {
-                    // Poisoned → recover: a panic under this mutex must not turn
-                    // every future slash's mark_abandoned into a silent permanent
-                    // no-op (reviewer find, same class as the 2026-08-29 verdict).
-                    let reinc_guard = match state.reincarnation.try_lock() {
-                        Ok(g) => Some(g),
-                        Err(std::sync::TryLockError::Poisoned(e)) => Some(e.into_inner()),
-                        Err(std::sync::TryLockError::WouldBlock) => None,
-                    };
-                    if let Some(mut reinc) = reinc_guard {
-                        reinc.mark_abandoned(offender);
-                        info!("reincarnation: marked {} as abandoned (slashed)", offender.chars().take(16).collect::<String>());
-                    }
-                }
             }
         }
 
@@ -1648,7 +1628,10 @@ async fn insert_record_inner(state: &Arc<NodeState>, mut record: ValidationRecor
         // post-split leaf just because the naive modulo zone hasn't been
         // their subscription since the parent split.
         let record_zone = state.resolve_record_zone(&record.id);
-        let is_global_op = record.metadata.contains_key(EPOCH_OP_KEY)
+        // R1 (2026-09-02, verdict F3): key on a KNOWN `epoch_op` value — the
+        // bare key used to bypass zone filtering for ANY value, so a junk
+        // `epoch_op` record rode the global lane network-wide.
+        let is_global_op = epoch::is_known_epoch_op_record(&record)
             || record.metadata.contains_key("beat_op")
             // Emergency halt/resume is a network-wide signal — it must reach every
             // node regardless of zone subscription, else a zone-scoped follower
@@ -2169,7 +2152,7 @@ async fn insert_record_inner(state: &Arc<NodeState>, mut record: ValidationRecor
         let stake_ratio = ledger.governance.params.stake_throughput_ratio;
         let gov_prop_rate = ledger.governance.params.propagation_rate_limit_per_hour;
 
-        // Trust-tier HARD daily cap + reincarnation clamp MOVED to the non-skippable
+        // Trust-tier HARD daily cap MOVED to the non-skippable
         // `NodeState::daily_caps` gate below (after the propagation limiter). The old
         // try_read on `state.trust` here dropped BOTH the check and the counter update
         // whenever feed_attestation / trust-prune held the trust lock — exactly the
@@ -2333,17 +2316,11 @@ async fn insert_record_inner(state: &Arc<NodeState>, mut record: ValidationRecor
         // 2026-08-29 contention-polarity verdict (fusion-audited, see
         // internal design notes):
         // every lock fallback in this gate FAILS CLOSED, poisoning is recovered
-        // (a panic under a lock must not disable §11.35 for process lifetime),
-        // and the §6.4 clamp is deterministic via a lock-free suspects snapshot.
+        // (a panic under a lock must not disable §11.35 for process lifetime).
         let mut degraded = false;
-        // Reincarnation penalty flag (Protocol §6.4): deterministic and
-        // lock-free — reads the ArcSwap snapshot the write side publishes, so
-        // the clamp never varies with lock timing and applies to staked
-        // identities too (stake never launders a suspected reset).
-        let reinc_flagged = state.reincarnation_suspects.load().contains(effective_identity);
         let limit = if staked_micro > 0 {
             let er = if stake_ratio > 0 { stake_ratio } else { crate::accounting::trust::BASE_UNITS_PER_DAILY_RECORD };
-            effective_daily_limit(staked_micro, er, None, reinc_flagged)
+            effective_daily_limit(staked_micro, er, None)
         } else {
             // Continuity read lives HERE (unstaked only) — the staked path never
             // consumes it, so it no longer acquires the lock at all.
@@ -2370,7 +2347,7 @@ async fn insert_record_inner(state: &Arc<NodeState>, mut record: ValidationRecor
                     None // contended → strictest, fail closed
                 }
             };
-            effective_daily_limit(0, 0, trust_limit, reinc_flagged)
+            effective_daily_limit(0, 0, trust_limit)
         };
         if degraded {
             state.daily_limit_degraded_total.fetch_add(1, Relaxed);
@@ -2468,6 +2445,10 @@ async fn insert_record_inner(state: &Arc<NodeState>, mut record: ValidationRecor
     let is_global_seal = record.metadata.get(EPOCH_OP_KEY)
         .and_then(|v| v.as_str())
         .is_some_and(|op| op == epoch::EPOCH_OP_GLOBAL_SEAL);
+    // R1-X1 Commit 3: super-seals are admitted (Layer A) before storage.
+    let is_super_seal = record.metadata.get(EPOCH_OP_KEY)
+        .and_then(|v| v.as_str())
+        .is_some_and(|op| op == epoch::EPOCH_OP_SUPER_SEAL);
     // Phase 1: epoch seal validation (merkle pre-fetch may involve network I/O)
     state.insert_phase.store(1, std::sync::atomic::Ordering::Relaxed);
     if is_epoch_seal {
@@ -2494,8 +2475,10 @@ async fn insert_record_inner(state: &Arc<NodeState>, mut record: ValidationRecor
         // accessor the proposer (`epoch::should_propose_seal`) reads, so the
         // rank this verifier derives uses a bit-identical staked set. Symmetry
         // by construction is the LIVENESS-1 invariant (a divergent view freezes
-        // the chain). Only the flat list is needed here.
-        let (staked_amounts, _) = state.staked_anchor_view().await;
+        // the chain). The flat list feeds the rank check; the id set feeds the
+        // R1-X1-V fast-forward stake gate (`epoch::SealStakeView`) — one call,
+        // one memoized view.
+        let (staked_amounts, _, staked_set) = state.staked_anchor_view_with_set().await;
         // Parse the zone once for RTT lookup. Match the zone-decoding logic
         // in `extract_epoch_seal` so string/legacy-numeric both work.
         let seal_zone: Option<crate::ZoneId> = rec.metadata.get("epoch_zone")
@@ -2527,6 +2510,7 @@ async fn insert_record_inner(state: &Arc<NodeState>, mut record: ValidationRecor
                 &genesis,
                 vrf_pk.as_ref(),
                 Some(&rank_check),
+                epoch::SealStakeView { staked: &staked_set },
             )
         }; // epoch_state lock dropped here
 
@@ -2548,6 +2532,19 @@ async fn insert_record_inner(state: &Arc<NodeState>, mut record: ValidationRecor
                         return Err(ElaraError::Ledger(v.to_string()));
                     }
                 }
+            }
+            Err(ref e) if e.to_string().contains("stake-unverifiable") => {
+                // R1-X1-V (2026-09-02): non-genesis fast-forward seal whose creator
+                // is not admissible by our staked-anchor set (unstaked, or the set
+                // is still in the bootstrap regime). Same DEFER shape as B7 below:
+                // parked (retryable — `is_retryable_ingest_rejection`), never
+                // applied, so it cannot fast-forward `latest_epoch`. The marker
+                // carries no "VRF" substring, so this arm and the VRF arm can
+                // never shadow each other. Own counter: a sustained climb = a
+                // self-declared-anchor probe, or an honest joiner whose ledger
+                // view has not caught up (R1-X1-V-K).
+                state.epoch_seal_fastforward_unstaked_deferred_total.fetch_add(1, Relaxed);
+                return Err(ElaraError::Ledger(e.to_string()));
             }
             Err(ref e) if e.to_string().contains("VRF") => {
                 // VRF verification failed — accept the seal if creator is self
@@ -2925,6 +2922,15 @@ async fn insert_record_inner(state: &Arc<NodeState>, mut record: ValidationRecor
         }
     }
 
+    // R1-X1 Commit 3 — Layer A super-seal ingest bound (verdict §2A). Runs
+    // before phase 2 on BOTH insert paths (`insert_record_synced` and the
+    // legacy entry converge here): a super-seal that is not admissible is
+    // never stored, so it never reaches the post-store `register_super_seal`
+    // that pins `latest_super_seal` (and the Commit 1 GC floor) to the tip.
+    if is_super_seal {
+        admit_super_seal(state, &record)?;
+    }
+
     // Measure pre-phase2 time (validation + eviction + Dilithium + ITC + relevance)
     let pre_phase2_ms = ingest_t0.elapsed().as_millis();
 
@@ -2943,20 +2949,30 @@ async fn insert_record_inner(state: &Arc<NodeState>, mut record: ValidationRecor
     // so the slot index entry and record payload land together. This is the
     // first and only point at which a sig-verified record can claim a slot.
     let slot_key_for_claim = rec.slot_key();
-    // F-1 crash-consistency: derive the DISC-5 CF_EPOCHS index key for seal
-    // records HERE so it rides the record's own Phase-2 WriteBatch (atomic with
-    // the seal in CF_RECORDS). `extract_epoch_seal` is the same deterministic,
-    // metadata-only parse the post-insert block uses, so the indexed key is
-    // byte-identical to the prior standalone put — only the atomicity changes.
-    // `Ok(None)` for every non-seal record (one HashMap lookup, no parse).
-    let disc5_epoch_key: Option<Vec<u8>> = match super::epoch::extract_epoch_seal(&record) {
-        Ok(Some(seal)) => Some(super::epoch::disc5_index_key(
-            seal.epoch_number,
-            seal.zone.path(),
-            &record.id,
-        )),
-        _ => None,
-    };
+    // Side rows — DISC-5 epoch-index key (F-1 crash-consistency), the
+    // creator-keyed equivocation witness row and the slash-offense marker (F2,
+    // internal design notes) — ride this
+    // record's own Phase-2 WriteBatch (shared crash fate, no standalone put).
+    // Built by the SHARED builder `network::side_writes::record_side_writes`
+    // (F2 residual R2, internal design notes)
+    // so this path, the genesis bootstrap pull (`gossip::bootstrap_store_record`)
+    // and the boot backfill (`side_writes::backfill_side_rows`) write
+    // byte-identical rows, and `delete_record` re-derives the identical keys.
+    // Two metadata lookups for a non-seal, non-slash record — no hash, no parse.
+    // `witness_creator` (= `creator_hash` = `sha3_256_hex(creator_public_key)`)
+    // is the creator component of the witness key; `own_record_hash` is the
+    // value the row carries, taken from the built row so the post-put walk
+    // compares exactly what was written (all-zero for a non-seal: unused).
+    let super::side_writes::SideWriteSet {
+        side_writes,
+        seal_witness_coords,
+    } = super::side_writes::record_side_writes(&record);
+    let own_record_hash: [u8; 32] = side_writes
+        .equivocation_key
+        .as_ref()
+        .map(|(_, hash)| *hash)
+        .unwrap_or([0u8; 32]);
+    let witness_creator = creator_hash.clone();
     // KR-3 S2 (W2-A): rotation-finality side-write for this record's Phase-2
     // batch — armed crash-atomically with the record store (§3-3), the DISC-5
     // precedent above. Flag-gated: `None` when OFF ⇒ the store batch is
@@ -2967,7 +2983,8 @@ async fn insert_record_inner(state: &Arc<NodeState>, mut record: ValidationRecor
         None
     };
     let phase2_t0 = std::time::Instant::now();
-    let hash = tokio::task::spawn_blocking(move || -> crate::errors::Result<String> {
+    let (hash, mut phase2_witness) = tokio::task::spawn_blocking(
+        move || -> crate::errors::Result<(String, Phase2Witness)> {
         let queue_ms = phase2_t0.elapsed().as_millis();
         let sb_t0 = std::time::Instant::now();
 
@@ -2982,17 +2999,66 @@ async fn insert_record_inner(state: &Arc<NodeState>, mut record: ValidationRecor
             &rec.creator_public_key,
             zone_key_for_idx,
             slot_key_for_claim.as_deref(),
-            disc5_epoch_key.as_deref(),
+            side_writes,
             rotation_op,
         )?;
         let put_ms = sb_t0.elapsed().as_millis();
 
+        // F2: durable equivocation witness scan — strictly AFTER the put on
+        // this same thread. Program order write<seek plus the batch's
+        // linearizable visibility on the shared handle means that for any two
+        // conflicting seals arriving on two of the (up to 64) state-core
+        // workers, at least one scan sees the other's row: a seek BEFORE the
+        // write would reopen that race. The walk seeks only THIS creator's
+        // slot (`eqv:{epoch}:{zone}:{creator}:`) and stops at the first
+        // differing hash, so honest and adversarial cost are both O(1) and
+        // other creators' seals never enter the prefix — no sibling cap
+        // (T-F10 verdict ruling), just the same > DURABLE_HEAL_SIBLINGS_WARN
+        // canary the durable-heal walk uses.
+        let mut phase2_witness: Phase2Witness = None;
+        if let Some((epoch_number, zone_path)) = seal_witness_coords.as_ref() {
+            let scan = state2.rocks.find_equivocation_witness(
+                *epoch_number,
+                zone_path,
+                &witness_creator,
+                &rec.id,
+                &own_record_hash,
+            );
+            state2.slashing_witness_scans_total.fetch_add(1, Relaxed);
+            state2
+                .slashing_witness_keys_read_total
+                .fetch_add(scan.keys_read, Relaxed);
+            if scan.keys_read > super::epoch::DURABLE_HEAL_SIBLINGS_WARN {
+                state2.slashing_witness_overflow_warn_total.fetch_add(1, Relaxed);
+                tracing::warn!(
+                    "equivocation witness walk read {} rows for creator {} zone {} epoch {} (> {} canary): one anchor is stacking seals at one (zone, epoch)",
+                    scan.keys_read,
+                    &witness_creator[..witness_creator.len().min(16)],
+                    zone_path,
+                    epoch_number,
+                    super::epoch::DURABLE_HEAL_SIBLINGS_WARN,
+                );
+            }
+            if scan.malformed_rows > 0 {
+                tracing::warn!(
+                    "equivocation witness index: {} malformed rows under creator {} zone {} epoch {} (skipped)",
+                    scan.malformed_rows,
+                    &witness_creator[..witness_creator.len().min(16)],
+                    zone_path,
+                    epoch_number,
+                );
+            }
+            phase2_witness = scan.witness;
+        }
+
         // Incremental record-stats counters. Bumped here, after the
         // record is durably persisted by `put_record_with_pk_zone` and only on
         // the happy ingest path; replaces the O(all_records) scan in the
-        // explorer `/dag/stats` route. Zone-purge / zone-merge writes go
-        // through `rocks.put_record` directly and do NOT bump (totals stay
-        // stable when records move zones).
+        // explorer `/dag/stats` route. Records that enter through the genesis
+        // bootstrap pull (`gossip::bootstrap_store_record`) do NOT bump —
+        // these are live-ingest counters. (R2 verdict, 2026-09-02: the old
+        // "zone-purge / zone-merge writes go through `rocks.put_record`"
+        // wording here was stale — no production writer uses the bare put.)
         state2.record_stats_bump(&rec);
 
         // Insert record hash into the zone's sparse Merkle tree.
@@ -3014,7 +3080,7 @@ async fn insert_record_inner(state: &Arc<NodeState>, mut record: ValidationRecor
             tracing::warn!("phase2 spawn_blocking slow: queue={queue_ms}ms put={put_ms}ms merkle={merkle_ms}ms total={total_sb}ms");
         }
 
-        Ok(rec.id.clone())
+        Ok((rec.id.clone(), phase2_witness))
     })
     .await
     .map_err(|e| ElaraError::Network(format!("spawn_blocking failed: {e}")))??;
@@ -3141,6 +3207,10 @@ async fn insert_record_inner(state: &Arc<NodeState>, mut record: ValidationRecor
         if tombstoned {
             info!("tombstoned record: ledger op applied (F2-A); content-propagation suppression is a separate, currently-unbuilt concern (see TOMBSTONE-PROPAGATION-FILTER brief): {}", &record.id[..record.id.len().min(16)]);
             apply_ledger_op_phase4(state, &record, creator_hash.clone(), parsed_ledger_op.clone()).await;
+            // F2: a tombstoned seal never reaches Phase 5, so any Phase-2
+            // equivocation witness it produced is dropped here with the rest
+            // of its content-side effects (the witness row itself stays in the
+            // durable index for the NEXT seal by that creator to trip on).
             return Ok(hash);
         }
     }
@@ -3201,13 +3271,10 @@ async fn insert_record_inner(state: &Arc<NodeState>, mut record: ValidationRecor
             }
         }
 
-        // ── Continuity + Reincarnation tracking (Protocol §11.33, §6.4) ──
-        // Feed every accepted record into both subsystems so they build up
-        // behavioral profiles incrementally. O(1) per record, no I/O.
-        let hour = ((record.timestamp as u64) % 86400) / 3600;
-        let record_size = wire_size as usize;
-        let metadata_keys = record.metadata.len();
-
+        // ── Continuity tracking (Protocol §11.33) ──
+        // Feed every accepted record into continuity so it builds a presence
+        // profile incrementally. O(1) per record, no I/O.
+        //
         // Continuity: record activity for this identity. Poisoned → recover
         // (a panic under this lock must not silently freeze profile writes for
         // process lifetime — 2026-08-29 verdict F4); WouldBlock → skip, the
@@ -3218,42 +3285,6 @@ async fn insert_record_inner(state: &Arc<NodeState>, mut record: ValidationRecor
                 e.into_inner().record_activity(&creator_hash, record.timestamp);
             }
             Err(std::sync::TryLockError::WouldBlock) => {}
-        }
-
-        // Reincarnation: observe behavioral fingerprint + periodic detection check
-        let reinc_guard = match state.reincarnation.try_lock() {
-            Ok(g) => Some(g),
-            Err(std::sync::TryLockError::Poisoned(e)) => Some(e.into_inner()),
-            Err(std::sync::TryLockError::WouldBlock) => None,
-        };
-        if let Some(mut reinc) = reinc_guard {
-            reinc.observe(&creator_hash, hour as usize, record_size, metadata_keys);
-            reinc.set_network_origin(&creator_hash, &format!("{:016x}", origin_hash));
-
-            // Check for reincarnation every 10th observation (fingerprint needs
-            // 10+ to mature). O(abandoned_count) per check via the abandoned_ids
-            // index — genuinely, since the 2026-08-29 pass; the old loop walked
-            // every fingerprint on the node.
-            if let Some(rfp) = reinc.fingerprints().get(&creator_hash) {
-                if rfp.observation_count % 10 == 0 && rfp.is_mature() {
-                    let candidates = reinc.check_reincarnation(&creator_hash, record.timestamp);
-                    for c in &candidates {
-                        warn!(
-                            "REINCARNATION DETECTED: {} matches abandoned {} (sim={:.2}, signals={:?})",
-                            &c.new_identity[..c.new_identity.len().min(16)],
-                            &c.old_identity[..c.old_identity.len().min(16)],
-                            c.similarity, c.signals,
-                        );
-                    }
-                    if !candidates.is_empty() {
-                        // Publish the suspects snapshot the admission gate reads
-                        // lock-free. MUST happen inside this guard: the mutex
-                        // serializes publishes, so a concurrent detection can't
-                        // clone-and-overwrite a sibling's update (verifier (a)).
-                        state.reincarnation_suspects.store(std::sync::Arc::new(reinc.suspects()));
-                    }
-                }
-            }
         }
     }
     let trust_end_ms = ingest_t0.elapsed().as_millis();
@@ -3320,7 +3351,7 @@ async fn insert_record_inner(state: &Arc<NodeState>, mut record: ValidationRecor
 
     // Update epoch state if this was an epoch seal
     // seal_equivocation carries info out of sync context for async slash execution.
-    let mut seal_equivocation: Option<(String, crate::ZoneId, u64, String, [u8; 32])> = None;
+    let mut seal_equivocation: Option<SealEquivocation> = None;
     if record.metadata.contains_key(EPOCH_OP_KEY) {
         // R3-8 soak forensics (2026-07-02): 4 above-cap seals on the follower
         // were stored with ZERO Phase-5 side effects (no derive attempt, no
@@ -3361,38 +3392,57 @@ async fn insert_record_inner(state: &Arc<NodeState>, mut record: ValidationRecor
             let mut derive_local_count: Option<u64> = None;
             if seal.record_hashes.is_empty() && seal.record_count > 0 {
                 state.seal_ingest_derive_hook_attempts_total.fetch_add(1, Relaxed);
-                match epoch::derive_seal_enumeration(&*state.rocks, &seal) {
-                    Some(epoch::DeriveOutcome::Derived(derived)) => {
+                // F2 residual R3: the derive is a RocksDB read (DISC-5 window
+                // walk) — run it on the blocking pool, never on the async
+                // executor thread. A join failure (panicked/cancelled blocking
+                // task) is treated exactly like "not derivable": the P3
+                // count-based deficit path below still runs.
+                let rocks = Arc::clone(&state.rocks);
+                let seal_for_derive = seal.clone();
+                match tokio::task::spawn_blocking(move || {
+                    epoch::derive_seal_enumeration(&*rocks, &seal_for_derive)
+                })
+                .await
+                {
+                    Ok(Some(epoch::DeriveOutcome::Derived(derived))) => {
                         seal.record_hashes = derived;
                     }
-                    Some(epoch::DeriveOutcome::Incomplete { local_window_count }) => {
+                    Ok(Some(epoch::DeriveOutcome::Incomplete { local_window_count })) => {
                         derive_local_count = Some(local_window_count);
                     }
-                    None => {}
-                }
-            }
-            // Check for epoch seal equivocation (same anchor, same zone+epoch, different content).
-            // BFT safety violation — economics §10. Detection is sync; slash is deferred.
-            {
-                let mut monitor = state.slashing.lock_recover();
-                let seal_creator = creator_identity_hash(&record);
-                let content_hash = record.record_hash();
-                if let Some((conflicting_id, _)) = monitor.record_seal(
-                    &seal_creator, &seal.zone, seal.epoch_number,
-                    &record.id, content_hash,
-                ) {
-                    if !monitor.already_slashed(&seal_creator, &record.id, &conflicting_id) {
+                    Ok(None) => {}
+                    Err(e) => {
                         warn!(
-                            "EPOCH SEAL EQUIVOCATION: {} produced conflicting seals for zone {} epoch {}",
-                            &seal_creator[..seal_creator.len().min(16)],
-                            seal.zone, seal.epoch_number,
+                            zone = %seal.zone.path(),
+                            epoch = seal.epoch_number,
+                            error = %e,
+                            "seal-ingest derive hook: spawn_blocking join failed; treating the seal as not derivable"
                         );
-                        seal_equivocation = Some((
-                            seal_creator, seal.zone.clone(), seal.epoch_number,
-                            record.id.clone(), content_hash,
-                        ));
                     }
                 }
+            }
+            // Epoch seal equivocation (same anchor, same zone+epoch, different
+            // content) — BFT safety violation, economics §8. F2 (2026-09-02):
+            // detection already happened in Phase 2 against the durable
+            // creator-keyed witness index, inside the spawn_blocking that
+            // wrote this seal (restart-safe; no RAM seal window). Consume the
+            // witness here; the slash itself is deferred until all sync locks
+            // are released. Offense-keyed dedup lives in `check_seal_equivocation`
+            // (`claim_offense`), not here.
+            if let Some((conflicting_id, _conflicting_hash)) = phase2_witness.take() {
+                let seal_creator = creator_identity_hash(&record);
+                state.slashing_equivocations_detected_total.fetch_add(1, Relaxed);
+                warn!(
+                    "EPOCH SEAL EQUIVOCATION: {} produced conflicting seals {} / {} for zone {} epoch {}",
+                    &seal_creator[..seal_creator.len().min(16)],
+                    &record.id[..record.id.len().min(16)],
+                    &conflicting_id[..conflicting_id.len().min(16)],
+                    seal.zone, seal.epoch_number,
+                );
+                seal_equivocation = Some((
+                    seal_creator, seal.zone.clone(), seal.epoch_number,
+                    record.id.clone(), conflicting_id,
+                ));
             }
 
             // PARTITION-MERGE Phase B Slice 3: weight-aware same-epoch
@@ -3438,7 +3488,10 @@ async fn insert_record_inner(state: &Arc<NodeState>, mut record: ValidationRecor
             // releases, gated on the phantom signature (tip_weight == 0) so it
             // measures the healable subset, not Byzantine forge-probes.
             let mut phantom_reject_probe: Option<(String, u64, [u8; 32])> = None;
-            if let Ok(mut epoch_state) = state.epoch.write() {
+            {
+                // R1-X5 (2026-09-02): write_recover — a poisoned epoch lock must
+                // not silently skip tip registration (seal loop + GC already recover).
+                let mut epoch_state = state.epoch.write_recover();
                 // C2: AUTHORITATIVE chain-link enforcement under the WRITE lock. The
                 // verify-time check (epoch.rs) is advisory — it reads the tip under a
                 // READ lock that races register_seal's write, so it cannot reject
@@ -3799,42 +3852,76 @@ async fn insert_record_inner(state: &Arc<NodeState>, mut record: ValidationRecor
     // canonical checkpoint per zone. Super-seals are emitted by the seal
     // creator and propagate via gossip like any record.
     if record.metadata.contains_key(EPOCH_OP_KEY) {
-        if let Ok(Some(ss)) = epoch::extract_super_seal(&record) {
-            // fold_sunset fence, super-seal tree (v7 §Fence): fenced on the
-            // COVERING END epoch — a super-seal aggregating any epoch past
-            // the boundary must itself fold v2. Inert without a fence.
-            {
-                use crate::network::RwLockRecover;
-                let reg = state.fold_sunset.read_recover();
-                if let Err(v) = reg.check_seal(
-                    super::fold_sunset::FenceTree::SuperSeal,
-                    ss.end_epoch,
-                    ss.wire_version,
-                ) {
-                    reg.verify_reject_total
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    return Err(ElaraError::Ledger(v.to_string()));
+        match epoch::extract_super_seal(&record) {
+            Ok(Some(ss)) => {
+                // fold_sunset fence, super-seal tree (v7 §Fence): fenced on the
+                // COVERING END epoch — a super-seal aggregating any epoch past
+                // the boundary must itself fold v2. Inert without a fence.
+                {
+                    use crate::network::RwLockRecover;
+                    let reg = state.fold_sunset.read_recover();
+                    if let Err(v) = reg.check_seal(
+                        super::fold_sunset::FenceTree::SuperSeal,
+                        ss.end_epoch,
+                        ss.wire_version,
+                    ) {
+                        reg.verify_reject_total
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        return Err(ElaraError::Ledger(v.to_string()));
+                    }
                 }
-            }
-            let mut minted = false;
-            if let Ok(mut epoch_state) = state.epoch.write() {
-                minted = epoch_state.register_super_seal(
-                    ss.zone.clone(),
-                    ss.end_epoch,
-                    record.id.clone(),
-                    record.record_hash(),
-                    ss.committee_hash,
+                // R1-X5 (2026-09-02): write_recover — a poisoned epoch lock must not
+                // silently skip floor registration (the GC seal floor derives from it).
+                let minted = {
+                    let mut epoch_state = state.epoch.write_recover();
+                    // R1-X1 Commit 3 (A3 re-check): admission ran before
+                    // storage under a read lock and the tip only advances,
+                    // so this fires only for a record that bypassed the
+                    // ingest arm. WARN-only — registration is unchanged.
+                    let tip_now = epoch_state.latest_epoch.get(&ss.zone).copied();
+                    if tip_now.is_none_or(|tip| tip < ss.end_epoch) {
+                        warn!(
+                            "super-seal registered past the local tip: zone={} end={} tip={:?} id={}",
+                            ss.zone, ss.end_epoch, tip_now, record.id
+                        );
+                    }
+                    epoch_state.register_super_seal(
+                        ss.zone.clone(),
+                        ss.end_epoch,
+                        record.id.clone(),
+                        record.record_hash(),
+                        ss.committee_hash,
+                    )
+                };
+                if minted {
+                    state
+                        .super_seals_minted_total
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                info!(
+                    "super-seal ingested: zone={} epochs=[{}..={}] count={} id={} minted={}",
+                    ss.zone, ss.start_epoch, ss.end_epoch, ss.seal_count, record.id, minted,
                 );
             }
-            if minted {
-                state
-                    .super_seals_minted_total
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(None) => {}
+            Err(e) => {
+                // R1-X1 (2026-09-02): a record claiming `epoch_op = super_seal`
+                // that fails shape extraction used to vanish silently here
+                // (the `if let Ok(Some(..))` swallowed the Err). Count it — a
+                // probe, a malformed mint, or a producer/parser wire drift all
+                // show up as `elara_super_seal_extract_err_total`. Counted ONLY
+                // when the op string IS `super_seal`: `extract_super_seal` also
+                // errs on a non-string `epoch_op` before it looks at the op, and
+                // that shape is any signed record's to send. The record's fate
+                // is unchanged (this block never rejected on Err); only the
+                // checkpoint registration is skipped.
+                if record.metadata.get(EPOCH_OP_KEY).and_then(|v| v.as_str())
+                    == Some(epoch::EPOCH_OP_SUPER_SEAL)
+                {
+                    state.super_seal_extract_err_total.fetch_add(1, Relaxed);
+                    debug!("super-seal extract failed: id={} err={}", record.id, e);
+                }
             }
-            info!(
-                "super-seal ingested: zone={} epochs=[{}..={}] count={} id={} minted={}",
-                ss.zone, ss.start_epoch, ss.end_epoch, ss.seal_count, record.id, minted,
-            );
         }
     }
 
@@ -3842,7 +3929,22 @@ async fn insert_record_inner(state: &Arc<NodeState>, mut record: ValidationRecor
     // witness subscription registry. Scale: O(zones_in_sub) per observation,
     // no I/O.
     if record.metadata.contains_key(EPOCH_OP_KEY) {
-        if let Ok(Some(sub)) = super::zone_subscription::extract_subscription(&record) {
+        let extracted_sub = super::zone_subscription::extract_subscription(&record);
+        if let Err(e) = &extracted_sub {
+            // R1-X6 (2026-09-03): a malformed record claiming
+            // epoch_op=zone_subscription used to vanish silently here — the
+            // `if let Ok(Some(..))` swallowed the Err. `extract_subscription`
+            // returns Ok(None) for a missing / non-string / other op, so an
+            // Err implies the op string IS zone_subscription: count
+            // unconditionally (no op-guard, unlike the zone_transition arm which
+            // guards on its op string). Record fate unchanged (never rejected).
+            state.zone_subscription_extract_err_total.fetch_add(1, Relaxed);
+            warn!(
+                "zone_subscription ingest: extract FAILED for {} — consumer skipped: {e}",
+                &record.id[..record.id.len().min(16)]
+            );
+        }
+        if let Ok(Some(sub)) = extracted_sub {
             let identity = sub.identity_hash.clone();
             let zone_count = sub.zones.len();
             let valid_until = sub.valid_until;
@@ -3864,6 +3966,14 @@ async fn insert_record_inner(state: &Arc<NodeState>, mut record: ValidationRecor
     // this block wires the accepted seal into epoch state (unsticks the
     // chain) and tags it for cross-zone settlement in consensus.
     if record.metadata.contains_key(EPOCH_OP_KEY) {
+        // R1-X6 (2026-09-03): deliberately NO extract-err counter here (unlike
+        // the zone_subscription / zone_transition fold arms). Malformed or
+        // unregistered-emitter global_seals are hard-rejected PRE-STORE at the
+        // is_global_seal gate — `extract_global_quorum_seal(&record)?` (~L2722)
+        // and the VRF-emitter check (~L2698); see the "Pre-insert verification
+        // already happened" note above — so a record reaching this fold already
+        // extracted cleanly. The Err/Ok(None) branches are unreachable and any
+        // reject is already loud on the insert-error path.
         if let Ok(Some(gseal)) = epoch::extract_global_quorum_seal(&record) {
             // N4 (§E fence follow-up): the consensus stuck-zone settlement tag
             // is gated on the fence verdict — a chain-foreign global seal the
@@ -3905,7 +4015,23 @@ async fn insert_record_inner(state: &Arc<NodeState>, mut record: ValidationRecor
     // Check for zone transition announcement (epoch_op = "zone_transition").
     // Only accepted from genesis authority. Stores the schedule for epoch-gated application.
     if record.metadata.contains_key(EPOCH_OP_KEY) {
-        if let Ok(Some(transition)) = epoch::extract_zone_transition(&record) {
+        let extracted_transition = epoch::extract_zone_transition(&record);
+        if let Err(e) = &extracted_transition {
+            // R1-X6 (2026-09-03): previously swallowed silently.
+            // `extract_zone_transition` errs on a non-string epoch_op BEFORE the
+            // op check, so guard on the op string (like the super_seal arm).
+            // Record fate unchanged.
+            if record.metadata.get(EPOCH_OP_KEY).and_then(|v| v.as_str())
+                == Some(epoch::EPOCH_OP_ZONE_TRANSITION)
+            {
+                state.zone_transition_extract_err_total.fetch_add(1, Relaxed);
+                warn!(
+                    "zone_transition ingest: extract FAILED for {} — consumer skipped: {e}",
+                    &record.id[..record.id.len().min(16)]
+                );
+            }
+        }
+        if let Ok(Some(transition)) = extracted_transition {
             let creator = creator_identity_hash(&record);
             if creator == state.config.genesis_authority {
                 // Validate: target epoch must be in the future
@@ -3953,12 +4079,12 @@ async fn insert_record_inner(state: &Arc<NodeState>, mut record: ValidationRecor
         }
     }
 
-    // Execute seal equivocation slash after all sync locks are released (economics §10).
+    // Execute seal equivocation slash after all sync locks are released (economics §8).
     // Box::pin to break async recursion (slash record → insert_record → insert_record_inner).
-    if let Some((creator, zone, epoch, seal_id, chash)) = seal_equivocation {
+    if let Some((creator, zone, epoch, seal_id, conflicting_id)) = seal_equivocation {
         if state.identity.identity_hash == state.config.genesis_authority {
             Box::pin(super::slashing::check_seal_equivocation(
-                state, &creator, &zone, epoch, &seal_id, chash,
+                state, &creator, &zone, epoch, &seal_id, &conflicting_id,
             )).await;
         }
     }
@@ -4275,6 +4401,12 @@ async fn insert_record_inner(state: &Arc<NodeState>, mut record: ValidationRecor
 
     // Register algorithm sunset if this record carries one
     if record.metadata.contains_key(SUNSET_OP_KEY) {
+        // R1-X6 (2026-09-03): deliberately NO extract-err counter here. Malformed
+        // or non-genesis sunset records are hard-rejected PRE-STORE by
+        // `verify_sunset(&record, &genesis)?` (~L2420), which runs
+        // `extract_sunset(record)?` internally — so a record reaching this fold
+        // already extracted cleanly. The Err branch is unreachable and any
+        // reject is already loud on the insert-error path.
         if let Ok(Some(entry)) = sunset::extract_sunset(&record) {
             if let Ok(mut sunset_state) = state.sunset.write() {
                 sunset_state.register(entry);
@@ -4603,6 +4735,9 @@ async fn fisherman_slash(state: &Arc<NodeState>, slash: PendingSlash) {
         reason: &reason,
         light_mode: state.config.light_mode,
         slot_nonce: state.next_slot_nonce(),
+        // Fisherman slashes are deduped by their challenge record, not by an
+        // offense digest (F2).
+        offense_key: None,
     }) {
         Ok(slash_record) => {
             // Use insert_record_inner_direct to avoid state_core deadlock — this code
@@ -4954,6 +5089,209 @@ fn compute_witness_smt_scope(
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
     scope
+}
+
+/// R1-X1 Commit 3 — canonical seal at (`zone_path`, `epoch_number`) from the
+/// DISC-5 index (`CF_EPOCHS`): the lex-min `record_hash` among the parseable
+/// seals stored at that epoch — the tie-break `repopulate_recent_seal_hashes`
+/// applies — as `(record_hash, creator_identity_hash)`. Bounded: one prefix
+/// seek plus the (normally one, at most a handful of competing) seals stored
+/// at that epoch. Rocks reads only — call OUTSIDE the epoch lock.
+fn canonical_seal_at(
+    rocks: &crate::storage::rocks::StorageEngine,
+    zone_path: &str,
+    epoch_number: u64,
+) -> Option<([u8; 32], String)> {
+    let mut best: Option<([u8; 32], String)> = None;
+    for id in rocks.seal_record_ids_at_zone_epoch(epoch_number, zone_path) {
+        let Ok(Some(rec)) = rocks.get_record(&id) else {
+            continue;
+        };
+        if !matches!(epoch::extract_epoch_seal(&rec), Ok(Some(_))) {
+            continue;
+        }
+        let h = rec.record_hash();
+        if best.as_ref().is_none_or(|(bh, _)| h < *bh) {
+            best = Some((h, crate::accounting::types::creator_identity_hash(&rec)));
+        }
+    }
+    best
+}
+
+/// R1-X1 Commit 3 — Layer A super-seal ingest bound (verdict §2A).
+///
+/// Runs BEFORE phase 2 (storage) on both insert paths, so a super-seal that
+/// cannot be admitted is never stored and never reaches the post-store
+/// `register_super_seal` — the write that pins `latest_super_seal` (and with
+/// it the Commit 1 GC seal floor) to the local tip.
+///
+/// - A1/A2 shape (permanent, `Wire`): `seal_count == 64`, range width 64,
+///   `end_epoch` on a 64-boundary. The chain's own history satisfies these
+///   ([104001..=104064], …), so nothing already sealed is refused.
+/// - A3 tip (transient): the zone must have a local tip and `end <= tip`.
+///   An unknown zone DEFERS until its first canonical seal lands — a
+///   super-seal can never register a zone this node never sealed (R1-X1-TL).
+/// - Light profile: A4/A5/A6 are never evaluable (Light pulls no seals) →
+///   permanent DEFER, never reject, never stored.
+/// - Historical (`pointer.end >= end`, B2): the pointer already covers the
+///   range (bootstrap side-writes / replay) → admitted, nothing re-derived.
+/// - A4 coverage: all 64 canonical hashes (tip window from RAM, older epochs
+///   from `CF_EPOCHS` via `canonical_seal_at` — rocks reads OUTSIDE the epoch
+///   lock, F6) → root matches = PASS. Root differs with the boundary proposer
+///   attributing it (A5) = CANARY `root_mismatch` + DEFER (B1); unattributed
+///   = DEFER `unverifiable`. Any hash missing = A4 not evaluable.
+/// - A5 boundary-proposer: the super-seal's creator == creator of the
+///   canonical seal at `end` (from rocks). Sufficient alone when A4 is not
+///   evaluable (straddling / post-restart windows).
+/// - A6 chain-link (B3): informational WARN + counter on an ADMITTED
+///   super-seal whose `previous_super_seal_hash` / `start_epoch` do not link
+///   to the local pointer.
+///
+/// B4: a `super_seal`-op record that does not parse keeps its pre-existing
+/// fate — stored, counted post-store by `super_seal_extract_err_total`.
+fn admit_super_seal(state: &NodeState, record: &ValidationRecord) -> crate::errors::Result<()> {
+    use crate::network::RwLockRecover;
+    let Ok(Some(ss)) = epoch::extract_super_seal(record) else {
+        return Ok(());
+    };
+    let (start, end) = (ss.start_epoch, ss.end_epoch);
+    let interval = epoch::SUPER_SEAL_INTERVAL;
+    let width_ok = end
+        .checked_sub(start)
+        .and_then(|w| w.checked_add(1))
+        .is_some_and(|w| w == interval);
+    if !(ss.seal_count == interval && width_ok && end % interval == 0) {
+        state.super_seal_admission_rejected_shape_total.fetch_add(1, Relaxed);
+        warn!(
+            "super-seal admission REJECTED (shape): zone={} epochs=[{}..={}] count={} id={}",
+            ss.zone, start, end, ss.seal_count, record.id
+        );
+        return Err(ElaraError::Wire(format!(
+            "super-seal shape rejected: zone={} epochs=[{}..={}] count={}",
+            ss.zone, start, end, ss.seal_count
+        )));
+    }
+    // ONE read lock, released before any rocks read (F6).
+    let view = state
+        .epoch
+        .read_recover()
+        .super_seal_admission_view(&ss.zone, start, end);
+    let Some(tip) = view.tip else {
+        state.super_seal_admission_deferred_zone_unknown_total.fetch_add(1, Relaxed);
+        debug!(
+            "super-seal admission deferred (zone_unknown): zone={} epochs=[{}..={}] id={}",
+            ss.zone, start, end, record.id
+        );
+        return Err(ElaraError::TransientReject(format!(
+            "super-seal deferred (zone_unknown): zone={} epochs=[{}..={}]",
+            ss.zone, start, end
+        )));
+    };
+    if end > tip {
+        state.super_seal_admission_deferred_ahead_of_tip_total.fetch_add(1, Relaxed);
+        debug!(
+            "super-seal admission deferred (ahead_of_tip): zone={} end={} tip={} id={}",
+            ss.zone, end, tip, record.id
+        );
+        return Err(ElaraError::TransientReject(format!(
+            "super-seal deferred (ahead_of_tip): zone={} end={} tip={}",
+            ss.zone, end, tip
+        )));
+    }
+    if crate::network::node_profile::NodeProfile::from_str(&state.config.node_profile)
+        == crate::network::node_profile::NodeProfile::Light
+    {
+        state.super_seal_admission_deferred_unverifiable_total.fetch_add(1, Relaxed);
+        debug!(
+            "super-seal admission deferred (light_profile): zone={} epochs=[{}..={}] id={}",
+            ss.zone, start, end, record.id
+        );
+        return Err(ElaraError::TransientReject(format!(
+            "super-seal deferred (light_profile): zone={} epochs=[{}..={}]",
+            ss.zone, start, end
+        )));
+    }
+    if view.pointer.is_some_and(|(ptr_end, _)| ptr_end >= end) {
+        state.super_seal_admission_accepted_total.fetch_add(1, Relaxed);
+        debug!(
+            "super-seal admission ACCEPTED (historical): zone={} epochs=[{}..={}] id={}",
+            ss.zone, start, end, record.id
+        );
+        return Ok(());
+    }
+    // A4 / A5 derivation — rocks reads OUTSIDE the epoch lock.
+    let zone_path = ss.zone.path();
+    let mut hashes: Vec<[u8; 32]> = Vec::new();
+    let mut missing: u64 = 0;
+    for ep in start..=end {
+        if let Some(h) = view.window.get(&ep) {
+            hashes.push(*h);
+        } else if let Some((h, _)) = canonical_seal_at(&state.rocks, zone_path, ep) {
+            hashes.push(h);
+        } else {
+            missing = missing.saturating_add(1);
+        }
+    }
+    // A5: the boundary seal's creator — always from rocks (the RAM window
+    // holds hashes only).
+    let boundary_creator = canonical_seal_at(&state.rocks, zone_path, end).map(|(_, c)| c);
+    let a5_pass = boundary_creator.as_deref()
+        == Some(crate::accounting::types::creator_identity_hash(record).as_str());
+    let a4 = (missing == 0).then(|| epoch::verify_super_seal_coverage(&ss, &hashes));
+    let admitted = match a4 {
+        Some(true) => true,
+        Some(false) if a5_pass => {
+            // B1: attributed mismatch — the canary. Every canonical hash was
+            // present and the boundary proposer signed this super-seal, yet
+            // the root differs: the local seal set or the proposer is wrong.
+            state.super_seal_admission_root_mismatch_total.fetch_add(1, Relaxed);
+            warn!(
+                "super-seal admission ROOT MISMATCH (attributed; canary): zone={} epochs=[{}..={}] id={}",
+                ss.zone, start, end, record.id
+            );
+            false
+        }
+        Some(false) => {
+            state.super_seal_admission_deferred_unverifiable_total.fetch_add(1, Relaxed);
+            warn!(
+                "super-seal admission deferred (root_mismatch_unattributed=true): zone={} epochs=[{}..={}] id={}",
+                ss.zone, start, end, record.id
+            );
+            false
+        }
+        None if a5_pass => true,
+        None => {
+            state.super_seal_admission_deferred_unverifiable_total.fetch_add(1, Relaxed);
+            debug!(
+                "super-seal admission deferred (unverifiable): zone={} epochs=[{}..={}] missing={} boundary_creator_known={} id={}",
+                ss.zone, start, end, missing, boundary_creator.is_some(), record.id
+            );
+            false
+        }
+    };
+    if !admitted {
+        return Err(ElaraError::TransientReject(format!(
+            "super-seal deferred (unverifiable): zone={} epochs=[{}..={}] a4={a4:?} a5={a5_pass}",
+            ss.zone, start, end
+        )));
+    }
+    // A6 — chain link to the local pointer (B3: informational).
+    if let Some((ptr_end, ptr_hash)) = view.pointer {
+        let prev_matches = ss.previous_super_seal_hash == ptr_hash;
+        if !prev_matches || ptr_end.checked_add(1) != Some(start) {
+            state.super_seal_admission_chain_link_mismatch_total.fetch_add(1, Relaxed);
+            warn!(
+                "super-seal admission chain-link mismatch (A6, informational): zone={} start={} pointer_end={} prev_hash_matches={} id={}",
+                ss.zone, start, ptr_end, prev_matches, record.id
+            );
+        }
+    }
+    state.super_seal_admission_accepted_total.fetch_add(1, Relaxed);
+    debug!(
+        "super-seal admission ACCEPTED: zone={} epochs=[{}..={}] a4={:?} a5={} id={}",
+        ss.zone, start, end, a4, a5_pass, record.id
+    );
+    Ok(())
 }
 
 #[cfg(test)]
@@ -8337,7 +8675,7 @@ mod tests {
                 &rot.creator_public_key,
                 [0; 8],
                 None,
-                None,
+                crate::storage::rocks::RecordSideWrites::default(),
                 Some(RotationBatchOp::RotationHopAdmit {
                     record_hash_hex: hex::encode(rot.record_hash()),
                     record_id: rot.id.clone(),
@@ -8924,35 +9262,723 @@ mod effective_daily_limit_verdict_tests {
     #[test]
     fn staked_path_ignores_trust_and_floors_at_tier0() {
         // Trust lock state is irrelevant to staked identities (they never read it).
-        assert_eq!(effective_daily_limit(1_000_000, 100, None, false), 10_000.max(TIER_0_DAILY));
-        assert_eq!(effective_daily_limit(1_000_000, 100, Some(1), false), 10_000.max(TIER_0_DAILY));
+        assert_eq!(effective_daily_limit(1_000_000, 100, None), 10_000.max(TIER_0_DAILY));
+        assert_eq!(effective_daily_limit(1_000_000, 100, Some(1)), 10_000.max(TIER_0_DAILY));
         // Tiny stake still floors at Tier-0 (mirrors trust.rs:570,653).
-        assert_eq!(effective_daily_limit(1, 1_000_000, None, false), TIER_0_DAILY);
+        assert_eq!(effective_daily_limit(1, 1_000_000, None), TIER_0_DAILY);
     }
 
     #[test]
     fn unstaked_unreadable_trust_is_strictest() {
         // None = the trust lock was contended → fail closed to Tier-0.
-        assert_eq!(effective_daily_limit(0, 0, None, false), TIER_0_DAILY);
-        assert_eq!(effective_daily_limit(0, 0, Some(200), false), 200);
-    }
-
-    #[test]
-    fn reincarnation_flag_clamps_staked_and_unstaked_alike() {
-        // The §6.4 clamp overrides stake — the exploit the 2026-08-29 verdict
-        // closed: a slashed identity re-staking cannot buy back throughput.
-        assert!(effective_daily_limit(10_000_000_000, 100, None, false) > TIER_0_DAILY);
-        assert_eq!(effective_daily_limit(10_000_000_000, 100, None, true), TIER_0_DAILY);
-        assert_eq!(effective_daily_limit(0, 0, Some(200), true), TIER_0_DAILY);
-        // Unflagged leaves limits untouched.
-        assert_eq!(effective_daily_limit(0, 0, Some(200), false), 200);
+        assert_eq!(effective_daily_limit(0, 0, None), TIER_0_DAILY);
+        assert_eq!(effective_daily_limit(0, 0, Some(200)), 200);
     }
 
     #[test]
     fn worst_case_is_a_floor_never_a_halt() {
-        // Every lock unreadable + flagged: the limit is Tier-0, never zero —
-        // degraded mode still admits records (TIER_0_DAILY is a nonzero const;
-        // the eq below is the floor-not-halt pin).
-        assert_eq!(effective_daily_limit(0, 0, None, true), TIER_0_DAILY);
+        // Every lock unreadable: the limit is Tier-0, never zero — degraded
+        // mode still admits records (TIER_0_DAILY is a nonzero const; the eq
+        // below is the floor-not-halt pin).
+        assert_eq!(effective_daily_limit(0, 0, None), TIER_0_DAILY);
+    }
+
+    /// R1-X1 (2026-09-02): a record claiming `epoch_op = super_seal` that
+    /// fails shape extraction used to vanish silently inside the ingest fold
+    /// — the `if let Ok(Some(..))` swallowed the `Err`. It is now COUNTED
+    /// (`super_seal_extract_err_total`) while the record's fate stays
+    /// unchanged (stored; no checkpoint registered; no mint counted). A
+    /// record whose `epoch_op` is not a string also errs inside
+    /// `extract_super_seal` — BEFORE the op is inspected — and must NOT
+    /// count (final-verify ERR-CANARY: any signed record can carry that).
+    /// Both go through the production insert path with the node's own
+    /// identity + a fresh slot nonce, like the OPS-181 pipeline test.
+    #[tokio::test]
+    async fn r1x1_extract_err_counted_only_for_super_seal_ops() {
+        use std::sync::atomic::Ordering::Relaxed;
+        let state = crate::network::state::build_test_node_state();
+        let build = |payload: &[u8], op: serde_json::Value| {
+            let mut md = std::collections::BTreeMap::new();
+            md.insert(crate::network::epoch::EPOCH_OP_KEY.to_string(), op);
+            let mut record = crate::record::ValidationRecord::create(
+                payload,
+                state.identity.public_key.clone(),
+                vec![],
+                crate::record::Classification::Public,
+                Some(md),
+            );
+            record.nonce = state.next_slot_nonce();
+            state.identity.sign_record(&mut record).unwrap();
+            record
+        };
+        // (1) claims super_seal, no `super_seal_zone` → Err("missing super_seal_zone") → counted.
+        let record = build(
+            b"r1x1-extract-err",
+            serde_json::json!(crate::network::epoch::EPOCH_OP_SUPER_SEAL),
+        );
+        let id = record.id.clone();
+        assert!(
+            crate::network::epoch::extract_super_seal(&record).is_err(),
+            "fixture precondition: super-seal-shaped but malformed"
+        );
+        let before = state.super_seal_extract_err_total.load(Relaxed);
+        let inserted = super::insert_record_synced(&state, record).await;
+        assert!(inserted.is_ok(), "record fate unchanged: still stored ({inserted:?})");
+        assert_eq!(inserted.unwrap(), id);
+        assert_eq!(
+            state.super_seal_extract_err_total.load(Relaxed),
+            before + 1,
+            "the swallowed Err is now counted exactly once"
+        );
+        // (2) non-string `epoch_op` → Err("epoch_op not a string") → NOT counted.
+        let record2 = build(b"r1x1-non-string-op", serde_json::json!(5));
+        let id2 = record2.id.clone();
+        assert!(crate::network::epoch::extract_super_seal(&record2).is_err());
+        let inserted2 = super::insert_record_synced(&state, record2).await;
+        assert!(inserted2.is_ok(), "record fate unchanged: still stored ({inserted2:?})");
+        assert_eq!(inserted2.unwrap(), id2);
+        assert_eq!(
+            state.super_seal_extract_err_total.load(Relaxed),
+            before + 1,
+            "a non-super-seal op never drives the counter"
+        );
+        assert_eq!(
+            state.super_seals_minted_total.load(Relaxed),
+            0,
+            "nothing registered from a malformed super-seal"
+        );
+    }
+}
+
+/// R1-X6 (2026-09-03): the two LIVE extract-err fold arms — the only two of the
+/// four filed ops that a malformed record can actually REACH. zone_transition and
+/// zone_subscription have NO pre-store verify gate, so a malformed record carrying
+/// their op is stored and then silently skipped by the `if let Ok(Some(..))`
+/// consumer — now counted. (The filing's other two ops, global_seal and sunset, are
+/// hard-rejected pre-store by their own gates — `extract_global_quorum_seal(&record)?`
+/// ~L2722 and `verify_sunset(&record, &genesis)?` ~L2420 — so their fold arms can
+/// never see an Err; no counter was added there. Reachability, not grep, decides.)
+/// zone_transition is the one GUARDED arm: `extract_zone_transition` calls
+/// `op_val.as_str()?` and so Errs on a NON-STRING `epoch_op` BEFORE the op check —
+/// exactly like `extract_super_seal` — so its counter is gated on the op string.
+/// zone_subscription is UNCONDITIONAL: `extract_subscription` returns Ok(None) for a
+/// missing / non-string / foreign op, so an Err there already implies its own op.
+/// This locks both: same-op-malformed → +1 each; a non-string `epoch_op` → +0 (the
+/// guard's `.as_str()` yields None, and the subscription extractor returns Ok(None)).
+#[cfg(test)]
+mod r1x6_live_fold_arm_tests {
+    use super::insert_record_synced;
+    use crate::network::epoch::{extract_zone_transition, EPOCH_OP_KEY, EPOCH_OP_ZONE_TRANSITION};
+    use crate::network::state::build_test_node_state;
+    use crate::network::zone_subscription::{extract_subscription, EPOCH_OP_ZONE_SUBSCRIPTION};
+    use crate::record::{Classification, ValidationRecord};
+    use std::collections::BTreeMap;
+    use std::sync::atomic::Ordering::Relaxed;
+
+    #[tokio::test]
+    async fn r1x6_live_fold_arms_count_only_their_malformed_ops() {
+        let state = build_test_node_state();
+        let build = |payload: &[u8], op: serde_json::Value| {
+            let mut md = BTreeMap::new();
+            md.insert(EPOCH_OP_KEY.to_string(), op);
+            let mut record = ValidationRecord::create(
+                payload,
+                state.identity.public_key.clone(),
+                vec![],
+                Classification::Public,
+                Some(md),
+            );
+            record.nonce = state.next_slot_nonce();
+            state.identity.sign_record(&mut record).unwrap();
+            record
+        };
+
+        // (1) zone_transition op, missing every schedule field → Err → counted once
+        //     (GUARDED arm, no pre-store gate so the malformed record reaches the fold).
+        let zt_before = state.zone_transition_extract_err_total.load(Relaxed);
+        let r = build(b"r1x6-zt-malformed", serde_json::json!(EPOCH_OP_ZONE_TRANSITION));
+        let id = r.id.clone();
+        assert!(
+            extract_zone_transition(&r).is_err(),
+            "fixture: zone_transition-shaped but missing zone_transition_epoch"
+        );
+        let ins = insert_record_synced(&state, r).await;
+        assert_eq!(ins.expect("record fate unchanged: stored"), id);
+        assert_eq!(
+            state.zone_transition_extract_err_total.load(Relaxed),
+            zt_before + 1,
+            "guarded zone_transition Err counted exactly once"
+        );
+
+        // (2) zone_subscription op, missing the identity field → Err → counted once
+        //     (UNCONDITIONAL arm; likewise no pre-store gate).
+        let zs_before = state.zone_subscription_extract_err_total.load(Relaxed);
+        let r = build(b"r1x6-zs-malformed", serde_json::json!(EPOCH_OP_ZONE_SUBSCRIPTION));
+        let id = r.id.clone();
+        assert!(
+            extract_subscription(&r).is_err(),
+            "fixture: zone_subscription-shaped but missing zone_subscription_identity"
+        );
+        let ins = insert_record_synced(&state, r).await;
+        assert_eq!(ins.expect("record fate unchanged: stored"), id);
+        assert_eq!(
+            state.zone_subscription_extract_err_total.load(Relaxed),
+            zs_before + 1,
+            "zone_subscription Err counted exactly once"
+        );
+
+        // (3) ERR-CANARY: a non-string `epoch_op` errs in extract_zone_transition BEFORE
+        // the op check (guard's `.as_str()` → None → no count) and makes extract_subscription
+        // return Ok(None) (→ no count) — neither live counter may move.
+        let zt2 = state.zone_transition_extract_err_total.load(Relaxed);
+        let zs2 = state.zone_subscription_extract_err_total.load(Relaxed);
+        let r = build(b"r1x6-non-string-op", serde_json::json!(7));
+        let id = r.id.clone();
+        assert!(extract_zone_transition(&r).is_err());
+        assert!(
+            matches!(extract_subscription(&r), Ok(None)),
+            "non-string op → Ok(None) in the subscription extractor"
+        );
+        let ins = insert_record_synced(&state, r).await;
+        assert_eq!(ins.expect("record fate unchanged: stored"), id);
+        assert_eq!(
+            state.zone_transition_extract_err_total.load(Relaxed),
+            zt2,
+            "non-string op never drives the zone_transition guard"
+        );
+        assert_eq!(
+            state.zone_subscription_extract_err_total.load(Relaxed),
+            zs2,
+            "non-string op never drives the zone_subscription counter"
+        );
+    }
+}
+
+/// R1-X1 Commit 3 — Layer A super-seal ingest bound (verdict §2A, tests §4
+/// item 7). Every admission case routes through the PRODUCTION insert path.
+#[cfg(test)]
+mod r1x1_c3_admission_tests {
+    use super::{canonical_seal_at, insert_record_synced};
+    use crate::errors::ElaraError;
+    use crate::network::RwLockRecover;
+    use crate::network::epoch::{
+        create_epoch_seal, create_super_seal, EpochState, ParsedEpochSeal, SuperSealAdmissionView,
+        SuperSealParams, SUPER_SEAL_INTERVAL,
+    };
+    use crate::network::state::{build_test_node_state, build_test_node_state_with, NodeState};
+    use crate::record::ValidationRecord;
+    use std::sync::atomic::Ordering::Relaxed;
+    use std::sync::Arc;
+
+    fn h(i: u64, salt: u8) -> [u8; 32] {
+        [u8::try_from(i & 0xff).unwrap_or(0) ^ salt; 32]
+    }
+
+    fn parsed_seal(zone: &crate::ZoneId, i: u64, hash: [u8; 32]) -> ParsedEpochSeal {
+        ParsedEpochSeal {
+            zone: zone.clone(),
+            epoch_number: i,
+            start: (i * 60) as f64,
+            end: ((i + 1) * 60) as f64,
+            record_count: 1,
+            merkle_root: hash,
+            previous_seal_hash: [0u8; 32],
+            vrf_output: None,
+            vrf_proof: None,
+            record_hashes: vec![],
+            zone_balance_total: None,
+            zone_registry_root: None,
+            zone_registry_delta: None,
+            seal_zone_count: None,
+            aggregator_rank: 0,
+            account_smt_root: None,
+            drand_pulse: None,
+            xzone_dest_finality_committees: None,
+            wire_version: crate::wire::CURRENT_SIGNING_VERSION,
+            sparse_merkle_root: None,
+        }
+    }
+
+    /// Register canonical seals `[from..=to]` in RAM through the production
+    /// `register_seal` entry, hashes `h(i, salt)`.
+    fn register_window(state: &Arc<NodeState>, zone: &crate::ZoneId, from: u64, to: u64, salt: u8) {
+        let mut ep = state.epoch.write_recover();
+        for i in from..=to {
+            let hash = h(i, salt);
+            ep.register_seal(&parsed_seal(zone, i, hash), &format!("epoch:c3:{i}"), hash);
+        }
+    }
+
+    fn hashes(from: u64, to: u64, salt: u8) -> Vec<[u8; 32]> {
+        (from..=to).map(|i| h(i, salt)).collect()
+    }
+
+    fn mint(
+        state: &Arc<NodeState>,
+        zone: &crate::ZoneId,
+        start: u64,
+        end: u64,
+        seal_hashes: &[[u8; 32]],
+        prev: [u8; 32],
+    ) -> ValidationRecord {
+        let (rec, _) = create_super_seal(SuperSealParams {
+            identity: &state.identity,
+            zone: zone.clone(),
+            start_epoch: start,
+            end_epoch: end,
+            seal_hashes,
+            previous_super_seal_hash: prev,
+            committee_hash: [0u8; 32],
+            timestamp: 1_700_000_000.0,
+            slot_nonce: state.next_slot_nonce(),
+        })
+        .expect("mint super-seal");
+        rec
+    }
+
+    /// Store a canonical seal for `epoch` (by this node's identity) in rocks
+    /// WITH its DISC-5 index row — exactly what `canonical_seal_at` reads.
+    fn store_boundary_seal(state: &Arc<NodeState>, zone: &crate::ZoneId, epoch: u64) -> ValidationRecord {
+        let mut es = EpochState::new();
+        es.latest_epoch.insert(zone.clone(), epoch.saturating_sub(1));
+        let (seal, parsed) =
+            create_epoch_seal(&state.identity, &*state.rocks, &es, zone.clone(), 0.0, 60.0, None, None)
+                .expect("create seal");
+        assert_eq!(parsed.epoch_number, epoch);
+        state.rocks.put_record(&seal.id, &seal).expect("put seal");
+        let side = crate::network::side_writes::record_side_writes(&seal);
+        state
+            .rocks
+            .write_record_side_writes(&seal.id, &side.side_writes)
+            .expect("side rows");
+        seal
+    }
+
+    fn stored(state: &Arc<NodeState>, id: &str) -> bool {
+        matches!(state.rocks.get_record(id), Ok(Some(_)))
+    }
+
+    fn pointer_end(state: &Arc<NodeState>, zone: &crate::ZoneId) -> Option<u64> {
+        state
+            .epoch
+            .read_recover()
+            .latest_super_seal
+            .get(zone)
+            .map(|(e, _, _, _)| *e)
+    }
+
+    #[test]
+    fn c3_admission_view_is_bounded_and_panic_free() {
+        let mut es = EpochState::new();
+        let zone = crate::ZoneId::new("/zone/c3-view");
+        assert_eq!(
+            es.super_seal_admission_view(&zone, 1, 64),
+            SuperSealAdmissionView { tip: None, pointer: None, window: Default::default() }
+        );
+        // A reversed range yields an empty window (BTreeMap::range would panic).
+        assert!(es.super_seal_admission_view(&zone, 64, 1).window.is_empty());
+        for i in 1..=128u64 {
+            let hash = h(i, 0);
+            es.register_seal(&parsed_seal(&zone, i, hash), &format!("e{i}"), hash);
+        }
+        assert!(es.register_super_seal(zone.clone(), 64, "ss:64".into(), [7u8; 32], [0u8; 32]));
+        let v = es.super_seal_admission_view(&zone, 65, 128);
+        assert_eq!(v.tip, Some(128));
+        assert_eq!(v.pointer, Some((64, [7u8; 32])));
+        assert_eq!(v.window.len(), 64);
+        assert_eq!(v.window.keys().next(), Some(&65));
+        assert_eq!(v.window.keys().next_back(), Some(&128));
+        assert_eq!(es.super_seal_admission_view(&zone, 100, 110).window.len(), 11);
+        // Below the window: nothing served from RAM (rocks owns it).
+        assert!(es.super_seal_admission_view(&zone, 1, 64).window.is_empty());
+    }
+
+    #[tokio::test]
+    async fn c3_ahead_of_tip_defers_then_admits_once_tip_arrives() {
+        let state = build_test_node_state();
+        let zone = crate::ZoneId::new("/zone/c3-ahead");
+        let end = SUPER_SEAL_INTERVAL;
+        register_window(&state, &zone, 1, end - 1, 0); // tip = 63
+        let ss = mint(&state, &zone, 1, end, &hashes(1, end, 0), [0u8; 32]);
+        let id = ss.id.clone();
+        let err = insert_record_synced(&state, ss.clone())
+            .await
+            .expect_err("end > tip must defer");
+        assert!(matches!(err, ElaraError::TransientReject(_)), "{err}");
+        assert!(err.to_string().starts_with("transient reject:"), "{err}");
+        assert_eq!(state.super_seal_admission_deferred_ahead_of_tip_total.load(Relaxed), 1);
+        assert!(!stored(&state, &id), "deferred super-seal must not be stored");
+        assert_eq!(pointer_end(&state, &zone), None, "deferred super-seal must not register");
+        // The canonical seal for the boundary epoch lands → the same record admits.
+        register_window(&state, &zone, end, end, 0);
+        let got = insert_record_synced(&state, ss).await.expect("admits once tip == end");
+        assert_eq!(got, id);
+        assert!(stored(&state, &id));
+        assert_eq!(pointer_end(&state, &zone), Some(end));
+        assert_eq!(state.super_seal_admission_accepted_total.load(Relaxed), 1);
+        assert_eq!(state.super_seal_admission_root_mismatch_total.load(Relaxed), 0);
+        assert_eq!(state.super_seal_admission_chain_link_mismatch_total.load(Relaxed), 0);
+        assert_eq!(state.super_seals_minted_total.load(Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn c3_zone_unknown_defers_forever() {
+        let state = build_test_node_state();
+        let zone = crate::ZoneId::new("/zone/c3-unknown");
+        let end = SUPER_SEAL_INTERVAL;
+        let ss = mint(&state, &zone, 1, end, &hashes(1, end, 0), [0u8; 32]);
+        let id = ss.id.clone();
+        let err = insert_record_synced(&state, ss).await.expect_err("unknown zone must defer");
+        assert!(matches!(err, ElaraError::TransientReject(_)), "{err}");
+        assert_eq!(state.super_seal_admission_deferred_zone_unknown_total.load(Relaxed), 1);
+        assert!(!stored(&state, &id));
+        assert_eq!(pointer_end(&state, &zone), None);
+    }
+
+    #[tokio::test]
+    async fn c3_shape_rejects_are_permanent_wire_errors() {
+        let state = build_test_node_state();
+        let zone = crate::ZoneId::new("/zone/c3-shape");
+        let end = SUPER_SEAL_INTERVAL;
+        register_window(&state, &zone, 1, end + 1, 0); // tip = 65
+        // 63 hashes over [1..=64]: seal_count != 64.
+        let short = mint(&state, &zone, 1, end, &hashes(1, end - 1, 0), [0u8; 32]);
+        let err = insert_record_synced(&state, short.clone())
+            .await
+            .expect_err("count 63 must reject");
+        assert!(matches!(err, ElaraError::Wire(_)), "{err}");
+        assert!(!stored(&state, &short.id));
+        // 64 hashes over [2..=65]: end off the 64-boundary.
+        let off = mint(&state, &zone, 2, end + 1, &hashes(2, end + 1, 0), [0u8; 32]);
+        let err = insert_record_synced(&state, off.clone())
+            .await
+            .expect_err("end % 64 != 0 must reject");
+        assert!(matches!(err, ElaraError::Wire(_)), "{err}");
+        assert!(!stored(&state, &off.id));
+        assert_eq!(state.super_seal_admission_rejected_shape_total.load(Relaxed), 2);
+        assert_eq!(pointer_end(&state, &zone), None);
+        // Shape is judged before the tip: no defer counter moved.
+        assert_eq!(state.super_seal_admission_deferred_ahead_of_tip_total.load(Relaxed), 0);
+        assert_eq!(state.super_seal_admission_deferred_unverifiable_total.load(Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn c3_straddling_window_admits_on_boundary_proposer() {
+        let state = build_test_node_state();
+        let zone = crate::ZoneId::new("/zone/c3-straddle");
+        let end = SUPER_SEAL_INTERVAL;
+        // Tip known, RAM window EMPTY (post-restart / fast-forward shape):
+        // A4 is not evaluable; the boundary seal in rocks attributes it (A5).
+        state.epoch.write_recover().latest_epoch.insert(zone.clone(), end);
+        let boundary = store_boundary_seal(&state, &zone, end);
+        let (bh, creator) =
+            canonical_seal_at(&state.rocks, zone.path(), end).expect("DISC-5 row → canonical seal");
+        assert_eq!(bh, boundary.record_hash());
+        assert_eq!(creator, crate::accounting::types::creator_identity_hash(&boundary));
+        assert!(canonical_seal_at(&state.rocks, zone.path(), end - 1).is_none());
+        let ss = mint(&state, &zone, 1, end, &hashes(1, end, 0), [0u8; 32]);
+        let id = ss.id.clone();
+        insert_record_synced(&state, ss).await.expect("A5 pass admits");
+        assert!(stored(&state, &id));
+        assert_eq!(pointer_end(&state, &zone), Some(end));
+        assert_eq!(state.super_seal_admission_accepted_total.load(Relaxed), 1);
+        assert_eq!(state.super_seal_admission_deferred_unverifiable_total.load(Relaxed), 0);
+        // Without the boundary seal the same shape is unverifiable → DEFER.
+        let zone2 = crate::ZoneId::new("/zone/c3-straddle-2");
+        state.epoch.write_recover().latest_epoch.insert(zone2.clone(), end);
+        let ss2 = mint(&state, &zone2, 1, end, &hashes(1, end, 0), [0u8; 32]);
+        let err = insert_record_synced(&state, ss2.clone())
+            .await
+            .expect_err("no A4, no A5 → defer");
+        assert!(matches!(err, ElaraError::TransientReject(_)), "{err}");
+        assert!(!stored(&state, &ss2.id));
+        assert_eq!(pointer_end(&state, &zone2), None);
+        assert_eq!(state.super_seal_admission_deferred_unverifiable_total.load(Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn c3_attributed_root_mismatch_trips_the_canary() {
+        let state = build_test_node_state();
+        let zone = crate::ZoneId::new("/zone/c3-mismatch");
+        let end = SUPER_SEAL_INTERVAL;
+        register_window(&state, &zone, 1, end, 0); // complete RAM window
+        let _boundary = store_boundary_seal(&state, &zone, end); // A5 attributes to this node
+        let ss = mint(&state, &zone, 1, end, &hashes(1, end, 1), [0u8; 32]); // salt 1: wrong root
+        let err = insert_record_synced(&state, ss.clone())
+            .await
+            .expect_err("attributed mismatch must defer");
+        assert!(matches!(err, ElaraError::TransientReject(_)), "{err}");
+        assert!(!stored(&state, &ss.id));
+        assert_eq!(state.super_seal_admission_root_mismatch_total.load(Relaxed), 1);
+        assert_eq!(state.super_seal_admission_deferred_unverifiable_total.load(Relaxed), 0);
+        assert_eq!(state.super_seal_admission_accepted_total.load(Relaxed), 0);
+        assert_eq!(pointer_end(&state, &zone), None);
+    }
+
+    #[tokio::test]
+    async fn c3_unattributed_root_mismatch_defers_without_canary() {
+        let state = build_test_node_state();
+        let zone = crate::ZoneId::new("/zone/c3-mismatch-unattributed");
+        let end = SUPER_SEAL_INTERVAL;
+        register_window(&state, &zone, 1, end, 0);
+        let ss = mint(&state, &zone, 1, end, &hashes(1, end, 1), [0u8; 32]);
+        let err = insert_record_synced(&state, ss.clone())
+            .await
+            .expect_err("unattributed mismatch must defer");
+        assert!(matches!(err, ElaraError::TransientReject(_)), "{err}");
+        assert!(!stored(&state, &ss.id));
+        assert_eq!(state.super_seal_admission_root_mismatch_total.load(Relaxed), 0);
+        assert_eq!(state.super_seal_admission_deferred_unverifiable_total.load(Relaxed), 1);
+        assert_eq!(pointer_end(&state, &zone), None);
+    }
+
+    #[tokio::test]
+    async fn c3_light_profile_defers_never_rejects() {
+        let state = build_test_node_state_with(|cfg| cfg.node_profile = "light".into());
+        let zone = crate::ZoneId::new("/zone/c3-light");
+        let end = SUPER_SEAL_INTERVAL;
+        register_window(&state, &zone, 1, end, 0);
+        let ss = mint(&state, &zone, 1, end, &hashes(1, end, 0), [0u8; 32]);
+        let err = insert_record_synced(&state, ss.clone())
+            .await
+            .expect_err("light never admits");
+        assert!(matches!(err, ElaraError::TransientReject(_)), "{err}");
+        assert!(!stored(&state, &ss.id));
+        assert_eq!(state.super_seal_admission_deferred_unverifiable_total.load(Relaxed), 1);
+        assert_eq!(state.super_seal_admission_rejected_shape_total.load(Relaxed), 0);
+        assert_eq!(pointer_end(&state, &zone), None);
+    }
+
+    #[tokio::test]
+    async fn c3_historical_range_admits_without_derivation() {
+        let state = build_test_node_state();
+        let zone = crate::ZoneId::new("/zone/c3-historical");
+        let end = SUPER_SEAL_INTERVAL;
+        register_window(&state, &zone, 1, 2 * end, 0); // tip 128
+        assert!(state.epoch.write_recover().register_super_seal(
+            zone.clone(),
+            2 * end,
+            "ss:128".into(),
+            [7u8; 32],
+            [0u8; 32]
+        ));
+        // The pointer already covers [1..=64]: admitted even with a foreign root.
+        let ss = mint(&state, &zone, 1, end, &hashes(1, end, 1), [0u8; 32]);
+        let id = ss.id.clone();
+        insert_record_synced(&state, ss).await.expect("historical admits");
+        assert!(stored(&state, &id));
+        assert_eq!(state.super_seal_admission_accepted_total.load(Relaxed), 1);
+        assert_eq!(state.super_seal_admission_root_mismatch_total.load(Relaxed), 0);
+        assert_eq!(pointer_end(&state, &zone), Some(2 * end), "pointer never regresses");
+        assert_eq!(state.super_seals_minted_total.load(Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn c3_chain_link_mismatch_is_informational() {
+        let state = build_test_node_state();
+        let zone = crate::ZoneId::new("/zone/c3-chain");
+        let end = SUPER_SEAL_INTERVAL;
+        register_window(&state, &zone, 1, 2 * end, 0); // tip 128, window [65..=128]
+        assert!(state.epoch.write_recover().register_super_seal(
+            zone.clone(),
+            end,
+            "ss:64".into(),
+            [7u8; 32],
+            [0u8; 32]
+        ));
+        // Correct root over [65..=128] (A4 PASS), but prev hash != pointer hash.
+        let ss = mint(&state, &zone, end + 1, 2 * end, &hashes(end + 1, 2 * end, 0), [9u8; 32]);
+        let id = ss.id.clone();
+        insert_record_synced(&state, ss).await.expect("A4 pass admits");
+        assert!(stored(&state, &id));
+        assert_eq!(state.super_seal_admission_accepted_total.load(Relaxed), 1);
+        assert_eq!(state.super_seal_admission_chain_link_mismatch_total.load(Relaxed), 1);
+        assert_eq!(state.super_seal_admission_root_mismatch_total.load(Relaxed), 0);
+        assert_eq!(pointer_end(&state, &zone), Some(2 * end));
+        assert_eq!(state.super_seals_minted_total.load(Relaxed), 1);
+    }
+}
+
+/// R1-X1-V-T — ingest-level dispatch pins for the self-declared-anchor
+/// fast-forward gate. The verify-layer behaviour (that a non-genesis
+/// fast-forward seal from an anchor our staked set does not admit yields the
+/// `stake-unverifiable` marker) is pinned in `epoch.rs`; these tests pin the
+/// INGEST caller — that `insert_record_synced` maps that marker to the
+/// `epoch_seal_fastforward_unstaked_deferred_total` counter, PARKS the seal
+/// (retryable `Err`, never applied), and does NOT let the VRF deferral arm
+/// shadow it. The counter delta is the reach-proof: it can only move at the
+/// stake arm inside `insert_record_inner`, so a seal rejected at any earlier
+/// ingest gate fails these tests loudly instead of passing for the wrong reason.
+#[cfg(test)]
+mod r1x1v_ingest_fastforward_tests {
+    use super::insert_record_synced;
+    use crate::accounting::types::creator_identity_hash;
+    use crate::crypto::vrf::{VrfPublicKey, VrfSecretKey};
+    use crate::identity::{CryptoProfile, EntityType, Identity};
+    use crate::network::epoch::{create_epoch_seal, EpochState};
+    use crate::network::state::{build_test_node_state, NodeState};
+    use crate::network::vrf_registry::VrfRegistration;
+    use crate::record::ValidationRecord;
+    use std::sync::atomic::Ordering::Relaxed;
+    use std::sync::Arc;
+
+    /// Well above a fresh node's tip (0) → the seal lands on the catch-up
+    /// fast-forward arm, the only arm that can raise `latest_epoch`.
+    const FF_EPOCH: u64 = 5000;
+
+    /// Build a VRF-authored, NON-genesis fast-forward seal by a foreign anchor.
+    /// The creator is a fresh random identity, so its hash is never the test
+    /// node's synthetic genesis authority — the seal takes the non-genesis path.
+    /// Does NOT register the VRF key (each test decides), so both dispatch arms
+    /// can be exercised from one fixture.
+    fn build_foreign_ff_seal(state: &Arc<NodeState>) -> (ValidationRecord, VrfPublicKey) {
+        let foreign = Identity::generate(EntityType::Device, CryptoProfile::ProfileB)
+            .expect("generate foreign anchor identity");
+        let zone = crate::ZoneId::from_legacy(0);
+        let vrf_sk = VrfSecretKey::generate().unwrap();
+        let vrf_pk = vrf_sk.public_key();
+        // Seed the tip to FF_EPOCH-1 so `create_epoch_seal` emits AND SIGNS
+        // epoch FF_EPOCH in a single pass. No post-sign metadata mutation — that
+        // would invalidate the Dilithium3 signature the ingest pipeline checks
+        // BEFORE the seal-verify block (the verify-layer fixtures in epoch.rs can
+        // mutate freely only because they call verify_* directly, past that gate).
+        // No seal is registered, so prev_seal_hash stays all-zero — the exact
+        // beacon domain the verifier re-derives for a fast-forward on a fresh
+        // node, so the baked-in VRF verifies.
+        let mut es = EpochState::new();
+        es.latest_epoch.insert(zone.clone(), FF_EPOCH - 1);
+        let (record, _) = create_epoch_seal(
+            &foreign,
+            &*state.rocks,
+            &es,
+            zone.clone(),
+            50.0,
+            200.0,
+            Some(&vrf_sk),
+            None,
+        )
+        .expect("build fast-forward seal");
+        (record, vrf_pk)
+    }
+
+    /// Register the anchor's FULL VRF key on `state` so the ingest registry
+    /// lookup returns a verifiable key — the B7 VRF gate passes, exposing the
+    /// R1-X1-V staked-anchor gate underneath it.
+    fn register_full_vrf(state: &Arc<NodeState>, creator: &str, vrf_pk: &VrfPublicKey) {
+        let mut reg = state.vrf_registry.write().unwrap();
+        reg.register(
+            creator,
+            VrfRegistration {
+                vrf_public_key_hex: hex::encode(vrf_pk.as_bytes()),
+                vrf_full_public_key_hex: hex::encode(vrf_pk.full_pk()),
+                registered_at: 1_700_000_000.0,
+                record_id: "r1x1v-test-vrf-reg".into(),
+                node_type: "anchor".into(),
+            },
+        );
+    }
+
+    fn zone_tip(state: &Arc<NodeState>, zone: &crate::ZoneId) -> Option<u64> {
+        state
+            .epoch
+            .read()
+            .unwrap()
+            .latest_epoch
+            .get(zone)
+            .copied()
+    }
+
+    /// VRF-verifiable non-genesis fast-forward seal from an anchor the (empty)
+    /// staked set does not admit → PARKED and counted on the stake arm; the VRF
+    /// arm must not shadow it, and the zone tip must not fast-forward.
+    #[tokio::test]
+    async fn r1x1v_ingest_unstaked_fastforward_is_parked_and_counted() {
+        let state = build_test_node_state();
+        let zone = crate::ZoneId::from_legacy(0);
+        let (seal, vrf_pk) = build_foreign_ff_seal(&state);
+        register_full_vrf(&state, &creator_identity_hash(&seal), &vrf_pk);
+
+        let ff_before = state
+            .epoch_seal_fastforward_unstaked_deferred_total
+            .load(Relaxed);
+        let vrf_before = state
+            .epoch_seal_fastforward_vrf_deferred_total
+            .load(Relaxed);
+
+        let msg = insert_record_synced(&state, seal)
+            .await
+            .expect_err("unstaked self-declared anchor fast-forward must be parked, never applied")
+            .to_string();
+
+        // Parked = retryable, so an honest joiner self-heals once its ledger view
+        // catches up; a forged seal simply never verifies and ages out.
+        assert!(
+            crate::network::gossip::is_retryable_ingest_rejection(&msg),
+            "R1-X1-V park must classify retryable: {msg}"
+        );
+        // The STAKE arm fired (its counter is the reach-proof) ...
+        assert_eq!(
+            state
+                .epoch_seal_fastforward_unstaked_deferred_total
+                .load(Relaxed),
+            ff_before + 1,
+            "the staked-anchor fast-forward gate must have deferred this seal: {msg}"
+        );
+        // ... and the VRF arm did NOT shadow it (the VRF key was verifiable).
+        assert_eq!(
+            state
+                .epoch_seal_fastforward_vrf_deferred_total
+                .load(Relaxed),
+            vrf_before,
+            "VRF deferral arm must not fire when the key is registered: {msg}"
+        );
+        // Not applied: the tip never fast-forwarded to the seal's claimed epoch.
+        assert!(
+            zone_tip(&state, &zone).is_none_or(|t| t < FF_EPOCH),
+            "parked fast-forward must not raise the zone tip"
+        );
+    }
+
+    /// Same fixture WITHOUT registering the VRF key: the ingest dispatch must
+    /// route to the VRF deferral arm, not the stake arm. Pins that the two arms
+    /// key on disjoint markers so neither can be silently reordered into the
+    /// other's path (the ingest-level companion to the verify-level ordering pin
+    /// `r1x1v_b7_vrf_deferral_precedes_stake_gate`).
+    #[tokio::test]
+    async fn r1x1v_ingest_unregistered_vrf_uses_vrf_arm_not_stake() {
+        let state = build_test_node_state();
+        let (seal, _vrf_pk) = build_foreign_ff_seal(&state);
+        // deliberately NOT registering the VRF key
+
+        let ff_before = state
+            .epoch_seal_fastforward_unstaked_deferred_total
+            .load(Relaxed);
+        let vrf_before = state
+            .epoch_seal_fastforward_vrf_deferred_total
+            .load(Relaxed);
+
+        let msg = insert_record_synced(&state, seal)
+            .await
+            .expect_err("unregistered-VRF fast-forward must be parked")
+            .to_string();
+
+        assert!(
+            crate::network::gossip::is_retryable_ingest_rejection(&msg),
+            "B7 VRF park must classify retryable: {msg}"
+        );
+        assert_eq!(
+            state
+                .epoch_seal_fastforward_vrf_deferred_total
+                .load(Relaxed),
+            vrf_before + 1,
+            "the VRF deferral arm must fire when no key is registered: {msg}"
+        );
+        assert_eq!(
+            state
+                .epoch_seal_fastforward_unstaked_deferred_total
+                .load(Relaxed),
+            ff_before,
+            "the stake arm must not fire on the VRF-unverifiable path: {msg}"
+        );
     }
 }

@@ -1,8 +1,8 @@
-# Give YOUR agent a receipted mandate — the issuer quickstart
+# Give YOUR agent a proof-backed mandate — the issuer quickstart
 
 Fifteen minutes, one machine, no permission from anyone. At the end you have:
 **your own chain**, **your own agent identity**, a **signed, scoped, revocable
-mandate** from you to it, **receipted acts** under that mandate, a working
+mandate** from you to it, **proven acts** under that mandate, a working
 **kill switch**, and offline verification of all of it — with post-quantum
 signatures throughout. Nothing here talks to Elara's own network: your chain
 is yours.
@@ -94,7 +94,7 @@ default network into the record — your chain answers `network_mismatch` and
 refuses it. That refusal is a feature (it is what keeps two chains' records
 from ever mixing), but the error message is all you get.
 
-## 4. The agent acts — every act a receipt
+## 4. The agent acts — every act a proof
 
 Signed with the **agent's** key, carrying the mandate reference:
 
