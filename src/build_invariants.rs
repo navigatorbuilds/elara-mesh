@@ -367,6 +367,44 @@ mod refinement_map {
             .collect()
     }
 
+    /// Is this line CODE, for diagnostic purposes — i.e. not a comment and not a
+    /// bare `use` import? Both mention a symbol without being the mechanism a
+    /// citation points at.
+    fn is_code_mention(line: &str) -> bool {
+        let t = line.trim_start();
+        !(t.starts_with("//")
+            || t.starts_with("/*")
+            || t.starts_with('*')
+            || t.starts_with("use "))
+    }
+
+    /// Nearest mention of `word` to `cited`, PREFERRING code lines.
+    ///
+    /// Returns `(line, was_code)`. The drift diagnostic used to report the plain
+    /// nearest mention, which twice on 2026-09-06 named the wrong line for
+    /// `try_sign_xzone_abort`: a `use` import 17 lines from the citation won over
+    /// the actual call site 38 lines away, and on the earlier hit a comment won.
+    /// Following the hint verbatim re-breaks the test, so the hint must point at
+    /// code whenever code exists. Verification semantics are untouched — this
+    /// only changes what the failure message names.
+    pub fn nearest_mention_preferring_code(
+        lines: &[&str],
+        word: &str,
+        cited: usize,
+    ) -> Option<(usize, bool)> {
+        let all = mentions_in(lines, word, 1, lines.len());
+        let code: Vec<usize> = all
+            .iter()
+            .copied()
+            .filter(|&m| is_code_mention(lines[m - 1]))
+            .collect();
+        let was_code = !code.is_empty();
+        let pool = if was_code { &code } else { &all };
+        pool.iter()
+            .min_by_key(|&&m| m.abs_diff(cited))
+            .map(|&m| (m, was_code))
+    }
+
     /// Drop `( … )` groups (nesting-aware): the doc's "(was `:1635`, +144)" notes.
     pub fn strip_parens(s: &str) -> String {
         let mut depth = 0usize;
@@ -702,13 +740,18 @@ mod refinement_map {
                 }
                 let mut nearest: Vec<String> = Vec::new();
                 for t in &tokens {
-                    let all = mentions_in(&refs, t, 1, refs.len());
-                    if let Some(best) = all.iter().min_by_key(|&&m| m.abs_diff(lo)) {
+                    if let Some((best, was_code)) =
+                        nearest_mention_preferring_code(&refs, t, lo)
+                    {
                         let defs = fn_def_lines(&refs, t);
-                        let tag = if defs.is_empty() {
-                            format!("{t} nearest mention {rel}:{best}")
-                        } else {
+                        let tag = if !defs.is_empty() {
                             format!("{t} defined at {rel}:{}", defs[0])
+                        } else if was_code {
+                            format!("{t} nearest CODE mention {rel}:{best}")
+                        } else {
+                            // Say so rather than presenting a comment/import as
+                            // if it were the site — the reader must not copy it.
+                            format!("{t} appears only in comments/imports, nearest {rel}:{best}")
                         };
                         nearest.push(tag);
                     }
@@ -738,6 +781,49 @@ mod refinement_map {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        /// The drift hint must name a CODE line. Reproduces the exact shape that
+        /// misled twice on 2026-09-06: a `use` import sits CLOSER to the stale
+        /// citation than the real call site, so plain nearest-mention picked the
+        /// import — and copying that line into the spec re-breaks the test.
+        #[test]
+        fn nearest_mention_prefers_code_over_imports_and_comments() {
+            let lines = vec![
+                "use crate::x::{try_sign_xzone_abort, TransferStatus};", // 1 — import
+                "fn unrelated() {}",                                     // 2
+                "    // try_sign_xzone_abort refuses unless its proof holds",  // 3 — comment
+                "fn other() {}",                                         // 4
+                "                try_sign_xzone_abort(&state, &t).await;", // 5 — the CALL
+            ];
+            let refs: Vec<&str> = lines.clone();
+
+            // Cited line 2: the import (1) is 1 away, the call (5) is 3 away.
+            // Plain nearest would say 1; we must say 5.
+            let (line, was_code) =
+                nearest_mention_preferring_code(&refs, "try_sign_xzone_abort", 2)
+                    .expect("token appears in the fixture");
+            assert_eq!(line, 5, "must name the call site, not the closer `use` import");
+            assert!(was_code);
+
+            // Pin the DIVERGENCE, so this test cannot pass under the old logic:
+            // plain nearest-mention answers 1 (the import) for the same input.
+            let plain = mentions_in(&refs, "try_sign_xzone_abort", 1, refs.len());
+            assert_eq!(plain, vec![1, 3, 5], "fixture shape");
+            assert_eq!(
+                plain.iter().min_by_key(|&&m| m.abs_diff(2)).copied(),
+                Some(1),
+                "the superseded logic picked the import — that is the bug this fixes"
+            );
+
+            // A token that exists ONLY in a comment is reported as such, not
+            // dressed up as a code site.
+            let only_comment = vec!["    // mentions ghost_symbol here", "fn a() {}"];
+            let refs2: Vec<&str> = only_comment.clone();
+            let (l2, was_code2) = nearest_mention_preferring_code(&refs2, "ghost_symbol", 2)
+                .expect("token appears in a comment");
+            assert_eq!(l2, 1);
+            assert!(!was_code2, "comment-only must be flagged, not silently reported");
+        }
 
         #[test]
         fn refinement_map_parsers_self_test() {

@@ -514,8 +514,20 @@ pub(crate) fn seal_reject_probe(rec: &ValidationRecord) -> SealRejectProbe {
 ///   (bloom-folded; never re-served on delta paths);
 /// - everything else — retryable AND non-retryable/malformed alike — →
 ///   bounded attempt-capped park (ages out at GOSSIP_RETRY_MAX_ATTEMPTS;
-///   a distinct-id flood evicts oldest FIFO entries, which is a latency
-///   degrade, not a loss: pull cursors re-offer evictees);
+///   a distinct-id flood evicts oldest FIFO entries). **An eviction is a
+///   latency degrade, not a loss — but NOT because "pull cursors re-offer
+///   evictees", which this comment used to claim and which is false.**
+///   `retry_parked_records`' own note says it outright: a parked id's
+///   timestamp is below the cursor by then, so the normal pull window
+///   "will never re-offer them". What actually re-delivers an evictee:
+///   (a) the pushing peer re-announcing its OWN recent records inside
+///   `PUSH_WINDOW_SECS` (600 s); (b) `delta_sync`, bounded by
+///   `delta_sync_since_floor` (24 h) with the server scan capped at
+///   `MAX_SCAN` = 50_000 records per request; (c) the cycling `full_pull`
+///   sweep, whose cursor is reset to the sweep floor by
+///   `apply_sweep_tail_reset` and forced by `backstop_force_full` once per
+///   boot and every Nth persisted cycle. The degrade is bounded by THOSE
+///   windows, not by a cursor that never comes back;
 /// - super-seals (R1-X1 Commit 3) → their OWN bounded lane (S1), never
 ///   stale-declined: a transient A3/A4/A5 defer is re-offered until the tip
 ///   catches up; a permanent shape reject is embargoed by the drain (B5).
@@ -540,6 +552,9 @@ pub(crate) fn dispose_seal_ingest_failure_probed(
         // re-fail arm embargoes it in `gossip_rejected` (B5).
         if attempts < GOSSIP_RETRY_MAX_ATTEMPTS {
             park_retryable_in_lane(state, ParkLane::SuperSeal, &probe.id, attempts);
+        } else {
+            // V-Q follow-up: designed age-out, previously a silent exit.
+            state.gossip_park_aged_out_total.fetch_add(1, Relaxed);
         }
         return true;
     }
@@ -562,9 +577,12 @@ pub(crate) fn dispose_seal_ingest_failure_probed(
             .insert(probe.id.clone());
     } else if attempts < GOSSIP_RETRY_MAX_ATTEMPTS {
         park_retryable_with_attempts(state, &probe.id, attempts);
+    } else {
+        // attempts >= cap: drop without any caching — the invariant holds and a
+        // future natural re-offer restarts the (cheap, fail-fast) cycle.
+        // V-Q follow-up: metered, was a silent fall-through.
+        state.gossip_park_aged_out_total.fetch_add(1, Relaxed);
     }
-    // attempts >= cap: drop without any caching — the invariant holds and a
-    // future natural re-offer restarts the (cheap, fail-fast) cycle.
     true
 }
 
@@ -598,8 +616,14 @@ pub(crate) const GOSSIP_RETRY_MAX_ATTEMPTS: u8 = 20;
 const GOSSIP_RETRY_DRAIN_PER_CYCLE: usize = 16;
 /// R1-X1 Commit 3 (S1): super-seal lane cap. One super-seal per zone per 64
 /// epochs, so 256 parked ids cover a 4-zone testnet's whole history or a
-/// 256-zone burst of ahead-of-tip arrivals; FIFO-evicted beyond (pull cursors
-/// re-offer evictees — a super-seal is re-offered forever, never declined).
+/// 256-zone burst of ahead-of-tip arrivals; FIFO-evicted beyond. A super-seal
+/// is never stale-declined, so it stays permanently ELIGIBLE — but the old
+/// "pull cursors re-offer evictees — re-offered forever" was wrong about the
+/// mechanism: `retry_parked_records` states the timestamp_pull window will
+/// never re-offer a parked id. An evicted super-seal returns only by the three
+/// paths documented on `dispose_seal_ingest_failure_probed` above (peer push
+/// inside `PUSH_WINDOW_SECS`, `delta_sync`'s 24 h floor, the cycling
+/// `full_pull` sweep). Eligible forever, re-offered only by those.
 pub(crate) const SUPER_SEAL_RETRY_CAP: usize = 256;
 /// Super-seals re-fetched per timestamp_pull cycle. Each re-fetch may cost up
 /// to 64 rocks reads on the A4 derivation, so the drain is deliberately
@@ -704,6 +728,10 @@ async fn retry_parked_lane(state: &Arc<NodeState>, base_url: &str, lane: ParkLan
         let mut q = lane.queue(state).lock_recover();
         for entry in entries {
             if q.iter().any(|(id, _)| id == &entry.0) {
+                // V-Q follow-up: the id is already parked — meter the skip so a
+                // drain that appears to lose entries can be told apart from one
+                // that merely converged on ids another path re-parked.
+                state.gossip_park_dedup_skipped_total.fetch_add(1, Relaxed);
                 continue;
             }
             if q.len() < lane.cap() {
@@ -738,6 +766,9 @@ async fn retry_parked_lane(state: &Arc<NodeState>, base_url: &str, lane: ParkLan
             // This peer doesn't have it — retry later (possibly via another peer).
             if attempts + 1 < GOSSIP_RETRY_MAX_ATTEMPTS {
                 park_retryable_in_lane(state, lane, &id, attempts + 1);
+            } else {
+                // V-Q follow-up: designed age-out, previously a silent exit.
+                state.gossip_park_aged_out_total.fetch_add(1, Relaxed);
             }
             continue;
         };
@@ -767,6 +798,9 @@ async fn retry_parked_lane(state: &Arc<NodeState>, base_url: &str, lane: ParkLan
                 } else if is_retryable_ingest_rejection(&err_str) {
                     if attempts + 1 < GOSSIP_RETRY_MAX_ATTEMPTS {
                         park_retryable_in_lane(state, lane, &id, attempts + 1);
+                    } else {
+                        // V-Q follow-up: designed age-out, previously a silent exit.
+                        state.gossip_park_aged_out_total.fetch_add(1, Relaxed);
                     }
                 } else {
                     state.gossip_rejected.lock_recover().insert(id);
@@ -6482,6 +6516,218 @@ mod tests {
             .iter()
             .any(|(id, _)| id == &zt.id));
         assert!(!state.gossip_rejected.lock_recover().contains(&zt.id));
+    }
+
+    /// R1 (V-Q §8.1): the creator is unauthenticated at park time — any
+    /// per-creator lane policy is keyed on an attacker-chosen string; this test
+    /// pins the premise.
+    #[test]
+    fn r1x1q_park_creator_is_unauthenticated() {
+        let state = crate::network::state::build_test_node_state();
+        state
+            .epoch
+            .write()
+            .unwrap()
+            .latest_epoch
+            .insert(crate::ZoneId::new("z0"), 500);
+
+        // A fresh-but-failing seal (epoch = local tip + 1, so NOT stale) that
+        // claims a DIFFERENT identity's public key and carries a garbage
+        // signature. Nothing on the park path verifies either field.
+        let mut forged = seal_meta_record("seal", 501, "z0");
+        // Deliberately NOT a minted Identity: the whole premise is that nothing
+        // on the park path reads this field, so whatever sits here is only ever
+        // an attacker-chosen string. Asserted distinct from the local key so the
+        // fixture cannot pass by accident.
+        let impersonated = vec![0x5Au8; 1952];
+        assert_ne!(
+            impersonated, state.identity.public_key,
+            "fixture must differ from the local node's key or it proves nothing"
+        );
+        forged.creator_public_key = impersonated;
+        forged.signature = Some(vec![0xAA; 64]);
+
+        let evicted_before = state
+            .gossip_park_evicted_total
+            .load(std::sync::atomic::Ordering::Relaxed);
+
+        // The real reject arm: dispose is what every ingest-reject site calls.
+        assert!(dispose_seal_ingest_failure(&state, &forged, 0));
+
+        // Parked with attempts 0 — exactly as an honest first-hop reject would be.
+        assert!(
+            state
+                .gossip_retry
+                .lock_recover()
+                .iter()
+                .any(|(id, a)| id == &forged.id && *a == 0),
+            "a forged-creator seal parks identically to an honest one, attempts 0"
+        );
+        // Never embargoed, never stale-declined (8b invariant holds regardless).
+        assert!(!state.gossip_rejected.lock_recover().contains(&forged.id));
+        assert!(!state
+            .declined_seal_ids
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(&forged.id));
+        // No cap pressure from a single park.
+        assert_eq!(
+            state
+                .gossip_park_evicted_total
+                .load(std::sync::atomic::Ordering::Relaxed),
+            evicted_before,
+            "one park must not evict"
+        );
+    }
+
+    /// V-Q §8.4 R-Q1b — the honest cost of Option 4, pinned. Eviction is
+    /// normally "a latency degrade, not a loss" because the three re-delivery
+    /// paths can bring the id back. But re-delivery is not instant, and once the
+    /// local tip has moved more than `STALE_EPOCH_SEAL_GAP` past the seal's
+    /// epoch, the returning record is judged STALE at disposition time and
+    /// declined instead of re-parked. So beyond the 100-epoch cliff a park-lane
+    /// eviction is permanent for that node — the seal never re-enters the lane.
+    /// This is the accepted cost of taking Option 4 (no per-creator budget), not
+    /// a defect; it is pinned so nobody "discovers" it later as a regression.
+    #[test]
+    fn r1x1q_evicted_seal_past_stale_gap_is_declined_not_parked() {
+        let state = crate::network::state::build_test_node_state();
+        let zone = "z0";
+        let start_tip = 500u64;
+        state
+            .epoch
+            .write()
+            .unwrap()
+            .latest_epoch
+            .insert(crate::ZoneId::new(zone), start_tip);
+
+        // (1) One honest seal at tip+1 — not stale, so it parks.
+        let seal_epoch = start_tip + 1;
+        let honest = seal_meta_record("seal", seal_epoch, zone);
+        assert!(dispose_seal_ingest_failure(&state, &honest, 0));
+        assert!(
+            state
+                .gossip_retry
+                .lock_recover()
+                .iter()
+                .any(|(id, _)| id == &honest.id),
+            "the honest seal must park first so it is the FIFO front"
+        );
+
+        let evicted_before = state
+            .gossip_park_evicted_total
+            .load(std::sync::atomic::Ordering::Relaxed);
+
+        // (2) Fill the seal lane to cap with distinct ids. The honest id is at
+        // the front, so the park that overflows the cap evicts exactly it.
+        // GOSSIP_RETRY_CAP fillers: the first CAP-1 fill the lane, the last
+        // one triggers the single pop_front.
+        for _ in 0..GOSSIP_RETRY_CAP {
+            let filler = seal_meta_record("seal", seal_epoch, zone);
+            assert!(dispose_seal_ingest_failure(&state, &filler, 0));
+        }
+        assert_eq!(
+            state
+                .gossip_park_evicted_total
+                .load(std::sync::atomic::Ordering::Relaxed),
+            evicted_before + 1,
+            "exactly one eviction: the honest id at the FIFO front"
+        );
+        assert!(
+            !state
+                .gossip_retry
+                .lock_recover()
+                .iter()
+                .any(|(id, _)| id == &honest.id),
+            "the honest id must be gone from the lane after eviction"
+        );
+
+        // (3) The tip moves past the cliff, then the SAME record is re-offered
+        // through the same pull-path arm. seal + GAP < local ⇒ stale.
+        let past_cliff = seal_epoch + STALE_EPOCH_SEAL_GAP + 1;
+        assert!(
+            is_stale_epoch_seal(past_cliff, seal_epoch),
+            "fixture must actually be past the cliff or the test proves nothing"
+        );
+        state
+            .epoch
+            .write()
+            .unwrap()
+            .latest_epoch
+            .insert(crate::ZoneId::new(zone), past_cliff);
+
+        assert!(dispose_seal_ingest_failure(&state, &honest, 0));
+        assert!(
+            state
+                .declined_seal_ids
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains(&honest.id),
+            "past the cliff the re-offered seal is DECLINED"
+        );
+        assert!(
+            !state
+                .gossip_retry
+                .lock_recover()
+                .iter()
+                .any(|(id, _)| id == &honest.id),
+            "never re-parked — this is what makes the eviction permanent"
+        );
+        assert!(
+            !state.gossip_rejected.lock_recover().contains(&honest.id),
+            "8b invariant: a stale seal is declined, never embargoed"
+        );
+    }
+
+    /// V-Q follow-up: the designed age-out is now metered rather than silent.
+    #[test]
+    fn r1x1q_park_aged_out_counter_moves_at_the_attempt_cap() {
+        let state = crate::network::state::build_test_node_state();
+        state
+            .epoch
+            .write()
+            .unwrap()
+            .latest_epoch
+            .insert(crate::ZoneId::new("z0"), 500);
+
+        let before = state
+            .gossip_park_aged_out_total
+            .load(std::sync::atomic::Ordering::Relaxed);
+
+        // Fresh (not stale) seal presented AT the attempt cap → aged out, not parked.
+        let aged = seal_meta_record("seal", 501, "z0");
+        assert!(dispose_seal_ingest_failure(
+            &state,
+            &aged,
+            GOSSIP_RETRY_MAX_ATTEMPTS
+        ));
+        assert!(!state
+            .gossip_retry
+            .lock_recover()
+            .iter()
+            .any(|(id, _)| id == &aged.id));
+        assert_eq!(
+            state
+                .gossip_park_aged_out_total
+                .load(std::sync::atomic::Ordering::Relaxed),
+            before + 1,
+            "the seal-lane fall-through age-out must be counted"
+        );
+
+        // Same at the super-seal lane's dispose exit.
+        let ss = seal_meta_record(crate::network::epoch::EPOCH_OP_SUPER_SEAL, 501, "z0");
+        assert!(dispose_seal_ingest_failure(
+            &state,
+            &ss,
+            GOSSIP_RETRY_MAX_ATTEMPTS
+        ));
+        assert_eq!(
+            state
+                .gossip_park_aged_out_total
+                .load(std::sync::atomic::Ordering::Relaxed),
+            before + 2,
+            "the super-seal dispose age-out must be counted too"
+        );
     }
 
     // ─── empty-PeerTable WARN throttle ─────────────────────────────────

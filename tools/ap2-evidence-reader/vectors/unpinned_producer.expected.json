@@ -1,0 +1,30 @@
+{
+ "description": "Pack signed by a DIFFERENT (cryptographically valid) identity, verified against the pinned trust set with NO require flags: an embedded key proves consistency, never authenticity — the unpinned signature must reject on its own.",
+ "normative": {
+  "bindings_ok": true,
+  "digest_ok": true,
+  "policy_ok": true,
+  "pq_protected": false,
+  "producer_ok": true,
+  "producer_present": true,
+  "producer_trusted": false,
+  "rfc3161_claimed": false,
+  "rfc3161_verified": null,
+  "self_asserted_only": true,
+  "valid": false
+ },
+ "policy": {
+  "require_anchor": false,
+  "require_pq": false,
+  "require_producer": false,
+  "trusted_producer_keys": {
+   "ed25519": [
+    "VbaYMvTokD6ZjtyfTLE2dNKrTlwYIt6m1lvwDcmZKg0="
+   ],
+   "ml-dsa-65": [
+    "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"
+   ]
+  }
+ },
+ "vector": "unpinned_producer"
+}

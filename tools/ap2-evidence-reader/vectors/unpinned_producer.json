@@ -1,0 +1,115 @@
+{
+ "artifacts": [
+  {
+   "header": {
+    "alg": "ES256",
+    "jwk": {
+     "crv": "P-256",
+     "kty": "EC",
+     "x": "idUuH6Unwrjceo6t3Vx2Ro0RMKl-6NsxgWyL5tZGSVY",
+     "y": "jhLMbMF2-VQYibXTVjPqk4Qnkic3la-hK5HqN64zX80"
+    },
+    "typ": "ap2-mandate+sd-jwt"
+   },
+   "kb_jwt": {
+    "present": false
+   },
+   "key": {
+    "jwk": {
+     "crv": "P-256",
+     "kty": "EC",
+     "x": "idUuH6Unwrjceo6t3Vx2Ro0RMKl-6NsxgWyL5tZGSVY",
+     "y": "jhLMbMF2-VQYibXTVjPqk4Qnkic3la-hK5HqN64zX80"
+    },
+    "note": "key embedded in the protected header (self-asserted)",
+    "provenance_class": "jwk_header"
+   },
+   "name": "intent",
+   "resolved_claims": {
+    "iss": "user-wallet",
+    "mandate_type": "intent",
+    "max_amount": "150.00 EUR",
+    "merchant_scope": "books"
+   },
+   "sd_jwt_compact": "eyJhbGciOiAiRVMyNTYiLCAidHlwIjogImFwMi1tYW5kYXRlK3NkLWp3dCIsICJqd2siOiB7Imt0eSI6ICJFQyIsICJjcnYiOiAiUC0yNTYiLCAieCI6ICJpZFV1SDZVbndyamNlbzZ0M1Z4MlJvMFJNS2wtNk5zeGdXeUw1dFpHU1ZZIiwgInkiOiAiamhMTWJNRjItVlFZaWJYVFZqUHFrNFFua2ljM2xhLWhLNUhxTjY0elg4MCJ9fQ.eyJpc3MiOiAidXNlci13YWxsZXQiLCAibWFuZGF0ZV90eXBlIjogImludGVudCIsICJfc2QiOiBbIlpXT05hT1R4QklSaVlXZnQweUV3YXplNzBKZVprS0pkcEFkY1hzZVotZ3ciLCAiZ1dPb3hSRVNVUURnVEU3RTVZVHRYNmtHTndua3pvbFdqaU1NRzQ5djRvMCJdLCAiX3NkX2FsZyI6ICJzaGEtMjU2In0.zKgcMuXDJSW8O2MvVxRFg5NSSklOiv1wlw72EeTsKfeXY8e6_0aejC70eMboxBpGo1qRQB3vmS0bBfnfBvxEGA~WyJzYWx0MCIsICJtYXhfYW1vdW50IiwgIjE1MC4wMCBFVVIiXQ~WyJzYWx0MSIsICJtZXJjaGFudF9zY29wZSIsICJib29rcyJd~",
+   "verified_at_build": {
+    "disclosures_ok": true,
+    "signature_ok": true
+   }
+  },
+  {
+   "header": {
+    "alg": "ES256",
+    "jwk": {
+     "crv": "P-256",
+     "kty": "EC",
+     "x": "idUuH6Unwrjceo6t3Vx2Ro0RMKl-6NsxgWyL5tZGSVY",
+     "y": "jhLMbMF2-VQYibXTVjPqk4Qnkic3la-hK5HqN64zX80"
+    },
+    "typ": "ap2-mandate+sd-jwt"
+   },
+   "kb_jwt": {
+    "present": false
+   },
+   "key": {
+    "jwk": {
+     "crv": "P-256",
+     "kty": "EC",
+     "x": "idUuH6Unwrjceo6t3Vx2Ro0RMKl-6NsxgWyL5tZGSVY",
+     "y": "jhLMbMF2-VQYibXTVjPqk4Qnkic3la-hK5HqN64zX80"
+    },
+    "note": "key embedded in the protected header (self-asserted)",
+    "provenance_class": "jwk_header"
+   },
+   "name": "cart",
+   "resolved_claims": {
+    "intent_mandate_hash": "d3477e0870b0b8514bfee24541c2c33c4fa9a06ca983e788e376077e5f436fd8",
+    "iss": "shopping-agent",
+    "items": [
+     "book-123"
+    ],
+    "mandate_type": "cart"
+   },
+   "sd_jwt_compact": "eyJhbGciOiAiRVMyNTYiLCAidHlwIjogImFwMi1tYW5kYXRlK3NkLWp3dCIsICJqd2siOiB7Imt0eSI6ICJFQyIsICJjcnYiOiAiUC0yNTYiLCAieCI6ICJpZFV1SDZVbndyamNlbzZ0M1Z4MlJvMFJNS2wtNk5zeGdXeUw1dFpHU1ZZIiwgInkiOiAiamhMTWJNRjItVlFZaWJYVFZqUHFrNFFua2ljM2xhLWhLNUhxTjY0elg4MCJ9fQ.eyJpc3MiOiAic2hvcHBpbmctYWdlbnQiLCAibWFuZGF0ZV90eXBlIjogImNhcnQiLCAiaW50ZW50X21hbmRhdGVfaGFzaCI6ICJkMzQ3N2UwODcwYjBiODUxNGJmZWUyNDU0MWMyYzMzYzRmYTlhMDZjYTk4M2U3ODhlMzc2MDc3ZTVmNDM2ZmQ4IiwgIl9zZCI6IFsiTWtEdWRhLTVHTHNDQUx3clRNazlaS2JBcndnZnVtNUp2d1F5bWY2SzByUSJdLCAiX3NkX2FsZyI6ICJzaGEtMjU2In0.OojUa5qX-gMWKLeoN5q0j5dq7bE9z6HuM40wbnF0K4QJ7IBC_GTWVG-F6-74Cqn9TdbfzvIXKRE55rA6mLWq6g~WyJzYWx0MCIsICJpdGVtcyIsIFsiYm9vay0xMjMiXV0~",
+   "verified_at_build": {
+    "disclosures_ok": true,
+    "signature_ok": true
+   }
+  }
+ ],
+ "bindings": [
+  {
+   "claim": "intent_mandate_hash",
+   "commits_to": "intent",
+   "encoding": "hex",
+   "in": "cart"
+  }
+ ],
+ "created_utc": "2026-09-05T17:03:33Z",
+ "evidence_digest_sha256": "f27df63bdbe58e34c26ee4ae2ffd51ad44b20a8b4b91a6cead54a90b85472631",
+ "evidence_format": "ap2-evidence-pack/1.0",
+ "honest_scope": "Proves: these exact SD-JWT artifacts, with the snapshotted key material (see each key's provenance_class), verified at build time; the RFC 3161 token (if present) anchors their existence to the TSA's clock. Does NOT prove the issuer authorised the key beyond what the provenance class states, does NOT confer eIDAS qualified-archive legal presumption, does NOT validate x5c chains to a trust anchor, and never proves the truth of the recorded transaction itself. When a producer signature is present, it protects THIS pack integrity, and authenticity ONLY for a relying party that has PINNED the producer public key out of band (an embedded key alone proves consistency, not authenticity), across the retention window (hybrid: a classical signature + FIPS-204 ML-DSA-65, surviving the quantum transition per NIST IR 8547); it does NOT retro-protect the underlying ES256 mandate signature - for the existed-before-a-quantum-adversary claim you still need a trusted time anchor (RFC 3161 / RFC 4998 renewal). 'valid' means each artifact verifies and the file is intact — NOT that the mandates form a bound chain (read `bindings`) nor that self-asserted keys prove issuer identity (read `provenance_classes`/`self_asserted_only`). KB-JWT holder binding is verified when the issuer payload carries cnf.jwk; without cnf.jwk it is recorded as present-but-unverifiable, never painted green. KB-JWT aud/nonce/iat are RECORDED for the auditor, not validated — their expected values are transaction context this tool cannot know offline.",
+ "producer_signatures": {
+  "over": "evidence_digest_sha256",
+  "scheme": "hybrid",
+  "signatures": [
+   {
+    "post_quantum": false,
+    "public_key_b64": "Y0WnXq4ow/7WldkvkxeCcPy1FJCXYYYjn8blaIGHopw=",
+    "sig_alg": "ed25519",
+    "signature_b64": "WYOLJHlVQ7eOZ01aSId+ZHNPG37AsuRBAO2Xlxu/wpEJRsIjv0XDN5Xh6yhssU/9x3+/q9cHlmDuKURwG4EVAw=="
+   },
+   {
+    "post_quantum": true,
+    "public_key_b64": "uc1p/nYJYkuV/+crramyKRuF2WLAuU142JWq5hyefRXjJs0jQU/uZv7cckDQ+ZAizZ6tk7pbixy+C5n/7ZmxS6U3ps2bumnHX8YHGUkSNrzeBQyDljuE1Lw35Co5fGpePpiqRcCPYjxxbqkU21dNddFSSneARqD0svkFisCyT3t/hYydxGkYNPbqrkKABNnebP5TBcI91fRp5jWg4xu+i24UgOkkBRWawyI7FaNXrMbUWi9EeoE7TCJk/xCly7WMVUQXuG6iu2zZ2GZUgh5Zoy1GBHRWrp0RQWeVNL/2Bke54EwgOHF0bw26PKNUMITIlQd65bXjLN2qWLJUvvLmPTl15BysyI0ltWq/+p07g9+RHyuTF6FONshpM6DHqpaQaL48+09JuniC6TKbuBhINMhQnGbdZvjSwv5AH8RvgKz9uKjRtnX2eL2aJ/kMP70GfssTzUipxJLEwbq8KkF0kKT+yCaUC3eZcm7s6tOlC9jUwFh4LgpDnefeqNfpTdiNkTwu2Q9RnOavQs6ZD1e2q8EEb2Sl+liZoKgqvcxR8SIRGeEYU336+2Sy9XUcYd9UXFE81ZppyiXVFOJUSkeHV1cqoXOBx5smqmJYLzqvYQ3nad1mHdCinC4xFPzw6j5otO0c3pCFDD+zWDYJzdPWtvtjQbXGtFZl4owRYyQnwA+Go23ZtL+wcybAX2Rs9MpdvAu4oM+rdkE6jLz33ZWmzeghSMRM/hbdznkRM6CVD1ln6I5UyR0EcJUvyEral6NsRTo5dOjiJ8Px5QAtwC+hpmDwxlY2dN6ErCz5jyOwm9WMtuL9LJ17/hS6Z3ejK77OO5pUhQVNXcN7v3vCXbqztQoHtF56aEZUsnuPc9EUfyvBoPXMbrWFp4c6ymuxn9WG6sHYlzGDUo6eF8SJrONiXA8maO+LBTZ/EDrw2HSTN5VyqI+K1Lhjyu5EMtuNIzMjCCPw1aS23UvZ8zHVBm7wpXlEKWorTI4f6wO+++8w0mCahRejZXnZVjDuAYJe6b21Udvw9gSboqIZ3j9uqavX0tJgdRYXAeFUnVTSrRxBmZQ1dMftTsyCi7TaCuVHb+KDlkWLDpQDyblZgulyuaTNozqRPXYFTSbWyjsmBaC51rFkFkrI8ISqpNkTvZpucYRj21lDO7EX2egc11rUZIyGh4/+0mf4Hx0V29bZ9GBRFx1OyveOsfVa3ab4MeS9pOqZ6rem0C7T3Z2gbIkGzimOAhQVUgwehb39yQ1YsPZQpZzAzduvMTcfg96Caf+C7Jz9l3K7wL9JprO4slSd3WLNz4CBx0lpLRzVuRE5Qz3u05jjhsW4fjAyN1jpOSEIqIw3sVKUJXmtSyQs94G62yC61wxaf+bUgixutC7eX3Vk5S5M+Y90c4+/uND5CY5HuBVYNg/DXigHAScIW7cDn9bXpD+LpPuq61oRKFi6FYHUqfe5ypYKpoV+BnzRWTA783GzqOJE6RJAl3y56lRRvakvJJICC2DU2Bu7i30s2DG363x9r4Za8tlvpSh48+wtc8mMFDgXgicE+444iEnF3Wh/7CwUfZ6juvzNCbH1CbEOx90JjonEvA6kiTEmCHTtkCCC7ox7591XJdydu5RMfSKmucwO+eZ+wceDiVjWhvi969oSk2Jm87vxqwtDir8yFVQekLG94GoMVK5v8eZcelPBONeFu29kJ/amE3/TFmxeu7RilUCNAl3KMYdKllOfm2XReD7ppK5Zhmv8a1KF2B4pf96D2okhO276BqSDCGmE3eltq0/3GyLSbaJZg4nkTOJ7k8TxaEZmZEjXQ5652CD5IqZQ/zRkNZSeFR7cI+CvBxVqkSTKuGVBmcZAryMHo/oa+HzqXpD/DPPkNaUMvRxWExB40iyV414E9/uMl3W/0GS9RzbsGi58T1vpztfSXVuDeayqow4ekH2UIjvBZn6Imp1eIjcJdfs2xOPQLTETQRrbkU5nRBzNyeNWGQaCi1444LmCn3zSEedFuPd9vPATBLzi+BGL+1uIISM2q4FO0oe22qwK6tXZP8HXZUn2MbqS4Cl2SFeJk09/bNrw7gaGblpgM41VQraGKPLrLH6m3kgbnTh7peSusvaVLZC7LI+kRsH9O58YeIrZvtvAxfBwvtjMY4tWHu6IpOnXUREb5muPuSlkuf7VAJtaBUccnYM1qRYCRAUSrKKOf5lutP1VTRIGYRC8ZRLovOr5HkZh6GGmxjfIeROXVHZmaaB1qQI6hSwqnSJBIpaDuMwFcat4jYIxkp0CqQtCcEv/3ABJKgNBetP1G7uFxMDvEKfuAFO17y3wJ+NCTk38q3mBt0LmwoUhVW+3TLXJwcs2w5g0eYi/olBwzttdd9PRYSpvpcHMcky49T2GyYF9BOsC4EZaiRT7ZLfJZmSNiML64yxmeNklGyXTI/EOIBwdMoH1TSv45fHfxMXl1w0T/NWYmjiZ+bbId4vsEzW/AFV+g7XxZsKuxl5yN792G8E1aaRkIfgD0t902YhxlIMA/QOiwQ/UFFyg/W9X+zpicfkqc4inpCEqLqmXbkol3LI2vFAu0xEoyLP/zuTIiXPcEDF0v0SfHhn1zJaXZBYHKyfQ2lbxwr8=",
+    "sig_alg": "ml-dsa-65",
+    "signature_b64": "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"
+   }
+  ]
+ },
+ "rfc3161_timestamp": {
+  "anchored": false,
+  "note": "no TSA provided"
+ },
+ "subject": "ap2 conformance vector"
+}

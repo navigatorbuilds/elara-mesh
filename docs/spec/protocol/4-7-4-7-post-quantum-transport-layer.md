@@ -42,11 +42,18 @@ Constants are normative:
 
 | Constant | Value | Source |
 |----------|-------|--------|
-| `ELPQ_MAGIC` | `b"ELPQ"` | `crates/elara-pq-transport/src/frame.rs:23` |
-| `WIRE_VERSION` | `0x01` | `crates/elara-pq-transport/src/frame.rs:27` |
-| `MAX_HANDSHAKE_SKEW_SECS` | `30` | `crates/elara-pq-transport/src/handshake.rs:45` |
-| `DEFAULT_HANDSHAKE_TIMEOUT` | `10s` | `src/network/pq_transport/stream.rs:80` |
-| `MAX_FRAME` | 4 MiB after AEAD | `frame.rs` |
+| `ELPQ_MAGIC` | `b"ELPQ"` | `crates/elara-pq-transport/src/frame.rs` |
+| `WIRE_VERSION` | `0x02` | `crates/elara-pq-transport/src/frame.rs` |
+| `MAX_HANDSHAKE_SKEW_SECS` | `30` | `crates/elara-pq-transport/src/handshake.rs` |
+| `DEFAULT_HANDSHAKE_TIMEOUT` | `10s` | `src/network/pq_transport/stream.rs` |
+| `MAX_FRAME` | 4 MiB after AEAD | `crates/elara-pq-transport/src/frame.rs` |
+
+The Source column names the file, not a line: the constant's own name in column 1
+is the anchor. Three of the four line numbers here were stale by 2026-09-06, and
+`WIRE_VERSION` additionally read `0x01` while the shipped constant — and every
+running node's `/version` — reported `0x02`. Do not confuse this transport-layer
+`WIRE_VERSION` with the record-format `WIRE_VERSION` in `crates/elara-record/src/wire.rs`;
+they are different constants on different version lines.
 
 #### 4.7.2 ML-KEM-768 as a Transport-Layer Requirement
 

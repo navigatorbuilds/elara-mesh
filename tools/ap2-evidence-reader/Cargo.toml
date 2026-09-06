@@ -1,0 +1,23 @@
+[package]
+name = "ap2-evidence-reader"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Independent fail-closed reader for ap2-evidence-pack/1.0, written from SPEC_AP2_EVIDENCE.md alone (not ported from the reference implementation)"
+publish = false
+
+# Stand-alone: NOT a member of the elara-runtime workspace (own lockfile, own target dir),
+# so building it never perturbs the node build.
+[workspace]
+
+[dependencies]
+# ML-DSA-65 (FIPS 204 final, pure/external interface, empty context) — the SAME function
+# every Elara record/seal signature uses, pinned by crates/elara-record/tests/acvp_mldsa65.rs.
+elara-record = { path = "../../crates/elara-record", version = "0.3" }
+p256 = { version = "0.13", features = ["ecdsa"] }
+p384 = { version = "0.13", features = ["ecdsa"] }
+ed25519-dalek = "2"
+rsa = { version = "0.9", features = ["sha2"] }
+sha2 = "0.10"
+base64 = "0.22"
+hex = "0.4"

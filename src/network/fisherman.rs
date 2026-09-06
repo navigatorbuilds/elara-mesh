@@ -796,7 +796,19 @@ pub fn rebuild_challenges_from_records(
         a.timestamp.total_cmp(&b.timestamp).then_with(|| a.id.cmp(&b.id))
     });
 
-    // Collect all staked identities for jury eligibility
+    // Jury-eligibility pool: the distinct creator of EVERY record in the
+    // replayed window. NOT stake-filtered — this comment used to read "all
+    // staked identities", which no code here or on the production path does
+    // (corrected 2026-09-06). The production boot replay builds the same pool
+    // the same way and says so explicitly: its insert is unconditional because
+    // "the creator of a tombstoned record is still a real identity in the VRF
+    // jury pool; dropping it would diverge historically-selected jury
+    // composition" (`src/bin/elara_node.rs`, the `all_identities` insert). So
+    // the width is deliberate and determinism-motivated — but it IS width:
+    // entering the pool costs one authored record, which is worth knowing next
+    // to `select_jury_with_epoch`'s grindable seed inputs. Callers narrow
+    // `all_records` upstream (see this fn's doc on tombstone pre-filtering);
+    // none of them stake-filter today.
     let all_identities: Vec<String> = sorted.iter()
         .map(|r| creator_identity_hash(r))
         .collect::<std::collections::HashSet<_>>()

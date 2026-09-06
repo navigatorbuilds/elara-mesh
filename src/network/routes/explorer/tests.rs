@@ -17499,11 +17499,14 @@ fn batch_bbbb_compute_seal_debug_global_seal_wire_denominator_reflects_first_att
 // shared-compute pattern). Previously the helper had ZERO
 // dedicated tests despite touching three independent runtime axes:
 //   (a) the `state.zone_clocks` Mutex<ZoneClockManager> snapshot via
-//       `ZoneClockManager::summary()` at `src/itc.rs:666-683`
-//   (b) the `state.itc_events_total` AtomicU64 counter bumped at
-//       `src/network/ingest.rs:1618` on local record creation
-//   (c) the `state.itc_joins_total` AtomicU64 counter bumped at
-//       `src/network/ingest.rs:1612` on remote stamp receipt
+//       `ZoneClockManager::summary()` in `src/itc.rs`
+//   (b) the `state.itc_events_total` AtomicU64 counter bumped in
+//       `src/network/ingest.rs` on local record creation
+//   (c) the `state.itc_joins_total` AtomicU64 counter bumped in
+//       `src/network/ingest.rs` on remote stamp receipt
+//   (all three cited line numbers were stale by 2026-09-06 — :666-683
+//   outran a 389-line file after the ITC core moved to crates/elara-itc,
+//   and the two ingest sites had drifted ~1300 lines; symbol anchors now)
 //
 // The 4 axes pinned below correspond to the load-bearing wire contracts:
 //   (1) strict 3-key top-level envelope `{itc, events_total,

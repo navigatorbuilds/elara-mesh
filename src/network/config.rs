@@ -2117,6 +2117,23 @@ impl NodeConfig {
         if self.genesis_authority.is_empty() {
             warnings.push("genesis_authority is empty — ledger validation will reject all ops".into());
         }
+        if !self.trusted_snapshot_signers.is_empty() {
+            // R-B3b: this is a TRUST-MODEL widening, not a tuning knob. Every
+            // identity listed here can install a joiner's epoch tips wholesale
+            // (`apply_bootstrap_snapshot_full`) without stake, a committee seat or
+            // sealing rights — and it is the documented trigger condition for the
+            // filed P1 snapshot-DESCENT verification (`sync.rs`, do-not-re-derive).
+            // While this list is empty the installable-signer set is the genesis
+            // authority alone, which is what makes the boundary narrow today.
+            warnings.push(format!(
+                "trusted_snapshot_signers is NON-EMPTY ({} entry/entries: {}) — each can install epoch \
+                 tips on a joining node with no stake and no committee seat. This widens the snapshot \
+                 trust model beyond the genesis authority and is the trigger for the filed P1 \
+                 snapshot-descent verification; confirm each entry is intended",
+                self.trusted_snapshot_signers.len(),
+                self.trusted_snapshot_signers.join(", "),
+            ));
+        }
         if self.gossip_max_hops == 0 {
             warnings.push("gossip_max_hops=0 — records will never relay beyond direct peers".into());
         }

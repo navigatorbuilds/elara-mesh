@@ -1543,6 +1543,12 @@ async fn epoch_indexed_snapshot_bootstrap(
     }
     trust_set.extend(state.config.trusted_snapshot_signers.iter().map(|s| s.as_str()));
     super::snapshot::enforce_snapshot_signer_trust(&signer, &trust_set)
+        // R-B3a: count the rejection before it becomes an opaque Wire error.
+        .inspect_err(|_| {
+            state
+                .snapshot_signer_trust_rejections_total
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        })
         .map_err(|e| crate::errors::ElaraError::Wire(format!(
             "{EPOCH_SNAPSHOT_TRUST_GATE_LABEL} (peer={base_url} epoch={latest}): {e}"
         )))?;
@@ -1666,7 +1672,12 @@ pub fn is_snapshot_config_error(e: &crate::errors::ElaraError) -> bool {
 ///
 /// Downloads the snapshot, verifies checksum, loads ledger state directly.
 /// Then delta syncs only records created AFTER the snapshot timestamp.
-/// Returns Ok(true) if bootstrap succeeded, Ok(false) if peer has no snapshot.
+/// Returns `Ok(false)` on EVERY path today: both success paths fall through to
+/// delta sync by design (CF_APPLIED dedups the pre-snapshot records), so the
+/// `Ok(true)` arm in `initial_sync_from` — and its "skipping full delta sync"
+/// log — is unreachable. Do not "fix" this by making a path return `Ok(true)`:
+/// that would make `initial_sync_from` skip delta sync, which is its own audit
+/// item, not a cleanup.
 ///
 /// Made `pub` so the admin endpoint
 /// `/admin/snapshot_rebootstrap_from` can force this path on a non-empty DAG.
@@ -1751,6 +1762,12 @@ pub async fn snapshot_bootstrap(
     }
     trust_set.extend(state.config.trusted_snapshot_signers.iter().map(|s| s.as_str()));
     super::snapshot::enforce_snapshot_signer_trust(&signer, &trust_set)
+        // R-B3a: same counter on the live-fallback path — one boundary, one metric.
+        .inspect_err(|_| {
+            state
+                .snapshot_signer_trust_rejections_total
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        })
         .map_err(|e| crate::errors::ElaraError::Wire(format!(
             "{SNAPSHOT_TRUST_GATE_LABEL} (peer={base_url}): {e}"
         )))?;
@@ -2164,34 +2181,47 @@ async fn apply_bootstrap_snapshot_full(
             .signer_identity
             .as_deref()
             .is_some_and(|s| s == state.config.genesis_authority);
-        if !genesis_signed {
+        // R-B3 (Opus seat, 2026-09-06): this used to `return Ok(())` on a
+        // non-genesis signer, which left the WHOLE function — so a snapshot from
+        // a non-genesis `trusted_snapshot_signers` member carrying one fence
+        // entry replaced the ledger (already done above) and then skipped the
+        // epoch-tip install, `register_stakes_from_ledger`, the timestamp_pull
+        // cursor seed, the `ledger_loaded_from_snapshot` flag and the SMT-root
+        // verify. The caller then saw `Ok(false)` — `snapshot_bootstrap` returns
+        // that on every path — logged "peer has no snapshot, falling back to
+        // delta sync" and ran delta sync over the half-applied snapshot. So the
+        // half-apply was logged as a NO-OP: worse than a visible failure, and
+        // not the "snapshot bootstrap complete" this comment first claimed
+        // (refuted by the R-B3 final verify).
+        // The intent was always to skip the CARRY, never the APPLY.
+        if genesis_signed {
+            use crate::network::RwLockRecover;
+            let mut reg = state.fold_sunset.write_recover();
+            for e in &snapshot.fold_sunset_entries {
+                // Bounds sanity (panel H2): refuse structurally-absurd carries
+                // even from a checksum-valid snapshot — known fold versions only.
+                if e.min_fold_version <= 2 {
+                    reg.register(e.clone());
+                } else {
+                    tracing::warn!(
+                        tree = e.tree.as_str(),
+                        min_fold_version = e.min_fold_version,
+                        "snapshot fold_sunset entry with unknown fold version IGNORED"
+                    );
+                }
+            }
+            drop(reg);
+            let st = state.clone();
+            tokio::task::spawn_blocking(move || {
+                super::fold_sunset::persist_registry(&st);
+            });
+        } else {
             tracing::warn!(
                 signer = snapshot.signer_identity.as_deref().unwrap_or("<none>"),
                 entries = snapshot.fold_sunset_entries.len(),
                 "snapshot fold_sunset carry IGNORED — fence carry requires a                  genesis-authority-signed snapshot (emitter-auth symmetry)"
             );
-            return Ok(());
         }
-        use crate::network::RwLockRecover;
-        let mut reg = state.fold_sunset.write_recover();
-        for e in &snapshot.fold_sunset_entries {
-            // Bounds sanity (panel H2): refuse structurally-absurd carries
-            // even from a checksum-valid snapshot — known fold versions only.
-            if e.min_fold_version <= 2 {
-                reg.register(e.clone());
-            } else {
-                tracing::warn!(
-                    tree = e.tree.as_str(),
-                    min_fold_version = e.min_fold_version,
-                    "snapshot fold_sunset entry with unknown fold version IGNORED"
-                );
-            }
-        }
-        drop(reg);
-        let st = state.clone();
-        tokio::task::spawn_blocking(move || {
-            super::fold_sunset::persist_registry(&st);
-        });
     }
     if let Some(ref bs) = snapshot.bootstrap_state {
         let mut bootstrap = state.bootstrap_state.write_recover();
@@ -2241,6 +2271,12 @@ async fn apply_bootstrap_snapshot_full(
                  unverified fast-forward window)"
             );
         }
+        // R-B3 M3: the four direct `latest_epoch` writes above bypass
+        // `apply_canonical_seal`, which is what keeps `total_epochs_total`
+        // exact — so restore the invariant once here, exactly as the boot-merge
+        // site does (`elara_node.rs`, "restore the invariant once"). O(zones),
+        // idempotent, bootstrap-only, and still under the same write guard.
+        epoch.recount_total_epochs();
     }
 
     // 5. Consensus stake registration from the newly-loaded ledger
@@ -2699,86 +2735,6 @@ pub async fn should_use_fast_sync(
             false
         }
     }
-}
-
-/// Enhanced initial sync — adds fast sync path between snapshot bootstrap and delta sync.
-///
-/// Decision flow:
-///   1. Empty DAG → try full snapshot bootstrap (existing)
-///   2. Large gap (>1000 records behind) → try snapshot fast sync
-///   3. Small gap → delta sync (existing)
-pub async fn initial_sync_with_fast_path(state: &Arc<NodeState>) {
-    let peers = state.peers.read().await;
-    let connected = peers.connected();
-    if connected.is_empty() {
-        info!("no peers for initial sync");
-        return;
-    }
-
-    // Pick peer with highest record count for best sync source
-    let mut best_peer_url = connected[0].base_url();
-    let mut best_record_count = 0u64;
-
-    for peer in &connected {
-        let url = peer.base_url();
-        if let Ok(meta) = pq_snapshot_metadata(state, &url).await {
-            let count = meta.get("record_count").and_then(|v| v.as_u64()).unwrap_or(0);
-            if count > best_record_count {
-                best_record_count = count;
-                best_peer_url = url;
-            }
-        }
-    }
-    drop(peers);
-
-    let dag_len = state.dag.read().await.len();
-
-    // ── Phase 1: Empty DAG → full snapshot bootstrap ──────────────
-    if dag_len == 0 {
-        info!("empty DAG — attempting snapshot bootstrap from {best_peer_url}");
-        match snapshot_bootstrap(state, &best_peer_url, false).await {
-            Ok(true) => {
-                info!("snapshot bootstrap complete");
-                return;
-            }
-            Ok(false) => {
-                info!("snapshot bootstrap: peer has no snapshot, trying fast sync...");
-            }
-            Err(e) => {
-                if is_snapshot_config_error(&e) {
-                    error!(
-                        "snapshot bootstrap REJECTED by a config gate, not a transient fault: {e}. \
-                         The delta-sync fallback rejects the seed's seals for the same reason, so the \
-                         epoch will not advance until you fix this. Set genesis_authority (and \
-                         min_protocol_version) to match the seed's /status, then restart — run \
-                         scripts/check-my-join.sh to confirm."
-                    );
-                } else {
-                    warn!("snapshot bootstrap failed: {e} — trying fast sync...");
-                }
-            }
-        }
-    }
-
-    // ── Phase 2: Check if fast sync is warranted ──────────────────
-    if should_use_fast_sync(state, &best_peer_url).await {
-        info!("large gap detected — using snapshot fast sync from {best_peer_url}");
-        match snapshot_sync(state, &best_peer_url, None).await {
-            Ok(count) => {
-                info!("snapshot fast sync imported {count} records");
-                // After fast sync, do a quick delta sync to catch anything we missed
-                info!("running delta sync to catch stragglers...");
-                initial_sync(state).await;
-                return;
-            }
-            Err(e) => {
-                warn!("snapshot fast sync failed: {e} — falling back to delta sync");
-            }
-        }
-    }
-
-    // ── Phase 3: Fall back to delta sync ──────────────────────────
-    initial_sync(state).await;
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
@@ -3941,6 +3897,193 @@ mod tests {
         assert!(snapshot_anchor_precheck(pin, &EpochState::new().to_snapshot(), |_| 0).is_ok());
         // deactivated table (off-network / pre-fence world): everything passes.
         assert!(snapshot_anchor_precheck(&[], &snap(5, [0xEE; 32]), |_| 0).is_ok());
+    }
+
+    /// R-B3 (Opus seat, 2026-09-06): the fold_sunset fence must skip the CARRY,
+    /// never abort the APPLY. Before the fix a non-genesis signer's snapshot
+    /// carrying one fence entry hit a bare `return Ok(())` that left the whole
+    /// function — the ledger had already been replaced, so the joiner ended up
+    /// with no epoch tip, no stakes, no cursor, no `ledger_loaded_from_snapshot`
+    /// flag and no SMT-root verify. The caller saw `Ok(false)` (every
+    /// `snapshot_bootstrap` path returns that), logged "peer has no snapshot"
+    /// and ran delta sync over the half-applied snapshot — a silent half-apply
+    /// logged as a no-op.
+    #[tokio::test]
+    async fn rb3_fold_sunset_non_genesis_carry_skips_carry_not_apply() {
+        use crate::network::epoch::EpochState;
+        use crate::network::fold_sunset::{FenceTree, FoldSunsetEntry};
+        use crate::network::snapshot::NodeSnapshot;
+        use crate::accounting::ledger::LedgerState;
+        use std::collections::HashSet;
+
+        let state = test_state_for_bootstrap();
+        let z0 = crate::ZoneId::from_legacy(0);
+
+        let mut ep = EpochState::new();
+        ep.latest_epoch.insert(z0.clone(), 9);
+        ep.latest_seal_hash.insert(z0.clone(), [0x33; 32]);
+        let mut ledger = LedgerState::new();
+        ledger.total_supply = 4242;
+        let mut snap = NodeSnapshot::new(ledger, HashSet::new(), ep);
+        // Derive the signer from the live config so the test does not depend on
+        // whatever `genesis_authority` the fixture happens to use: this one is
+        // guaranteed NOT to equal it.
+        snap.signer_identity = Some(format!("{}-not-genesis", state.config.genesis_authority));
+        snap.fold_sunset_entries = vec![FoldSunsetEntry {
+            tree: FenceTree::SuperSeal,
+            min_fold_version: 2,
+            boundary_epoch: 7,
+            record_id: "rb3-carry".into(),
+        }];
+
+        apply_bootstrap_snapshot_full(&state, &snap, false)
+            .await
+            .expect("a non-genesis fence carry must not fail the apply");
+
+        // The CARRY is refused …
+        assert!(
+            state
+                .fold_sunset
+                .read()
+                .unwrap()
+                .active(FenceTree::SuperSeal)
+                .is_none(),
+            "a non-genesis signer's fence entry must NOT be registered"
+        );
+        // … but everything AFTER the fence block still ran.
+        assert_eq!(
+            state.epoch.read().unwrap().latest_epoch.get(&z0).copied(),
+            Some(9),
+            "the epoch tip install must not be skipped (this is the bug)"
+        );
+        assert_eq!(state.ledger.read().await.total_supply, 4242);
+        assert!(
+            state
+                .ledger_loaded_from_snapshot
+                .load(std::sync::atomic::Ordering::Relaxed),
+            "the ledger_loaded_from_snapshot flag must be set"
+        );
+        assert_eq!(
+            state
+                .snapshot_bootstrap_ledger_loaded_total
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        // R-B3 M3: the direct four-map writes bypass `apply_canonical_seal`, so
+        // the install must re-derive `total_epochs_total` or /metrics' epoch_count
+        // silently under-reports. One zone at tip 9 ⇒ 10 seals.
+        assert_eq!(
+            state.epoch.read().unwrap().total_epochs_total,
+            10,
+            "total_epochs_total must equal Σ(tip+1) over installed zones"
+        );
+    }
+
+    /// R-B3 B5 honesty (final-verify §6): the early return also skipped the
+    /// acts coverage-floor advance, which is what stops a snapshot follower
+    /// answering AUTHORITATIVE ABSENCE over the gap it never fetched. That one
+    /// is worse than the missing tip: a wrong "no such act" is a false negative
+    /// a client believes. Pinned separately so it cannot regress quietly.
+    #[tokio::test]
+    async fn rb3_fold_sunset_non_genesis_keeps_b5_coverage_floor() {
+        use crate::network::epoch::EpochState;
+        use crate::network::fold_sunset::{FenceTree, FoldSunsetEntry};
+        use crate::network::snapshot::NodeSnapshot;
+        use crate::accounting::ledger::LedgerState;
+        use std::collections::HashSet;
+
+        let state = test_state_for_bootstrap();
+        let z0 = crate::ZoneId::from_legacy(0);
+
+        let mut ep = EpochState::new();
+        ep.latest_epoch.insert(z0.clone(), 13);
+        let mut ledger = LedgerState::new();
+        ledger.total_supply = 99;
+        let mut snap = NodeSnapshot::new(ledger, HashSet::new(), ep);
+        snap.signer_identity = Some(format!("{}-not-genesis", state.config.genesis_authority));
+        snap.fold_sunset_entries = vec![FoldSunsetEntry {
+            tree: FenceTree::SuperSeal,
+            min_fold_version: 2,
+            boundary_epoch: 7,
+            record_id: "rb3-b5".into(),
+        }];
+        let ts = 1_700_000.5_f64;
+        snap.snapshot_timestamp = Some(ts);
+
+        apply_bootstrap_snapshot_full(&state, &snap, false)
+            .await
+            .expect("apply must succeed");
+
+        let expected = ((ts * 1000.0) as u64).saturating_add(1);
+        let floor = state
+            .rocks
+            .acts_coverage_floor_ms()
+            .expect("coverage floor readable");
+        assert!(
+            floor > 0,
+            "the coverage floor must be advanced — a 0 floor means this node would \
+             answer authoritative absence over the snapshot gap"
+        );
+        assert_eq!(floor, expected, "floor is (ts*1000)+1");
+        assert!(
+            state
+                .ledger_loaded_from_snapshot
+                .load(std::sync::atomic::Ordering::Relaxed),
+            "the flag past the fence must also be set"
+        );
+    }
+
+    /// The intended path, pinned so the restructure above cannot silently flip
+    /// it: a genesis-authority-signed snapshot registers the fence AND installs
+    /// the tips.
+    #[tokio::test]
+    async fn rb3_fold_sunset_genesis_signed_carry_registers_and_applies() {
+        use crate::network::epoch::EpochState;
+        use crate::network::fold_sunset::{FenceTree, FoldSunsetEntry};
+        use crate::network::snapshot::NodeSnapshot;
+        use crate::accounting::ledger::LedgerState;
+        use std::collections::HashSet;
+
+        let state = test_state_for_bootstrap();
+        let z0 = crate::ZoneId::from_legacy(0);
+
+        let mut ep = EpochState::new();
+        ep.latest_epoch.insert(z0.clone(), 11);
+        ep.latest_seal_hash.insert(z0.clone(), [0x44; 32]);
+        let mut ledger = LedgerState::new();
+        ledger.total_supply = 555;
+        let mut snap = NodeSnapshot::new(ledger, HashSet::new(), ep);
+        snap.signer_identity = Some(state.config.genesis_authority.clone());
+        snap.fold_sunset_entries = vec![FoldSunsetEntry {
+            tree: FenceTree::SuperSeal,
+            min_fold_version: 2,
+            boundary_epoch: 7,
+            record_id: "rb3-carry-genesis".into(),
+        }];
+
+        apply_bootstrap_snapshot_full(&state, &snap, false)
+            .await
+            .expect("a genesis-signed snapshot must apply");
+
+        // Copy the two fields out inside a block so the guard's SCOPE ends before
+        // the `.await` below — clippy's await_holding_lock is scope-based, so a
+        // later `drop(reg)` does not satisfy it even though NLL would.
+        let (min_fold, boundary) = {
+            let reg = state.fold_sunset.read().unwrap();
+            let active = reg
+                .active(FenceTree::SuperSeal)
+                .expect("the genesis-signed fence entry MUST be registered");
+            (active.min_fold_version, active.boundary_epoch)
+        };
+        assert_eq!(min_fold, 2);
+        assert_eq!(boundary, 7);
+
+        assert_eq!(
+            state.epoch.read().unwrap().latest_epoch.get(&z0).copied(),
+            Some(11),
+            "tips install on the genesis path too"
+        );
+        assert_eq!(state.ledger.read().await.total_supply, 555);
     }
 
     /// §E fence site 2a WIRING (adversarial-verify S8): the pure decision

@@ -880,6 +880,16 @@ pub struct NodeState {
     /// anchor probe (site 2b). Refusal is per-peer DEFER/retry, never a brick.
     /// Surfaced as `elara_pinned_anchor_bootstrap_refusals_total`.
     pub pinned_anchor_bootstrap_refusals_total: AtomicU64,
+    /// R-B3a (2026-09-06): bootstrap snapshots REJECTED because their Dilithium3
+    /// signer was not in `{genesis_authority} ∪ trusted_snapshot_signers` — the
+    /// gate (`enforce_snapshot_signer_trust`, both acquisition paths in `sync.rs`)
+    /// that decides who may install a joiner's epoch tips at all. It was the one
+    /// decision on that trust boundary with NO metric, so a joiner refusing every
+    /// peer was indistinguishable from a joiner that never tried. Refusal is
+    /// per-peer DEFER/retry, never a brick. Read alongside
+    /// `elara_pinned_anchor_bootstrap_refusals_total`, which covers the separate
+    /// chain-anchor consistency check, not the signer.
+    pub snapshot_signer_trust_rejections_total: AtomicU64,
     /// §E re-genesis fence completion guard (periodic, health_check_loop):
     /// ticks where epoch state was populated yet a pinned zone sat below its
     /// anchor epoch for ≥ the debounce window — the node is parked on a
@@ -963,6 +973,12 @@ pub struct NodeState {
     /// bail-out, never a pass — high sustained values just mean the check rarely
     /// finds a clean single-zone boundary (expected on a busy/multi-zone node).
     pub boot_sealed_root_skipped_total: AtomicU64,
+    /// R-B3e guard (b): boot record-replay rebuilds that produced NO zone tips
+    /// and were therefore NOT installed over the live epoch state — without the
+    /// guard a lost race against the concurrent peer-snapshot install would
+    /// erase freshly-installed tips, permanently. Expected 0 on every boot that
+    /// has records.
+    pub boot_rebuild_empty_install_skipped_total: AtomicU64,
     /// Cumulative invocations of the
     /// `/admin/snapshot_rebootstrap_from` admin endpoint that forces a snapshot
     /// bootstrap regardless of local DAG state. Operator escape hatch for
@@ -2263,10 +2279,36 @@ pub struct NodeState {
     /// non-admissible seals evicts HONEST parked seals ahead of them (Q7
     /// starvation channel). Healthy = 0; a climb = lane saturation.
     pub gossip_park_evicted_total: AtomicU64,
+    /// R1-X1-V-B: seals SKIPPED at a boot-time replay registration site because
+    /// the creator was not admissible (genesis authority or staked). One counter
+    /// per site — the `site=` label is applied at the /metrics seam, never a zone
+    /// label. DEFER semantics: a skipped seal is not deleted; a later pass
+    /// re-evaluates it.
+    pub epoch_seal_replay_inadmissible_skipped_epoch: AtomicU64,
+    pub epoch_seal_replay_inadmissible_skipped_global: AtomicU64,
+    pub epoch_seal_replay_inadmissible_skipped_rebuild: AtomicU64,
+    pub epoch_seal_replay_inadmissible_skipped_canonicalize: AtomicU64,
+    pub epoch_seal_replay_inadmissible_skipped_window: AtomicU64,
+    /// R1-X1-V-B: non-genesis seals ADMITTED by the replay gate — the
+    /// denominator that stops the skipped counters being read in isolation.
+    pub epoch_seal_replay_admitted_nongenesis_total: AtomicU64,
     /// R1-X1-V-P (2026-09-05, seat-4): entries silently dropped by the drain's
     /// re-queue because the lane refilled during the drain
     /// (`gossip::retry_parked_lane`). Was uncounted before. Healthy = 0.
     pub gossip_park_requeue_dropped_total: AtomicU64,
+    /// R1-X1-V-Q follow-up (2026-09-06): parked ids that reached
+    /// `GOSSIP_RETRY_MAX_ATTEMPTS` and were dropped without being re-parked —
+    /// the lane's DESIGNED age-out, at all four exits that took it silently
+    /// (super-seal dispose, seal dispose fall-through, drain fetch-miss, drain
+    /// retryable re-fail). Meter only, no behaviour change. Unlike
+    /// `gossip_park_evicted_total` (cap pressure) a climb here is aging working
+    /// as intended; read the two together to tell saturation from aging.
+    pub gossip_park_aged_out_total: AtomicU64,
+    /// R1-X1-V-Q follow-up (2026-09-06): re-queue attempts skipped because the
+    /// id was already parked in the lane (`retry_parked_lane`'s dedup). Meter
+    /// only — a healthy non-zero value just means concurrent paths converged on
+    /// the same id.
+    pub gossip_park_dedup_skipped_total: AtomicU64,
     /// Peer reconnection attempts to seed peers.
     pub peer_reconnect_attempts_total: AtomicU64,
     /// Successful peer reconnections.
@@ -3430,7 +3472,7 @@ pub struct NodeState {
     pub disk_pressure_lowest_avail_mb: AtomicU64,
     /// Cumulative count of operator-triggered RocksDB
     /// compactions via `/admin/rocks/compact_cf`. Distinct from auto-triggered
-    /// compaction inside `gc_loop` (`gc.rs:553`), which is invisible to this
+    /// compaction inside `gc_loop` (`gc.rs`), which is invisible to this
     /// counter. Surfaced as `elara_admin_compact_cf_triggered_total` so the
     /// disk-pressure runbook can verify the operator action landed and so we
     /// can attribute a subsequent drop in `total-sst-files-size` to the
@@ -4259,6 +4301,7 @@ impl NodeState {
             snapshot_bootstrap_ledger_loaded_total: AtomicU64::new(0),
             snapshot_bootstrap_root_verified_total: AtomicU64::new(0),
             pinned_anchor_bootstrap_refusals_total: AtomicU64::new(0),
+            snapshot_signer_trust_rejections_total: AtomicU64::new(0),
             pinned_anchor_completion_alarms_total: AtomicU64::new(0),
             pinned_anchor_deficit_streak: AtomicU64::new(0),
             pinned_anchor_deficit_tip_sum: AtomicU64::new(0),
@@ -4271,6 +4314,7 @@ impl NodeState {
             boot_sealed_root_mismatch_total: AtomicU64::new(0),
             boot_sealed_root_phantom_total: AtomicU64::new(0),
             boot_sealed_root_skipped_total: AtomicU64::new(0),
+            boot_rebuild_empty_install_skipped_total: AtomicU64::new(0),
             admin_snapshot_rebootstrap_total: AtomicU64::new(0),
             super_seal_coverage_failures_total: AtomicU64::new(0),
             super_seals_minted_total: AtomicU64::new(0),
@@ -4490,7 +4534,15 @@ impl NodeState {
             gossip_retry_total: AtomicU64::new(0),
             gossip_retry_success_total: AtomicU64::new(0),
             gossip_park_evicted_total: AtomicU64::new(0),
+            epoch_seal_replay_inadmissible_skipped_epoch: AtomicU64::new(0),
+            epoch_seal_replay_inadmissible_skipped_global: AtomicU64::new(0),
+            epoch_seal_replay_inadmissible_skipped_rebuild: AtomicU64::new(0),
+            epoch_seal_replay_inadmissible_skipped_canonicalize: AtomicU64::new(0),
+            epoch_seal_replay_inadmissible_skipped_window: AtomicU64::new(0),
+            epoch_seal_replay_admitted_nongenesis_total: AtomicU64::new(0),
             gossip_park_requeue_dropped_total: AtomicU64::new(0),
+            gossip_park_aged_out_total: AtomicU64::new(0),
+            gossip_park_dedup_skipped_total: AtomicU64::new(0),
             peer_reconnect_attempts_total: AtomicU64::new(0),
             peer_reconnect_success_total: AtomicU64::new(0),
             peer_auto_banned_total: AtomicU64::new(0),
@@ -8240,7 +8292,7 @@ mod tests {
     //   1. Each witness has a registered profile (entity-clusterer path,
     //      pinned by the first tests above).
     //   2. Each witness has `ledger.accounts[witness_hash].staked = stake`
-    //      so `feed_attestation`'s ledger read at `state.rs:3115-3121`
+    //      so `feed_attestation`'s ledger read
     //      returns the right per-witness stake into the `Attestation`.
     //   3. The zone has `consensus.zone_stakes[zone] = sum(stakes) + extra`
     //      so `consensus.is_settled` at `consensus.rs:2155-2174` has a
@@ -8834,7 +8886,7 @@ mod tests {
     // datacenter / single ASN).
     //
     // Cross-check vs. production: `recompute_confirmation` at
-    // `consensus.rs:1877` reads `is_settled_diverse` and falls back to raw
+    // `consensus.rs` reads `is_settled_diverse` and falls back to raw
     // `is_settled` ONLY when `small_network` (< 3 distinct orgs registered).
     // Both tests below register ≥3 distinct profiles in the fixture so the
     // small-network bypass does not fire — the diverse path is the real
@@ -9052,7 +9104,7 @@ mod tests {
     //      threshold even when raw stake is full.
     //   2. Zero eligible stake — when `settlement_denominator(zone)` returns
     //      0 (no zone stake, no committee stake registered), both
-    //      `is_settled` (`consensus.rs:2163-2165`) and `is_settled_diverse`
+    //      `is_settled` (`consensus.rs`) and `is_settled_diverse`
     //      (`consensus.rs:2192-2194`) short-circuit to false regardless of
     //      how many witnesses attest. Defensive guard against empty-zone
     //      settlement / div-by-zero.
@@ -9422,7 +9474,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_batch_feed_attestations_idempotent_on_resend() {
-        // Pins the gate at `state.rs:3665` — calling `batch_feed_attestations`
+        // Pins the idempotency gate inside `batch_feed_attestations` — calling it
         // twice with the SAME quorum-crossing batch must leave the consensus
         // side at Finalized exactly once. The second call's
         // `consensus.force_finalized(rid)` returns false (already Finalized
@@ -12043,7 +12095,7 @@ mod tests {
     // Gap 6.4 slice 3a pure helper at state.rs:134. Bounded-FIFO enqueue used
     // by `track_pending_seal_replication`; tests exercise the policy in
     // isolation without a NodeState. Pairs with the production call site at
-    // state.rs:2769 (`track_pending_seal_replication`).
+    // `track_pending_seal_replication`.
 
     #[test]
     fn l28_enqueue_pending_seal_repl_empty_targets_is_noop() {
@@ -12687,8 +12739,8 @@ mod tests {
     // ── track_pending_seal_replication async wrapper ──────────────────────
     //
     // An earlier test pinned the underlying free helper `enqueue_pending_seal_replication_bounded`
-    // (state.rs:134) in isolation. The async wrapper at `track_pending_seal_replication`
-    // (state.rs:2792) sits on top of it and adds three observable behaviors the pure
+    // in isolation. The async wrapper `track_pending_seal_replication`
+    // sits on top of it and adds three observable behaviors the pure
     // helper does not exercise: (a) empty-targets early-return BEFORE acquiring the
     // tokio Mutex and BEFORE reading config — so an idle reconciler with zero peers
     // produces zero contention and zero counter bumps; (b) bump
@@ -13113,7 +13165,7 @@ mod tests {
 
     // ── search_records — uncovered post-fetch branches ────────────────────
     //
-    // Prior coverage on `search_records` (state.rs:4190) was 4 tests:
+    // Prior coverage on `search_records` was 4 tests:
     // Layer B happy-path + counter, fallback happy-path + counter, Layer B
     // metadata key filter, Layer B metadata key+value filter, plus the
     // no-filter empty short-circuit. The five branches the public RPC
@@ -14937,7 +14989,7 @@ mod tests {
     //       not a representative RTT. Clamping prevents one pathological
     //       peer from pulling the p95 into uselessness."
     //
-    //   (B) `effective_base_timeout_ms` clamp at `state.rs:3114`:
+    //   (B) `effective_base_timeout_ms` clamp:
     //         `(base_s * 1000.0).clamp(1000.0, 600_000.0) as u64`
     //       — the 600 000ms (10-min) downstream ceiling.
     //
@@ -15411,13 +15463,13 @@ mod tests {
     //
     // Pins two module-level pure helpers that had zero direct test coverage:
     //
-    //   1. `store_max_atomic` (state.rs:115) — atomic-max CAS-loop with
+    //   1. `store_max_atomic` — atomic-max CAS-loop with
     //      relaxed ordering. Duplicated at 5 sites (state_core.rs:227,
     //      sync.rs:578/587, epoch.rs:63, two record_stats_*_ts_bits sites).
     //      Monotone behavior is load-bearing for high-water-mark gauges; a
     //      regression here would let max counters slip backward under races.
     //
-    //   2. `apply_metadata_filter` (state.rs:4720) — Protocol §11.23 post-
+    //   2. `apply_metadata_filter` — Protocol §11.23 post-
     //      filter applied after Layer B / fallback fetch. Four-quadrant
     //      Option/Option dispatch (neither / key only / value only /
     //      key+value). The inner matcher `json_value_matches_string`

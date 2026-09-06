@@ -2618,7 +2618,7 @@ pub(crate) fn compute_zones_scope(state: &Arc<NodeState>) -> serde_json::Value {
 
 /// `POST /admin/zones/subscribe?zone=<path>` — add a zone to the local
 /// `ZoneManager`. Idempotent: re-subscribing is a no-op. The handler
-/// routes through `NodeState::subscribe_zone` (`network/state.rs:3187`)
+/// routes through `NodeState::subscribe_zone` (`network/state.rs`)
 /// so the new subscription is persisted via
 /// `zone_persist::save_subscriptions` (`network/zone_persist.rs:53`)
 /// and survives restart — Phase E Slice 3.
@@ -3368,7 +3368,7 @@ pub async fn admin_epoch_prune_shadow(
 
 /// Heavy CFs that bloat under tombstones — same list `gc_loop` compacts on
 /// `pressure_due` (`gc.rs:553-560`), plus `merkle` to match
-/// `startup_compaction_if_needed`'s heavy-set (`rocks.rs:2829`).
+/// `startup_compaction_if_needed`'s heavy-set (`rocks.rs`).
 pub(crate) const COMPACT_CF_ALLOWLIST: &[&str] = &[
     "records",
     "attestations",
@@ -6583,7 +6583,7 @@ mod admin_pending_ledger_tests {
     #[test]
     fn batch_oo_aggregate_distinct_identities_re_derived_via_pending_iter_hashset_cross_regime() {
         // Cross-derivation pin for `aggregate.distinct_identities`. The helper
-        // calls `pending.distinct_identities()` (pending_ledger.rs:239) which
+        // calls `pending.distinct_identities()` (`pending_ledger.rs`) which
         // returns `self.by_identity.len()` — count of an internal index keyed
         // by creator. Re-derive the same value via `pending.iter()` (which
         // reads from `self.by_record.values()`, a DIFFERENT internal map) and
@@ -7365,9 +7365,9 @@ mod admin_onboard_anchor_tests {
     //     "high-capacity storage = epoch authority" deserves the same fix
     //     pointer as the witness-typo operator. Each of the five canonical
     //     non-anchor types lands on a distinct match-arm of
-    //     `NodeType::from_str` (peer.rs:57), so coverage isn't redundant.
+    //     `NodeType::from_str` (`peer.rs`), so coverage isn't redundant.
     //   • Unknown / typo node_type strings (e.g. uppercase "ANCHOR" — the
-    //     `from_str` match is case-sensitive at peer.rs:58) fall through to
+    //     `from_str` match is case-sensitive) fall through to
     //     `Leaf` and reject — BUT the error message formats with
     //     `state.config.node_type` (the raw string), so the operator sees
     //     their actual typo, not the silently-defaulted "leaf". Pin this so
@@ -7380,7 +7380,7 @@ mod admin_onboard_anchor_tests {
     //     parsers that grep for `[0-9a-f]{64}`. Pin the exact 64-lowercase-
     //     hex shape so the contract is testable, not folklore.
     //   • The success-path `node_type_str` returns the `&'static str` from
-    //     `NodeType::as_str()` (peer.rs:68), which is the exact lowercase
+    //     `NodeType::as_str()` (`peer.rs`), which is the exact lowercase
     //     "anchor" string. The static-lifetime guarantee matters because the
     //     value is embedded in the JSON response without copying — a regression
     //     that returned `state.config.node_type.clone()` (a `String`) would
@@ -7416,7 +7416,7 @@ mod admin_onboard_anchor_tests {
 
     #[test]
     fn batch_w_unknown_node_type_string_preserves_raw_value_in_error_message() {
-        // `NodeType::from_str` (peer.rs:57) is case-sensitive — uppercase
+        // `NodeType::from_str` (`peer.rs`) is case-sensitive — uppercase
         // "ANCHOR" falls through the match-default to `Leaf`, which then
         // fails `can_seal_epochs()`. The error message is built from
         // `state.config.node_type` (the raw operator-supplied string), NOT
@@ -7475,7 +7475,7 @@ mod admin_onboard_anchor_tests {
 
     #[test]
     fn batch_w_success_node_type_str_pinned_to_lowercase_anchor_static_lifetime() {
-        // The 4th tuple field comes from `NodeType::as_str()` (peer.rs:68),
+        // The 4th tuple field comes from `NodeType::as_str()` (`peer.rs`),
         // which returns a `&'static str` — exact lowercase "anchor", 6
         // chars. A regression that swapped to `state.config.node_type.as_str()`
         // (a `&str` borrowing into the operator's raw config) would leak
@@ -10611,7 +10611,7 @@ mod admin_zones_scope_tests {
     /// Inject a synthetic `(zone, record_id)` entry into `CF_RECORD_BY_ZONE`
     /// so `state.rocks.zone_idx_total_entries()` / `zone_idx_distinct_zones()`
     /// surface non-trivial counts in unit tests. Key layout matches
-    /// `StorageEngine::zone_idx_key` (rocks.rs:726): `zone_key(8) ||
+    /// `StorageEngine::zone_idx_key` (`rocks.rs`): `zone_key(8) ||
     /// timestamp_be(8) || record_id_utf8` — pinned here so the helper drifts
     /// in lockstep with the production key encoder if it ever changes.
     fn inject_zone_idx_entry(

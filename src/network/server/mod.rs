@@ -5097,8 +5097,16 @@ pub(crate) async fn metrics_body_tiered(
     );
 
     // Incremental counter — was `latest_epoch.values().map(|n| n+1).sum()`,
-    // O(zones) under the epoch read lock on every scrape. Counter is maintained
-    // at every `latest_epoch` mutation site and on snapshot restore.
+    // O(zones) under the epoch read lock on every scrape. Kept exact by
+    // `apply_canonical_seal` on the normal seal path, and re-derived by
+    // `recount_total_epochs()` wherever `latest_epoch` is written DIRECTLY and
+    // therefore bypasses it: `EpochState::from_snapshot`, the boot RocksDB/JSON
+    // merge (`elara_node.rs`), the F-10 CF_EPOCHS tip recovery (`epoch.rs`), and
+    // — added by R-B3 M3 — the peer-snapshot install in
+    // `apply_bootstrap_snapshot_full` (`sync.rs`). That last one is why the old
+    // wording was too strong: "on snapshot restore" was true of `from_snapshot`,
+    // but the bootstrap install merges four maps into the LIVE epoch state and
+    // was NOT covered.
     let (
         epoch_count,
         za_tracked,
@@ -5458,10 +5466,10 @@ pub(crate) async fn metrics_body_tiered(
          # HELP elara_identity_promotion_user_to_witness_total Count of identities that physically migrated USER→WITNESS via class promotion (write to CF_IDENTITIES_WITNESS + tombstone of USER+TS+REV in one atomic batch). Bumps in process_deferred_attestations when a witness write finds a pre-existing user-tier entry.\n\
          # TYPE elara_identity_promotion_user_to_witness_total counter\n\
          elara_identity_promotion_user_to_witness_total {idp_promo_user_to_witness}\n\
-         # HELP elara_identity_promotion_user_to_anchor_total Count of identities that physically migrated USER→ANCHOR. Currently only triggered by tests; production anchor writes will route through this counter once the genesis-anchor and VRF flows migrate to store_public_key_anchor.\n\
+         # HELP elara_identity_promotion_user_to_anchor_total NOT WIRED — ALWAYS 0. Intended: identities that physically migrated USER→ANCHOR. Verified 2026-09-06: the field is declared and exported but has NO writer anywhere in src/ or crates/, production OR test, so this series is structurally incapable of moving. Do NOT read 0 as no-promotions-happened; it means not-measured. The previous text here said it was triggered by tests, which is also false now — no test writes it either. Its sibling elara_identity_promotion_user_to_witness_total IS wired (state_core.rs, process_deferred_attestations) and is the one to trust. Wiring the two ANCHOR counters is a design question on an authority-granting path, filed rather than patched once the genesis-anchor and VRF flows migrate to store_public_key_anchor.\n\
          # TYPE elara_identity_promotion_user_to_anchor_total counter\n\
          elara_identity_promotion_user_to_anchor_total {idp_promo_user_to_anchor}\n\
-         # HELP elara_identity_promotion_witness_to_anchor_total Count of identities that physically migrated WITNESS→ANCHOR (write to CF_IDENTITIES_ANCHOR + tombstone of WITNESS in one atomic batch).\n\
+         # HELP elara_identity_promotion_witness_to_anchor_total NOT WIRED — ALWAYS 0. Intended: identities that physically migrated WITNESS→ANCHOR (write to CF_IDENTITIES_ANCHOR + tombstone of WITNESS in one atomic batch). Verified 2026-09-06: declared and exported, NO writer anywhere in src/ or crates/, production or test. Do NOT read 0 as no-promotions-happened; it means not-measured. See the user_to_anchor HELP above for the same disclosure.\n\
          # TYPE elara_identity_promotion_witness_to_anchor_total counter\n\
          elara_identity_promotion_witness_to_anchor_total {idp_promo_witness_to_anchor}\n\
          # HELP elara_identity_witness_purged_total Cumulative count of witness-tier PKs dropped from CF_IDENTITIES_WITNESS because the unsubscribed zone was their last claim. Climbs when an operator unsubscribes a zone whose witness set was disjoint from every other zone they serve. Anchor-tier PKs are never touched.\n\
@@ -7809,8 +7817,10 @@ pub(crate) async fn metrics_body_tiered(
     let boot_root_mismatch = state.boot_sealed_root_mismatch_total.load(std::sync::atomic::Ordering::Relaxed);
     let boot_root_phantom = state.boot_sealed_root_phantom_total.load(std::sync::atomic::Ordering::Relaxed);
     let boot_root_skipped = state.boot_sealed_root_skipped_total.load(std::sync::atomic::Ordering::Relaxed);
+    let boot_rebuild_empty_skipped = state.boot_rebuild_empty_install_skipped_total.load(std::sync::atomic::Ordering::Relaxed);
     let sb_ledger_flag   = state.ledger_loaded_from_snapshot.load(std::sync::atomic::Ordering::Relaxed) as u64;
     let pin_boot_refusals = state.pinned_anchor_bootstrap_refusals_total.load(std::sync::atomic::Ordering::Relaxed);
+    let snap_signer_rejections = state.snapshot_signer_trust_rejections_total.load(std::sync::atomic::Ordering::Relaxed);
     let pin_completion_alarms = state.pinned_anchor_completion_alarms_total.load(std::sync::atomic::Ordering::Relaxed);
     let pin_probe_inconclusive = state.pinned_anchor_probe_inconclusive_total.load(std::sync::atomic::Ordering::Relaxed);
     let pin_mint_rejections = state.pinned_genesis_mint_rejections_total.load(std::sync::atomic::Ordering::Relaxed);
@@ -7859,9 +7869,15 @@ pub(crate) async fn metrics_body_tiered(
          # HELP elara_boot_sealed_root_skipped_total §6a boot checks that could not run soundly (multi-zone, no tip epoch, no Gap-1 seal at tip, or unsealed overhang). Each is a zero-false-positive bail-out, not a pass.\n\
          # TYPE elara_boot_sealed_root_skipped_total counter\n\
          elara_boot_sealed_root_skipped_total {boot_root_skipped}\n\
+         # HELP elara_boot_rebuild_empty_install_skipped_total R-B3e guard: boot record-replay rebuilds that produced NO zone tips and were therefore NOT installed over the live epoch state (a concurrent peer-snapshot install would otherwise be erased). Expected 0 on every boot that has records; a non-zero value on a joiner = the race fired and was caught.\n\
+         # TYPE elara_boot_rebuild_empty_install_skipped_total counter\n\
+         elara_boot_rebuild_empty_install_skipped_total {boot_rebuild_empty_skipped}\n\
          # HELP elara_pinned_anchor_bootstrap_refusals_total SEC-REGENESIS-FENCE: bootstrap snapshots/peers refused because their carried epoch tip contradicted a PINNED_CHAIN_ANCHORS entry (pre-mutation check) or the peer AFFIRMATIVELY served a different hash at the pinned epoch on the bounded /headers/from/{{E}} probe. Per-peer DEFER/retry, never a brick. Any non-zero value means a peer served provably wrong-chain data at the pin.\n\
          # TYPE elara_pinned_anchor_bootstrap_refusals_total counter\n\
          elara_pinned_anchor_bootstrap_refusals_total {pin_boot_refusals}\n\
+         # HELP elara_snapshot_signer_trust_rejections_total R-B3a: bootstrap snapshots REJECTED because their Dilithium3 signer was not in {{genesis_authority}} U trusted_snapshot_signers — the gate that decides who may install a joiner's epoch tips at all (enforce_snapshot_signer_trust, both acquisition paths). Distinct from elara_pinned_anchor_bootstrap_refusals_total, which checks the carried tip against a compiled-in chain anchor and authenticates nobody; read the two together. Expected 0 on this fleet as a RUNTIME fact, not 0-by-construction: the authority seed is the only snapshot source and trusted_snapshot_signers ships empty, so there is no untrusted signer to reject. Non-zero = a peer served a snapshot signed by a key this node does not accept; refusal is per-peer DEFER/retry, never a brick.\n\
+         # TYPE elara_snapshot_signer_trust_rejections_total counter\n\
+         elara_snapshot_signer_trust_rejections_total {snap_signer_rejections}\n\
          # HELP elara_pinned_anchor_completion_alarms_total SEC-REGENESIS-FENCE completion guard (periodic, health_check_loop): ticks where epoch state was populated yet a pinned zone sat below its compiled-in anchor epoch for >= the debounce window — the node is parked on frozen pre-re-genesis or foreign history that cannot serve the pin (the at-pin point-assertion is vacuous in that shape). Node keeps syncing; sustained growth requires operator attention (check seed peers).\n\
          # TYPE elara_pinned_anchor_completion_alarms_total counter\n\
          elara_pinned_anchor_completion_alarms_total {pin_completion_alarms}\n\
@@ -7944,6 +7960,8 @@ pub(crate) async fn metrics_body_tiered(
     // eviction pressure must be visible.
     let park_evicted = state.gossip_park_evicted_total.load(std::sync::atomic::Ordering::Relaxed);
     let park_requeue_dropped = state.gossip_park_requeue_dropped_total.load(std::sync::atomic::Ordering::Relaxed);
+    let park_aged_out = state.gossip_park_aged_out_total.load(std::sync::atomic::Ordering::Relaxed);
+    let park_dedup_skipped = state.gossip_park_dedup_skipped_total.load(std::sync::atomic::Ordering::Relaxed);
     let park_lane_seal_len = state.gossip_retry.lock_recover().len();
     let park_lane_super_seal_len = state.super_seal_retry.lock_recover().len();
     let body = format!("{body}\
@@ -7953,12 +7971,43 @@ pub(crate) async fn metrics_body_tiered(
          # HELP elara_gossip_park_requeue_dropped_total Parked entries dropped by the drain's re-queue because the lane refilled during the drain (attempts lost; was uncounted before R1-X1-V-P). Healthy = 0.\n\
          # TYPE elara_gossip_park_requeue_dropped_total counter\n\
          elara_gossip_park_requeue_dropped_total {park_requeue_dropped}\n\
+         # HELP elara_gossip_park_aged_out_total Parked ids that reached GOSSIP_RETRY_MAX_ATTEMPTS and were dropped without re-parking — the lane's DESIGNED age-out, metered at all four exits that previously took it silently (super-seal dispose, seal dispose fall-through, drain fetch-miss, drain retryable re-fail). Meter only, no behaviour change. Unlike elara_gossip_park_evicted_total (cap pressure) a climb here is aging working as intended; read the two together to tell saturation from aging.\n\
+         # TYPE elara_gossip_park_aged_out_total counter\n\
+         elara_gossip_park_aged_out_total {park_aged_out}\n\
+         # HELP elara_gossip_park_dedup_skipped_total Re-queue attempts skipped because the id was already parked in the lane (retry_parked_lane's dedup). Meter only — a non-zero value is healthy and just means concurrent paths converged on the same id; it distinguishes that from the drain actually losing entries.\n\
+         # TYPE elara_gossip_park_dedup_skipped_total counter\n\
+         elara_gossip_park_dedup_skipped_total {park_dedup_skipped}\n\
          # HELP elara_gossip_park_lane_seal_len Current occupancy of the seal park lane (cap GOSSIP_RETRY_CAP = 1024).\n\
          # TYPE elara_gossip_park_lane_seal_len gauge\n\
          elara_gossip_park_lane_seal_len {park_lane_seal_len}\n\
          # HELP elara_gossip_park_lane_super_seal_len Current occupancy of the super-seal park lane (cap SUPER_SEAL_RETRY_CAP = 256).\n\
          # TYPE elara_gossip_park_lane_super_seal_len gauge\n\
          elara_gossip_park_lane_super_seal_len {park_lane_super_seal_len}\n\
+    ");
+
+    // R1-X1-V-B (brief §8): boot-time replay admission. Both doors the brief
+    // describes are open — `bootstrap_store_record` writes a signature-valid
+    // foreign seal into RocksDB with no admission call, and boot replay used to
+    // register it unfiltered. The gate SKIPS an inadmissible creator's seal at
+    // five registration sites; DEFER, never delete, so a later pass re-admits a
+    // creator that becomes staked.
+    let vb_skip_epoch = state.epoch_seal_replay_inadmissible_skipped_epoch.load(std::sync::atomic::Ordering::Relaxed);
+    let vb_skip_global = state.epoch_seal_replay_inadmissible_skipped_global.load(std::sync::atomic::Ordering::Relaxed);
+    let vb_skip_rebuild = state.epoch_seal_replay_inadmissible_skipped_rebuild.load(std::sync::atomic::Ordering::Relaxed);
+    let vb_skip_canon = state.epoch_seal_replay_inadmissible_skipped_canonicalize.load(std::sync::atomic::Ordering::Relaxed);
+    let vb_skip_window = state.epoch_seal_replay_inadmissible_skipped_window.load(std::sync::atomic::Ordering::Relaxed);
+    let vb_admitted = state.epoch_seal_replay_admitted_nongenesis_total.load(std::sync::atomic::Ordering::Relaxed);
+    let body = format!("{body}\
+         # HELP elara_epoch_seal_replay_inadmissible_skipped_total Seals SKIPPED at a boot-time replay registration site because the creator was neither the genesis authority nor in the staked set (R1-X1-V-B). Fixed 5-value site label, never a zone label. Expected 0 on today's fleet because one node is both the genesis authority and the only sealer — a RUNTIME fact, NOT 0-by-construction. A nonzero value is not automatically an attack: it can also mean a seal that live ingest never membership-checked (a zone with no epoch_start_ts skips the rank check entirely — R-B9). Read it against elara_epoch_seal_replay_admitted_nongenesis_total, never alone.\n\
+         # TYPE elara_epoch_seal_replay_inadmissible_skipped_total counter\n\
+         elara_epoch_seal_replay_inadmissible_skipped_total{{site=\"epoch\"}} {vb_skip_epoch}\n\
+         elara_epoch_seal_replay_inadmissible_skipped_total{{site=\"global\"}} {vb_skip_global}\n\
+         elara_epoch_seal_replay_inadmissible_skipped_total{{site=\"rebuild\"}} {vb_skip_rebuild}\n\
+         elara_epoch_seal_replay_inadmissible_skipped_total{{site=\"canonicalize\"}} {vb_skip_canon}\n\
+         elara_epoch_seal_replay_inadmissible_skipped_total{{site=\"window\"}} {vb_skip_window}\n\
+         # HELP elara_epoch_seal_replay_admitted_nongenesis_total Seals ADMITTED by the R1-X1-V-B replay gate whose creator was NOT the genesis authority — the denominator that stops the skipped counters being read in isolation. Expected 0 on a single-authority fleet for the same runtime reason as above.\n\
+         # TYPE elara_epoch_seal_replay_admitted_nongenesis_total counter\n\
+         elara_epoch_seal_replay_admitted_nongenesis_total {vb_admitted}\n\
     ");
 
     let c2_chain_rejected = state.epoch_seal_chain_link_rejected_total.load(std::sync::atomic::Ordering::Relaxed);
@@ -9940,7 +9989,7 @@ pub(crate) async fn metrics_body_tiered(
          # HELP elara_cgroup_memory_pgmajfault_total Cumulative MAJOR page faults charged to this cgroup, from /sys/fs/cgroup/<own>/memory.stat `pgmajfault`. COUNTER. Major fault = page is NOT resident, kernel must read it from disk (swap or file-backed mmap) — this is the proximate signal for cache thrashing. EVERY major fault is a disk seek tax on tail latency. Healthy phone-tier sits at 0 forever after warmup; sustained rate > 0 means working set has overflowed RAM and the kernel is paying disk-IO for what should be RAM hits. Cross-tab with elara_psi_io_some_total: coincident spike = confirmed memory pressure flushing to disk. Operator action: drop block_cache_limit OR add RAM OR shed load.\n\
          # TYPE elara_cgroup_memory_pgmajfault_total counter\n\
          elara_cgroup_memory_pgmajfault_total {cg_mem_pgmajfault}\n\
-         # HELP elara_cgroup_memory_workingset_refault_file_total File pages evicted from cache and then re-faulted in, from /sys/fs/cgroup/<own>/memory.stat `workingset_refault_file`. COUNTER. The EARLY-WARNING for cache pressure — fires BEFORE pgmajfault explodes because re-faults hit the inactive list first. Kernel evicted a file page (decided it was cold), then the same page was needed again (proving it was actually hot) — working set genuinely exceeds cache budget. Healthy = 0 for the lifetime of the process. ANY sustained non-zero rate = the kernel's reclaim heuristic is making wrong decisions about what's hot — block_cache is undersized OR there's competing memory pressure from another cgroup. Predictive: refault counter rises minutes-to-hours before pgmajfault, giving an operator early-warning window to act before tail latencies tank.\n\
+         # HELP elara_cgroup_memory_workingset_refault_file_total File pages evicted from cache and then re-faulted in, from /sys/fs/cgroup/<own>/memory.stat `workingset_refault_file`. COUNTER. The EARLY-WARNING for cache pressure — fires BEFORE pgmajfault explodes because re-faults hit the inactive list first. Kernel evicted a file page (decided it was cold), then the same page was needed again (proving it was actually hot) — working set genuinely exceeds cache budget. **READ THE RATE, NOT THE LEVEL — a non-zero total is NOT an incident.** A few hundred to a few thousand refaults accumulate during startup/warmup while the kernel learns the working set, and then stop; measured on the authority seed 2026-09-06 at 52 min uptime: total pinned at 1790 across a 90 s sample (rate exactly 0) with memory PSI some/full avg10/60/300 all 0.0000 and pgmajfault_total = 1, i.e. a provably healthy node. The earlier wording here said Healthy-equals-0-for-the-lifetime-of-the-process, which contradicted this line's own rate framing and would have an operator open an incident on that node. What actually matters: a SUSTAINED non-zero rate = the kernel's reclaim heuristic is making wrong decisions about what's hot — block_cache undersized OR competing memory pressure from another cgroup. Corroborate before acting: elara_cgroup_pressure_{{some,full}}_avg60{{resource=memory}} > 0 AND pgmajfault_total climbing. If PSI is 0 and pgmajfault is flat, the refault total is warmup residue. Predictive value is in that rate: it rises minutes-to-hours before pgmajfault, giving an early-warning window before tail latencies tank.\n\
          # TYPE elara_cgroup_memory_workingset_refault_file_total counter\n\
          elara_cgroup_memory_workingset_refault_file_total {cg_mem_ws_refault_file}\n\
          # HELP elara_cgroup_cpu_usage_us_total Cumulative CPU time consumed by this cgroup in microseconds, from /sys/fs/cgroup/<own>/cpu.stat `usage_usec`. COUNTER. Diverges from elara_process_cpu_time_total when the cgroup contains multiple processes OR when CPU steal is happening (process accounting reflects wall-clock-on-CPU but cgroup accounting reflects what the scheduler attributed to us). Comparing rate(usage_us_total) vs rate(process_cpu_time_total)*1e6 surfaces co-tenant theft on shared-cloud hosts. Phone-tier nodes typically have 1:1 (single process per cgroup), so divergence is a significant alarm.\n\

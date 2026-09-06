@@ -9553,7 +9553,7 @@ recent_bad_sig_record_ids: std::collections::VecDeque::new(),
 
     #[tokio::test]
     async fn router_witness_signed_record_returns_identity_hash_and_dilithium_sig() {
-        // Happy path through `handle_witness` (router.rs:821): the handler
+        // Happy path through `handle_witness`: the handler
         // verifies the inbound record's signature against creator_pk, signs
         // its `signable_bytes()` with the server identity, and returns
         // `identity_hash || attestation_sig`. Light client SDKs need this
@@ -9769,7 +9769,7 @@ recent_bad_sig_record_ids: std::collections::VecDeque::new(),
 
     #[tokio::test]
     async fn router_receive_conflict_proof_garbage_body_returns_bad_request() {
-        // `handle_receive_conflict_proof` (router.rs:1287) decodes the
+        // `handle_receive_conflict_proof` decodes the
         // body to `ConflictProof` before any slot-key / verify work.
         // Garbage in → 400, not 500.
         let server_id = TestIdentity::new();
@@ -9802,7 +9802,7 @@ recent_bad_sig_record_ids: std::collections::VecDeque::new(),
 
     #[tokio::test]
     async fn router_submit_xzone_abort_witness_garbage_body_returns_bad_request() {
-        // `handle_submit_xzone_abort_witness` (router.rs:1393) decodes
+        // `handle_submit_xzone_abort_witness` decodes
         // the body to `XZoneAbortWitnessGossipBody`. Decode failure
         // explicitly bumps `xzone_abort_witness_rejected_total` and
         // returns `ElaraError::Wire` — pq_status must map this to 400.
@@ -9836,7 +9836,7 @@ recent_bad_sig_record_ids: std::collections::VecDeque::new(),
 
     #[tokio::test]
     async fn router_submit_transition_seal_garbage_body_returns_bad_request() {
-        // `handle_submit_transition_seal` (router.rs:2860) decodes the
+        // `handle_submit_transition_seal` decodes the
         // body to `TransitionSeal` before any validate_structure / store
         // work. Json parse failure → ElaraError::from(serde_json::Error)
         // → pq_status 400. Locks the gate so a future refactor can't
@@ -9871,7 +9871,7 @@ recent_bad_sig_record_ids: std::collections::VecDeque::new(),
 
     #[tokio::test]
     async fn router_submit_transition_sig_missing_seal_id_header_returns_bad_request() {
-        // `handle_submit_transition_sig` (router.rs:2935) requires a
+        // `handle_submit_transition_sig` requires a
         // `seal_id` request header before it touches the body. Calling
         // without the header must surface as 400 via the explicit
         // `ElaraError::Wire("submit_transition_sig: missing \`seal_id\` header")`
@@ -9911,7 +9911,7 @@ recent_bad_sig_record_ids: std::collections::VecDeque::new(),
 
     #[test]
     fn batch_v_error_status_pins_every_explicit_elara_error_to_pq_status() {
-        // `error_status` at router.rs:326-337 is the ONLY place an
+        // `error_status` is the ONLY place an
         // ElaraError becomes a PQ response status. Every PqNodeClient
         // retry / fail-fast branch reads off these codes:
         //   - 400 Wire/Json/DuplicateRecord/MissingParent → client surfaces
@@ -10012,7 +10012,7 @@ recent_bad_sig_record_ids: std::collections::VecDeque::new(),
 
     #[test]
     fn batch_w_att_to_json_with_none_public_key_omits_field_entirely() {
-        // `att_to_json` at router.rs:1034-1045 conditionally includes the
+        // `att_to_json` conditionally includes the
         // `witness_public_key` field only when `Some(pk)`. The PQ-wire
         // contract for attestation list responses is: pre-PQ-verification
         // attestations land with `witness_public_key = None` and the JSON
@@ -10124,7 +10124,7 @@ recent_bad_sig_record_ids: std::collections::VecDeque::new(),
 
     #[test]
     fn batch_w_to_body_round_trips_serializable_to_json_bytes() {
-        // `to_body` at router.rs:359-361 is the single chokepoint where
+        // `to_body` is the single chokepoint where
         // EVERY handler in this file converts its response struct/json!
         // value into the `Vec<u8>` body that the PQ envelope carries.
         // The pin asserts (1) the serialization path is utf-8 valid JSON

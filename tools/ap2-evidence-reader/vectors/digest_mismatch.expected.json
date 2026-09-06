@@ -1,0 +1,23 @@
+{
+ "description": "One content field altered after sealing: the recomputed digest no longer matches, and the producer signatures (over the recomputed digest) fail with it.",
+ "normative": {
+  "bindings_ok": true,
+  "digest_ok": false,
+  "policy_ok": true,
+  "pq_protected": false,
+  "producer_ok": false,
+  "producer_present": true,
+  "producer_trusted": null,
+  "rfc3161_claimed": false,
+  "rfc3161_verified": null,
+  "self_asserted_only": true,
+  "valid": false
+ },
+ "policy": {
+  "require_anchor": false,
+  "require_pq": false,
+  "require_producer": false,
+  "trusted_producer_keys": null
+ },
+ "vector": "digest_mismatch"
+}

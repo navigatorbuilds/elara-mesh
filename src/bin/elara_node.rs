@@ -2234,6 +2234,18 @@ async fn run() -> Result<()> {
     // Always check RocksDB epoch snapshot — it may be fresher than the JSON
     // snapshot (which can be minutes stale). Merge by taking max epoch per zone.
     let need_epoch = match node_state.rocks.load_snapshot::<elara_runtime::network::epoch::EpochStateSnapshot>("epoch") {
+        // R-B3e guard (a): a persisted epoch state with NO zone tips is the
+        // fingerprint of a lost boot race (the replay task wrote its empty state
+        // over sync's peer-snapshot install). Installing or merging it would make
+        // that permanent — `Ok(Some(empty))` sets need_epoch=false, so no replay
+        // ever runs again and both boot heals no-op on an empty map. Treat it as
+        // ABSENT instead and let record replay rebuild; there are no tips to lose.
+        Ok(Some(ref snap))
+            if elara_runtime::network::epoch::loaded_epoch_state_is_empty(snap) =>
+        {
+            warn!("persisted epoch state is EMPTY — treating as absent; record replay will rebuild");
+            !epoch_already_restored
+        }
         Ok(Some(snap)) => {
             // stale-zone pruning deferred to after LIVENESS-2 rehydration (see
             // note above) — do not prune with the pre-rehydration zone_count.
@@ -2319,6 +2331,19 @@ async fn run() -> Result<()> {
     // arrive (~64 min at mainnet 60s cadence; effectively never at testnet
     // cadence). Bounded reverse scan; no-op when latest_epoch is empty.
     {
+        // R1-X1-V-B: hoist the staked set ONCE before the epoch write lock.
+        // Reachability: this bare block runs on EVERY boot (unlike the
+        // `process_record` site, which runs only under `need_epoch`), but it
+        // heals only zones already present in `latest_epoch`.
+        let (_, _, vb_staked) = node_state.staked_anchor_view_with_set().await;
+        let vb_admit = elara_runtime::network::epoch::SealReplayAdmission {
+            genesis_authority: &node_state.config.genesis_authority,
+            staked: &vb_staked,
+        };
+        info!(
+            staked = vb_staked.len(),
+            "R1-X1-V-B replay admission hoisted (boot rebuild/window block)"
+        );
         let mut epoch = node_state.epoch.write_recover();
         // F-10: recover the per-zone epoch tip from the durable CF_EPOCHS index
         // BEFORE repopulating the super-seal buffer. A periodic (async) snapshot
@@ -2327,14 +2352,27 @@ async fn run() -> Result<()> {
         // already-sealed epoch trips the seal-equivocation detector. Running
         // first also lets `repopulate_recent_seal_hashes` window off the
         // corrected tip. See internal design notes.
-        elara_runtime::network::epoch::rebuild_latest_epoch_from_cf_epochs(
+        let vb_skipped_rebuild = elara_runtime::network::epoch::rebuild_latest_epoch_from_cf_epochs(
             &mut epoch,
             &node_state.rocks,
+            vb_admit,
         );
-        elara_runtime::network::epoch::repopulate_recent_seal_hashes(
+        let vb_skipped_window = elara_runtime::network::epoch::repopulate_recent_seal_hashes(
             &mut epoch,
             &node_state.rocks,
+            vb_admit,
         );
+        drop(epoch);
+        if vb_skipped_rebuild > 0 {
+            node_state
+                .epoch_seal_replay_inadmissible_skipped_rebuild
+                .fetch_add(vb_skipped_rebuild, std::sync::atomic::Ordering::Relaxed);
+        }
+        if vb_skipped_window > 0 {
+            node_state
+                .epoch_seal_replay_inadmissible_skipped_window
+                .fetch_add(vb_skipped_window, std::sync::atomic::Ordering::Relaxed);
+        }
     }
 
     // LIVENESS-2: rehydrate zone_transition schedule from CF_IDX_CREATOR.
@@ -2898,6 +2936,19 @@ async fn run() -> Result<()> {
             None
         };
 
+        // R1-X1-V-B: hoist the staked set ONCE, INSIDE this spawned task and
+        // immediately before `spawn_blocking` — the replay closure is sync
+        // (`impl FnMut(&ValidationRecord)`) and cannot await, so the set must be
+        // moved in. R-B7: the delta-sync task replaces the SAME ledger through
+        // an Arc clone of NodeState, so this view is fresh at hoist time only;
+        // that residual is liveness-only under DEFER (deferred this boot,
+        // admitted next). Never a bespoke ledger read; never a read per record.
+        let (_, _, vb_staked) = node_state.staked_anchor_view_with_set().await;
+        info!(
+            staked = vb_staked.len(),
+            "R1-X1-V-B replay admission hoisted (boot record replay)"
+        );
+
         // Collect which subsystems need rebuild into the closure
         let rebuild_flags = (
             need_epoch, need_trust, need_key_registry, need_sunset,
@@ -2988,9 +3039,35 @@ async fn run() -> Result<()> {
                 // on the rebuild iteration that already runs.
                 state2.record_stats_bump(rec);
 
-                // Epoch: register seals
+                // Epoch: register seals — R1-X1-V-B site S1 (+ S4, global arm).
+                // The borrowing view is built INSIDE the closure over the moved
+                // Arc; `genesis_auth` is the String cloned before the spawn.
                 if let Some(ref mut es) = epoch_state {
-                    es.process_record(rec);
+                    let vb_admit = epoch::SealReplayAdmission {
+                        genesis_authority: &genesis_auth,
+                        staked: &vb_staked,
+                    };
+                    // Bump the counters on the shared state rather than widen
+                    // the rebuild task's 9-tuple — the same call the T61 note
+                    // above makes for continuity.
+                    match es.process_record(rec, vb_admit) {
+                        epoch::ReplaySkip::None => {}
+                        epoch::ReplaySkip::Epoch => {
+                            state2
+                                .epoch_seal_replay_inadmissible_skipped_epoch
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        epoch::ReplaySkip::Global => {
+                            state2
+                                .epoch_seal_replay_inadmissible_skipped_global
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        epoch::ReplaySkip::AdmittedNonGenesis => {
+                            state2
+                                .epoch_seal_replay_admitted_nongenesis_total
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
+                    }
                 }
 
                 // Trust: record submission
@@ -3205,14 +3282,26 @@ async fn run() -> Result<()> {
                 if let Some(epoch_state) = epoch_r {
                     let zone_count = epoch_state.latest_epoch.len();
                     let total_seals: u64 = epoch_state.latest_epoch.values().map(|n| n + 1).sum();
-                    {
+                    // R-B3e guard (b): this install is UNORDERED against the
+                    // concurrent sync task, which may already have installed
+                    // peer-snapshot tips. An empty rebuild must never overwrite
+                    // them — the helper skips the assignment and still re-scopes
+                    // the anchors (which fail closed, so skipping that is the
+                    // unsafe direction).
+                    let installed = {
                         let mut ep = rebuild_state.epoch.write_recover();
-                        *ep = epoch_state;
-                        // §E fence: wholesale install resets the anchor
-                        // scoping — re-derive from the configured network.
-                        ep.scope_chain_anchors_to_network(&rebuild_state.config.network_id);
-                    }
-                    if total_seals > 0 {
+                        elara_runtime::network::epoch::install_rebuilt_epoch_state(
+                            &mut ep,
+                            epoch_state,
+                            &rebuild_state.config.network_id,
+                        )
+                    };
+                    if !installed {
+                        rebuild_state
+                            .boot_rebuild_empty_install_skipped_total
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        info!("boot rebuild produced no zone tips — live epoch state kept");
+                    } else if total_seals > 0 {
                         info!("epoch state rebuilt from records: {} zones, {} total seals", zone_count, total_seals);
                     }
                 }

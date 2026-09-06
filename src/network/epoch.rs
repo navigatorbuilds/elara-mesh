@@ -2056,12 +2056,47 @@ impl EpochState {
 
     /// Process a single record during streaming rebuild. Extracts and registers
     /// epoch seals. O(1) per record — no collection needed.
-    pub fn process_record(&mut self, rec: &crate::record::ValidationRecord) {
+    /// R1-X1-V-B site **S1** (+ **S4**, the global arm). Boot replay's per-record
+    /// registration, gated on creator admissibility.
+    ///
+    /// Reachability: this is the site that covers a NON-ANCHOR joiner. Its first
+    /// boot after a hostile bootstrap holds no epoch snapshot, so `need_epoch` is
+    /// true and the full gated replay runs. (A node that DOES hold a persisted
+    /// snapshot installs it wholesale and never reaches here — that is R-B1, whose
+    /// disposition is the runbook line, not a sweep.)
+    ///
+    /// DEFER semantics: an inadmissible seal is SKIPPED, never deleted and never
+    /// marked. The caller bumps the counter from the returned [`ReplaySkip`].
+    pub fn process_record(
+        &mut self,
+        rec: &crate::record::ValidationRecord,
+        admit: SealReplayAdmission<'_>,
+    ) -> ReplaySkip {
         if let Ok(Some(seal)) = extract_epoch_seal(rec) {
+            // One hash per already-fetched record, computed only after a seal extracts.
+            let creator = creator_identity_hash(rec);
+            if !admit.admits_replay(&creator) {
+                return ReplaySkip::Epoch;
+            }
             self.register_seal(&seal, &rec.id, rec.record_hash());
+            if creator != admit.genesis_authority {
+                return ReplaySkip::AdmittedNonGenesis;
+            }
         } else if let Ok(Some(gseal)) = extract_global_quorum_seal(rec) {
+            // S4: `register_global_seal` writes `latest_seal_hash[stuck_zone]` with
+            // `>=` behind only the pinned-anchor fence, and is reachable through this
+            // same unfiltered dispatch — so the arm is gated here rather than inside
+            // the registration fn (which live ingest also uses).
+            let creator = creator_identity_hash(rec);
+            if !admit.admits_replay(&creator) {
+                return ReplaySkip::Global;
+            }
             self.register_global_seal(&gseal, &rec.id, rec.record_hash());
+            if creator != admit.genesis_authority {
+                return ReplaySkip::AdmittedNonGenesis;
+            }
         }
+        ReplaySkip::None
     }
 
     /// Get the next expected epoch number for a zone.
@@ -3767,6 +3802,90 @@ impl SealStakeView<'_> {
     }
 }
 
+/// R1-X1-V-B (brief §8, banked 2026-09-06): admission for BOOT-TIME REPLAY
+/// registration. Asks one question — "is this creator admissible?" = the
+/// genesis authority OR present in the staked set.
+///
+/// **Deliberately NOT [`SealStakeView::admits_fastforward`].** That predicate
+/// carries the `>= BOOTSTRAP_MIN_STAKERS` precondition of the fast-forward and
+/// partition-merge arms (its only two consumers), which is meaningless for a
+/// historical seal being replayed — and if the live staked count ever dipped
+/// below 3 via Unstake/Slash it would defer ALL honest non-genesis history on
+/// every node's next full replay: a self-inflicted liveness collapse (R-B10
+/// asymmetry). The affordance is the hazard, so this is a separate type.
+///
+/// **Conservative superset, not a faithful mirror (final-verify A1/D2).**
+/// Membership-only is strictly MORE permissive than live sequential admission:
+/// `verify_aggregator_rank`'s `rank_of` also excludes staked creators outside
+/// the top-`MAX_VIEW_DEPTH` chain. And live admission skips the rank check
+/// entirely when a zone has no `epoch_start_ts` — blanked by
+/// `EpochState::from_snapshot`, empty in `EpochState::new()` — so the first
+/// sequential seal per zone after every restart, and on every fresh node, is
+/// admitted live with no membership check at all. This gate is therefore a
+/// conservative superset of what was checked live, which is the safe direction
+/// for DEFER semantics.
+///
+/// **R-B12 (read-and-record, answered 2026-09-06):** one OTHER check in
+/// `verify_epoch_seal_inner` does constrain a non-genesis creator's seal in the
+/// no-`epoch_start_ts` window — step 1 (`epoch.rs`, "Check creator is an
+/// authorized anchor") hard-rejects a non-genesis seal that lacks
+/// `vrf_output`/`vrf_proof`, unconditionally, before the rank block. It is NOT
+/// a membership check: it constrains the seal's SHAPE, not who the creator is,
+/// and an attacker holding a fresh key self-generates a VRF output and proof
+/// over that key to satisfy it. So it narrows the forgery to "must look like a
+/// VRF-bearing seal" and leaves the admissibility question this gate answers
+/// entirely open. No design change either way, as the ruling anticipated.
+///
+/// **DEFER, never reject.** A skipped seal is never deleted and never marked;
+/// every later pass re-evaluates it, so a creator that becomes staked is
+/// admitted on the next replay.
+#[derive(Clone, Copy)]
+pub struct SealReplayAdmission<'a> {
+    /// The chain's genesis authority identity hash — always admissible.
+    pub genesis_authority: &'a str,
+    /// Identity hashes of every anchor with `ledger.staked > 0`, hoisted ONCE
+    /// per pass from `NodeState::staked_anchor_view_with_set`.
+    pub staked: &'a HashSet<String>,
+}
+
+impl<'a> SealReplayAdmission<'a> {
+    /// Membership-only + genesis. No staker-count precondition — see the type doc.
+    pub fn admits_replay(&self, creator: &str) -> bool {
+        creator == self.genesis_authority || self.staked.contains(creator)
+    }
+
+    /// Tests and fixtures: a genesis-only view over a static empty staked set.
+    pub fn genesis_only(genesis_authority: &'a str) -> Self {
+        static EMPTY: std::sync::OnceLock<HashSet<String>> = std::sync::OnceLock::new();
+        SealReplayAdmission {
+            genesis_authority,
+            staked: EMPTY.get_or_init(HashSet::new),
+        }
+    }
+}
+
+/// What a gated replay-registration site skipped, so the caller can bump the
+/// right `site=` label without the gate knowing about metrics.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReplaySkip {
+    /// Registered (or the record carried no seal at all).
+    None,
+    /// A per-zone epoch seal was skipped: creator not admissible.
+    Epoch,
+    /// A global-quorum seal was skipped: creator not admissible.
+    Global,
+    /// Registered, and the creator was NOT the genesis authority — the
+    /// denominator for the skipped counters.
+    ///
+    /// **Deviation from the W-VB-BUILD spec, recorded deliberately.** The spec
+    /// listed `ReplaySkip::{None, Epoch, Global}` and a separate
+    /// `..._admitted_nongenesis_total`. Deriving that at the caller would mean
+    /// re-running `extract_epoch_seal` and re-hashing the creator on every
+    /// admitted record purely to feed a counter; returning it costs nothing
+    /// because the gate has both facts in hand already.
+    AdmittedNonGenesis,
+}
+
 /// Verify that an epoch seal's declared `aggregator_rank` is consistent with
 /// the creator's VRF-stake rank and the exponential-backoff schedule.
 ///
@@ -4911,7 +5030,9 @@ pub fn rebuild_epoch_state(storage: &dyn Storage) -> Result<EpochState> {
 pub fn canonicalize_latest_seals(
     state: &mut EpochState,
     storage: &crate::storage::rocks::StorageEngine,
-) {
+    admit: SealReplayAdmission<'_>,
+) -> u64 {
+    let mut skipped = 0u64;
     let zone_epochs: Vec<(ZoneId, u64)> = state
         .latest_epoch
         .iter()
@@ -4963,6 +5084,14 @@ pub fn canonicalize_latest_seals(
                 Ok(Some(s)) => s,
                 _ => continue,
             };
+            // R1-X1-V-B site S3. Reachability: this fn is called only from
+            // `epoch_seal_loop`'s one-shot, which returns early on
+            // `!is_seal_eligible` — so it protects ANCHORS only. A non-anchor
+            // joiner's coverage is S1 (+ S2/S5 in the bare boot block).
+            if !admit.admits_replay(&creator_identity_hash(&record)) {
+                skipped += 1;
+                continue;
+            }
             state.register_seal(&seal, rid, record.record_hash());
         }
         info!(
@@ -4972,6 +5101,7 @@ pub fn canonicalize_latest_seals(
             epoch_num
         );
     }
+    skipped
 }
 
 /// Gap 1 boot recovery: bounded reverse-scan of CF_EPOCHS to recover the
@@ -5292,12 +5422,14 @@ fn canonical_account_root_at(
 pub fn repopulate_recent_seal_hashes(
     state: &mut EpochState,
     storage: &crate::storage::rocks::StorageEngine,
-) {
+    admit: SealReplayAdmission<'_>,
+) -> u64 {
     use std::collections::{BTreeMap, HashSet};
 
+    let mut skipped = 0u64;
     let active_zones: HashSet<ZoneId> = state.latest_epoch.keys().cloned().collect();
     if active_zones.is_empty() {
-        return;
+        return skipped;
     }
 
     // Global floor: smallest per-zone floor across all active zones. Once the
@@ -5364,6 +5496,14 @@ pub fn repopulate_recent_seal_hashes(
                 Ok(Some(_)) => {}
                 _ => return Ok(true),
             }
+            // R1-X1-V-B site S5. The window feeds the super-seal admission
+            // root, so a hostile hash here costs the victim its super-seal
+            // liveness; the record is already fetched above, so the gate is one
+            // hash. A skipped seal's hash is NOT inserted into the window.
+            if !admit.admits_replay(&creator_identity_hash(&record)) {
+                skipped += 1;
+                return Ok(true);
+            }
             let h = record.record_hash();
             per_zone
                 .entry(zone)
@@ -5404,6 +5544,45 @@ pub fn repopulate_recent_seal_hashes(
             active_zones.len(),
         );
     }
+    skipped
+}
+
+/// R-B3e guard (a): is a PERSISTED epoch snapshot devoid of zone tips?
+///
+/// The boot record-replay task and the initial-sync task race. If sync installed
+/// peer-snapshot tips first and the replay task then wrote its own empty
+/// `EpochState` wholesale, the persisted `"epoch"` snapshot can hold
+/// `latest_epoch == {}` alongside `total_supply > 0`. That state is PERMANENT
+/// unless caught here: on the next boot `Ok(Some(empty))` makes `need_epoch`
+/// false so no replay runs, both boot heals no-op on an empty map, and the
+/// divergence monitor's fresh-node branch is gated on `total_supply == 0` so it
+/// logs "mid-bootstrap … skipping repair" forever. Treating empty as ABSENT
+/// costs one replay and cannot lose data — there are no tips to lose.
+pub fn loaded_epoch_state_is_empty(snap: &EpochStateSnapshot) -> bool {
+    snap.latest_epoch.is_empty()
+}
+
+/// R-B3e guard (b): install a REBUILT `EpochState` over the live one only when it
+/// actually carries zone tips. Returns true iff the assignment happened.
+///
+/// Mirrors the in-tree precedent at the snapshot-restore site in `elara_node.rs`
+/// (`if !epoch_state.latest_epoch.is_empty()`). The anchor re-scope runs on BOTH
+/// paths — `scope_chain_anchors_to_network` fails CLOSED (anchors active) and a
+/// missed call is the unsafe direction, so it must not be skipped just because
+/// the install was.
+pub fn install_rebuilt_epoch_state(
+    ep: &mut EpochState,
+    rebuilt: EpochState,
+    network_id: &str,
+) -> bool {
+    let installed = if rebuilt.latest_epoch.is_empty() {
+        false
+    } else {
+        *ep = rebuilt;
+        true
+    };
+    ep.scope_chain_anchors_to_network(network_id);
+    installed
 }
 
 /// F-10 crash-consistency: recover the per-zone `latest_epoch` high-water from
@@ -5478,11 +5657,13 @@ pub fn repopulate_recent_seal_hashes(
 pub fn rebuild_latest_epoch_from_cf_epochs(
     state: &mut EpochState,
     storage: &crate::storage::rocks::StorageEngine,
-) {
+    admit: SealReplayAdmission<'_>,
+) -> u64 {
     use std::collections::HashMap;
 
+    let mut skipped = 0u64;
     if state.latest_epoch.is_empty() {
-        return;
+        return skipped;
     }
 
     // Only zones the node already tracks can be re-proposed (the seal loop
@@ -5553,6 +5734,7 @@ pub fn rebuild_latest_epoch_from_cf_epochs(
     let mut advanced_zones = 0usize;
     for (zone, (max_epoch, record_ids)) in per_zone {
         let mut registered = 0usize;
+        let mut gated_out = 0usize;
         for rid in &record_ids {
             let record = match storage.get_record(rid) {
                 Ok(Some(r)) => r,
@@ -5565,6 +5747,14 @@ pub fn rebuild_latest_epoch_from_cf_epochs(
                 // is unreachable via production writers today — kept defensive.
                 _ => continue,
             };
+            // R1-X1-V-B site S2. The record is already fetched here, so the
+            // creator hash is one hash on an existing buffer. Skipped seals are
+            // not registered and not deleted (DEFER).
+            if !admit.admits_replay(&creator_identity_hash(&record)) {
+                skipped += 1;
+                gated_out += 1;
+                continue;
+            }
             state.register_seal(&seal, rid, record.record_hash());
             registered += 1;
         }
@@ -5575,6 +5765,24 @@ pub fn rebuild_latest_epoch_from_cf_epochs(
                  (periodic snapshot lagged; {registered} seal(s) canonicalized)",
                 zone.path(),
                 max_epoch,
+            );
+        } else {
+            // R-B13: the scan above keeps ONLY the max epoch's ids per zone, so when
+            // every candidate at that epoch fails to register the zone gets no
+            // registration at all and its tip stays where it was — unhijacked, but
+            // unhealed too, because the honest epochs BELOW the candidate were
+            // already discarded. `skipped` alone cannot tell this apart from
+            // "skipped a plant and healed anyway", so name the zone. `gated_out`
+            // separates a refused creator from a store-level miss (a DISC-5 index
+            // row whose record does not load, or does not parse as a seal).
+            warn!(
+                "F-10: zone={} NOT healed at candidate epoch={} — {gated_out} of {} seal(s) refused by \
+                 the R1-X1-V-B replay gate, 0 registered, tip unchanged (R-B13: honest epochs below the \
+                 candidate were already discarded by the max-epoch scan). Repair: \
+                 internal design notes",
+                zone.path(),
+                max_epoch,
+                record_ids.len(),
             );
         }
     }
@@ -5591,6 +5799,7 @@ pub fn rebuild_latest_epoch_from_cf_epochs(
              past a stale periodic snapshot (scan_iters={iters} hit_cap={hit_cap})"
         );
     }
+    skipped
 }
 
 /// T-F10-MULTIZONE (Layer 3, 2026-09-02): per-tick walk cap for the
@@ -6358,6 +6567,22 @@ pub async fn epoch_seal_loop(
     // rank-0, chain freezes. Idempotent: zones with a single seal at
     // latest_epoch are skipped.
     {
+        // R1-X1-V-B: hoist the staked set ONCE, BEFORE taking the epoch write
+        // lock (this loop is async; the accessor is not callable under the
+        // guard). Never a bespoke ledger read, never a per-record read.
+        // Reachability note: both gated calls below sit in this one-shot, which
+        // has already returned early on `!is_seal_eligible` — so they protect
+        // ANCHORS only. A non-anchor joiner's coverage is `process_record` (S1)
+        // plus the bare boot block's S2/S5 calls in `elara_node.rs`.
+        let (_, _, vb_staked) = state.staked_anchor_view_with_set().await;
+        let vb_admit = SealReplayAdmission {
+            genesis_authority: &state.config.genesis_authority,
+            staked: &vb_staked,
+        };
+        info!(
+            staked = vb_staked.len(),
+            "R1-X1-V-B replay admission hoisted (epoch_seal_loop one-shot)"
+        );
         let mut epoch = state.epoch.write_recover();
         // Supervised-restart recovery (F-10): before canonicalizing, re-derive
         // each TRACKED zone's tip from the durable CF_EPOCHS index — the cheap
@@ -6380,8 +6605,19 @@ pub async fn epoch_seal_loop(
         // a zone whose early seals were GC-pruned below its super-seal floor
         // (queue item F1) is out of reach of both passes. Idempotent + bounded
         // reverse-scan; a no-op once tracked tips match durable.
-        rebuild_latest_epoch_from_cf_epochs(&mut epoch, &state.rocks);
-        canonicalize_latest_seals(&mut epoch, &state.rocks);
+        let vb_skipped_rebuild = rebuild_latest_epoch_from_cf_epochs(&mut epoch, &state.rocks, vb_admit);
+        let vb_skipped_canon = canonicalize_latest_seals(&mut epoch, &state.rocks, vb_admit);
+        drop(epoch);
+        if vb_skipped_rebuild > 0 {
+            state
+                .epoch_seal_replay_inadmissible_skipped_rebuild
+                .fetch_add(vb_skipped_rebuild, Ordering::Relaxed);
+        }
+        if vb_skipped_canon > 0 {
+            state
+                .epoch_seal_replay_inadmissible_skipped_canonicalize
+                .fetch_add(vb_skipped_canon, Ordering::Relaxed);
+        }
     }
 
     // Seed the custodial-idle_decay emit watermark from the restored chain tip
@@ -9300,7 +9536,12 @@ mod tests {
             .latest_seal_hash
             .insert(ZoneId::new(zone), sha3_256(b"stale-45"));
 
-        rebuild_latest_epoch_from_cf_epochs(&mut state, &engine);
+        let vb_creator = sha3_256_hex(&identity.public_key);
+        rebuild_latest_epoch_from_cf_epochs(
+            &mut state,
+            &engine,
+            SealReplayAdmission::genesis_only(&vb_creator),
+        );
 
         assert_eq!(
             state.latest_epoch.get(&ZoneId::new(zone)).copied(),
@@ -9331,7 +9572,12 @@ mod tests {
         state.latest_epoch.insert(ZoneId::new(zone), 30);
         state.latest_seal_hash.insert(ZoneId::new(zone), hash_at_30);
 
-        rebuild_latest_epoch_from_cf_epochs(&mut state, &engine);
+        let vb_creator = sha3_256_hex(&identity.public_key);
+        rebuild_latest_epoch_from_cf_epochs(
+            &mut state,
+            &engine,
+            SealReplayAdmission::genesis_only(&vb_creator),
+        );
 
         assert_eq!(state.latest_epoch.get(&ZoneId::new(zone)).copied(), Some(30));
         assert_eq!(
@@ -9359,7 +9605,12 @@ mod tests {
         let mut state = EpochState::new();
         state.latest_epoch.insert(ZoneId::new(zone), 10); // stale tip
 
-        rebuild_latest_epoch_from_cf_epochs(&mut state, &engine);
+        let vb_creator = sha3_256_hex(&identity.public_key);
+        rebuild_latest_epoch_from_cf_epochs(
+            &mut state,
+            &engine,
+            SealReplayAdmission::genesis_only(&vb_creator),
+        );
 
         assert_eq!(state.latest_epoch.get(&ZoneId::new(zone)).copied(), Some(20));
         assert_eq!(
@@ -9385,7 +9636,12 @@ mod tests {
         state.latest_epoch.insert(ZoneId::new("/zone/a"), 25); // lagging
         state.latest_epoch.insert(ZoneId::new("/zone/b"), 40); // current
 
-        rebuild_latest_epoch_from_cf_epochs(&mut state, &engine);
+        let vb_creator = sha3_256_hex(&identity.public_key);
+        rebuild_latest_epoch_from_cf_epochs(
+            &mut state,
+            &engine,
+            SealReplayAdmission::genesis_only(&vb_creator),
+        );
 
         assert_eq!(
             state.latest_epoch.get(&ZoneId::new("/zone/a")).copied(),
@@ -9408,7 +9664,12 @@ mod tests {
     fn f10_rebuild_empty_state_is_noop() {
         let (engine, _dir) = test_engine();
         let mut state = EpochState::new();
-        rebuild_latest_epoch_from_cf_epochs(&mut state, &engine);
+        let vb_creator = String::new();
+        rebuild_latest_epoch_from_cf_epochs(
+            &mut state,
+            &engine,
+            SealReplayAdmission::genesis_only(&vb_creator),
+        );
         assert!(state.latest_epoch.is_empty());
     }
 
@@ -9417,7 +9678,12 @@ mod tests {
         // Empty latest_epoch → no active zones → no scan, no panic.
         let (engine, _dir) = test_engine();
         let mut state = EpochState::new();
-        repopulate_recent_seal_hashes(&mut state, &engine);
+        let vb_creator = String::new();
+        repopulate_recent_seal_hashes(
+            &mut state,
+            &engine,
+            SealReplayAdmission::genesis_only(&vb_creator),
+        );
         assert!(state.recent_seal_hashes.is_empty());
     }
 
@@ -9447,7 +9713,12 @@ mod tests {
 
         let mut state = EpochState::new();
         state.latest_epoch.insert(ZoneId::new(zone), 79);
-        repopulate_recent_seal_hashes(&mut state, &engine);
+        let vb_creator = sha3_256_hex(&identity.public_key);
+        repopulate_recent_seal_hashes(
+            &mut state,
+            &engine,
+            SealReplayAdmission::genesis_only(&vb_creator),
+        );
 
         let buf = state
             .recent_seal_hashes
@@ -9493,7 +9764,12 @@ mod tests {
         }
         let mut state = EpochState::new();
         state.latest_epoch.insert(ZoneId::new(zone), 5);
-        repopulate_recent_seal_hashes(&mut state, &engine);
+        let vb_creator = sha3_256_hex(&identity.public_key);
+        repopulate_recent_seal_hashes(
+            &mut state,
+            &engine,
+            SealReplayAdmission::genesis_only(&vb_creator),
+        );
 
         let buf = state
             .recent_seal_hashes
@@ -9530,7 +9806,12 @@ mod tests {
         let mut state = EpochState::new();
         state.latest_epoch.insert(ZoneId::new("/zone/a"), 100);
         state.latest_epoch.insert(ZoneId::new("/zone/b"), 200);
-        repopulate_recent_seal_hashes(&mut state, &engine);
+        let vb_creator = sha3_256_hex(&identity.public_key);
+        repopulate_recent_seal_hashes(
+            &mut state,
+            &engine,
+            SealReplayAdmission::genesis_only(&vb_creator),
+        );
 
         assert_eq!(
             state.recent_seal_hashes.get(&ZoneId::new("/zone/a")).unwrap().len() as u64,
@@ -9564,7 +9845,12 @@ mod tests {
 
         let mut state = EpochState::new();
         state.latest_epoch.insert(ZoneId::new(zone), 5);
-        repopulate_recent_seal_hashes(&mut state, &engine);
+        let vb_creator = sha3_256_hex(&identity.public_key);
+        repopulate_recent_seal_hashes(
+            &mut state,
+            &engine,
+            SealReplayAdmission::genesis_only(&vb_creator),
+        );
 
         let buf = state.recent_seal_hashes.get(&ZoneId::new(zone)).unwrap();
         assert_eq!(buf.len(), 1, "one canonical entry per epoch, not two");
@@ -16509,7 +16795,8 @@ mod tests {
 
         let mut boot = EpochState::new();
         boot.latest_epoch.insert(zid.clone(), 128);
-        repopulate_recent_seal_hashes(&mut boot, &engine);
+        let vb_creator = sha3_256_hex(&identity.public_key);
+        repopulate_recent_seal_hashes(&mut boot, &engine, SealReplayAdmission::genesis_only(&vb_creator));
 
         let live_win = live.recent_seal_hashes.get(&zid).expect("live window");
         assert_eq!(Some(live_win), boot.recent_seal_hashes.get(&zid), "live == boot");
@@ -16551,7 +16838,8 @@ mod tests {
 
         let mut boot2 = EpochState::new();
         boot2.latest_epoch.insert(zid.clone(), 128);
-        repopulate_recent_seal_hashes(&mut boot2, &engine);
+        let vb_creator = sha3_256_hex(&identity.public_key);
+        repopulate_recent_seal_hashes(&mut boot2, &engine, SealReplayAdmission::genesis_only(&vb_creator));
         let live_win = live.recent_seal_hashes.get(&zid).expect("live window");
         assert_eq!(
             Some(live_win),
@@ -16999,6 +17287,52 @@ mod tests {
     }
 
     /// from_snapshot must re-derive `total_epochs_total` from the
+    /// R-B3e guard (a): the emptiness predicate the `need_epoch` derivation uses
+    /// to treat a tipless persisted snapshot as ABSENT rather than installing it.
+    #[test]
+    fn rb3e_loaded_epoch_state_is_empty_discriminates() {
+        let empty = EpochState::new().to_snapshot();
+        assert!(
+            loaded_epoch_state_is_empty(&empty),
+            "no zone tips ⇒ empty ⇒ treated as absent"
+        );
+
+        let mut one = EpochState::new();
+        one.latest_epoch.insert(ZoneId::new("/zone/a"), 0);
+        assert!(
+            !loaded_epoch_state_is_empty(&one.to_snapshot()),
+            "a single zone at epoch 0 is NOT empty — the old unwrap_or(0) style \
+             sentinel is exactly the bug this must not reintroduce"
+        );
+    }
+
+    /// R-B3e guard (b): an empty REBUILT state must not overwrite live tips, and
+    /// the anchor re-scope must happen either way.
+    #[test]
+    fn rb3e_install_rebuilt_epoch_state_never_erases_live_tips() {
+        let zone = ZoneId::new("/zone/a");
+
+        // (i) empty rebuild over a live tip → skipped, tips intact.
+        let mut live = EpochState::new();
+        live.latest_epoch.insert(zone.clone(), 9);
+        let installed = install_rebuilt_epoch_state(&mut live, EpochState::new(), "testnet");
+        assert!(!installed, "an empty rebuild must report NOT installed");
+        assert_eq!(
+            live.latest_epoch.get(&zone).copied(),
+            Some(9),
+            "the live tip must survive an empty rebuild — this is the R-B3e race"
+        );
+
+        // (ii) non-empty rebuild → installed and visible.
+        let mut live2 = EpochState::new();
+        live2.latest_epoch.insert(zone.clone(), 9);
+        let mut rebuilt = EpochState::new();
+        rebuilt.latest_epoch.insert(zone.clone(), 12);
+        let installed2 = install_rebuilt_epoch_state(&mut live2, rebuilt, "testnet");
+        assert!(installed2, "a rebuild with tips must report installed");
+        assert_eq!(live2.latest_epoch.get(&zone).copied(), Some(12));
+    }
+
     /// restored `latest_epoch` map, and recount must be idempotent on re-call.
     /// Models a node restart where the snapshot was written before the counter
     /// existed (counter not in serialized form — but the parent struct skips
@@ -17080,7 +17414,8 @@ mod tests {
         let (storage, _dir) = test_engine();
         let mut state = EpochState::new();
 
-        canonicalize_latest_seals(&mut state, &storage);
+        let vb_creator = String::new();
+        canonicalize_latest_seals(&mut state, &storage, SealReplayAdmission::genesis_only(&vb_creator));
 
         assert!(state.latest_epoch.is_empty(),
             "empty state must stay empty after canonicalize (no zone to scan)");
@@ -17126,7 +17461,8 @@ mod tests {
         assert_eq!(state.latest_seal_hash.get(&zone).copied(), Some(canonical_hash));
         assert_eq!(state.latest_seal_id.get(&zone).cloned(), Some(seal.id.clone()));
 
-        canonicalize_latest_seals(&mut state, &storage);
+        let vb_creator = sha3_256_hex(&identity.public_key);
+        canonicalize_latest_seals(&mut state, &storage, SealReplayAdmission::genesis_only(&vb_creator));
 
         // Single-seal short-circuit at L3540: nothing changes.
         assert_eq!(state.latest_epoch.get(&zone).copied(), Some(1),
@@ -17200,7 +17536,12 @@ mod tests {
             "pre-canonicalize: canonical must be the larger-hash seal (race-loser locally)");
         assert_eq!(state.latest_seal_id.get(&zone).cloned(), Some(larger_id));
 
-        canonicalize_latest_seals(&mut state, &storage);
+        // R1-X1-V-B: this fixture converges TWO creators on lex-min, so both
+        // must be admissible or S3 skips both and the tip never converges.
+        let vb_creator = sha3_256_hex(&id_a.public_key);
+        let vb_staked: std::collections::HashSet<String> =
+            [sha3_256_hex(&id_b.public_key)].into_iter().collect();
+        canonicalize_latest_seals(&mut state, &storage, SealReplayAdmission { genesis_authority: &vb_creator, staked: &vb_staked });
 
         // Post-canonicalize: lex-min hash wins regardless of arrival order.
         assert_eq!(state.latest_seal_hash.get(&zone).copied(), Some(smaller_hash),
@@ -17498,6 +17839,344 @@ mod tests {
             Some([0xAA; 32]),
             "jury seed at the inverted entry's end_ts must be its VRF output"
         );
+    }
+    /// R1-X1-V-B — the replay admission gate (brief §8, banked 2026-09-06).
+    ///
+    /// Every test here pins DEFER semantics: an inadmissible seal is SKIPPED at a
+    /// boot-time registration site, never deleted and never marked, so a later pass
+    /// re-evaluates it. The gate is membership-only + genesis on purpose — see
+    /// [`SealReplayAdmission`]'s doc for why `admits_fastforward` is NOT used.
+    mod r1x1vb_replay_admission_tests {
+        use super::*;
+        use crate::crypto::hash::sha3_256_hex;
+
+        fn creator_of(identity: &Identity) -> String {
+            sha3_256_hex(&identity.public_key)
+        }
+
+        fn staked_set(members: &[&str]) -> HashSet<String> {
+            members.iter().map(|s| (*s).to_string()).collect()
+        }
+
+        fn build_global_seal(identity: &Identity, stuck_zone: &str, stuck_epoch: u64) -> ValidationRecord {
+            let meta = global_seal_metadata(
+                &ZoneId::new(stuck_zone),
+                &ZoneId::new("/zone/emitter"),
+                stuck_epoch,
+                &sha3_256(b"prev-global"),
+                5_000,
+                10_000,
+                1_700_000_500.0,
+                &[7u8; 32],
+                b"vrf-proof",
+            );
+            let content = format!("global-seal-{stuck_zone}-{stuck_epoch}").into_bytes();
+            let mut record = ValidationRecord::create(
+                &content,
+                identity.public_key.clone(),
+                vec![],
+                Classification::Public,
+                Some(meta),
+            );
+            record.zone = Some(ZoneId::new(stuck_zone));
+            let signable = record.signable_bytes();
+            record.signature = Some(identity.sign(&signable).unwrap());
+            record
+        }
+
+        #[test]
+        fn r1x1vb_process_record_skips_inadmissible_epoch_seal() {
+            let honest = test_identity();
+            let hostile = test_identity();
+            let rec = build_test_seal_record(&hostile, "/zone/a", 7, b"hostile");
+            let mut state = EpochState::new();
+            let genesis = creator_of(&honest);
+            let empty = staked_set(&[]);
+            let admit = SealReplayAdmission { genesis_authority: &genesis, staked: &empty };
+
+            assert_eq!(state.process_record(&rec, admit), ReplaySkip::Epoch);
+            assert!(
+                !state.latest_epoch.contains_key(&ZoneId::new("/zone/a")),
+                "an inadmissible creator's seal must not advance the zone tip"
+            );
+        }
+
+        #[test]
+        fn r1x1vb_process_record_skips_inadmissible_global_seal() {
+            // The global arm writes latest_seal_hash[stuck_zone] with `>=` behind
+            // only the pinned-anchor fence, so it is gated in the same dispatch.
+            let honest = test_identity();
+            let hostile = test_identity();
+            let rec = build_global_seal(&hostile, "/zone/stuck", 500);
+            let mut state = EpochState::new();
+            // A tip BELOW the hostile stuck_epoch: `>=` would overwrite it.
+            state.latest_epoch.insert(ZoneId::new("/zone/stuck"), 1);
+            let before = state.latest_seal_hash.get(&ZoneId::new("/zone/stuck")).copied();
+            let genesis = creator_of(&honest);
+            let empty = staked_set(&[]);
+            let admit = SealReplayAdmission { genesis_authority: &genesis, staked: &empty };
+
+            assert_eq!(state.process_record(&rec, admit), ReplaySkip::Global);
+            assert_eq!(
+                state.latest_seal_hash.get(&ZoneId::new("/zone/stuck")).copied(),
+                before,
+                "latest_seal_hash must be untouched despite stuck_epoch >= current"
+            );
+        }
+
+        #[test]
+        fn r1x1vb_process_record_admits_genesis_with_empty_set() {
+            let genesis_id = test_identity();
+            let rec = build_test_seal_record(&genesis_id, "/zone/a", 3, b"genesis");
+            let mut state = EpochState::new();
+            let genesis = creator_of(&genesis_id);
+            let empty = staked_set(&[]);
+            let admit = SealReplayAdmission { genesis_authority: &genesis, staked: &empty };
+
+            // Genesis is admissible with NO stakers at all — the bootstrap case.
+            assert_eq!(state.process_record(&rec, admit), ReplaySkip::None);
+            assert_eq!(state.latest_epoch.get(&ZoneId::new("/zone/a")).copied(), Some(3));
+        }
+
+        #[test]
+        fn r1x1vb_process_record_admits_staked_nongenesis() {
+            let genesis_id = test_identity();
+            let staker = test_identity();
+            let rec = build_test_seal_record(&staker, "/zone/a", 4, b"staked");
+            let mut state = EpochState::new();
+            let genesis = creator_of(&genesis_id);
+            let staker_hash = creator_of(&staker);
+            let set = staked_set(&[staker_hash.as_str()]);
+            let admit = SealReplayAdmission { genesis_authority: &genesis, staked: &set };
+
+            // Admitted AND reported as non-genesis — the denominator counter.
+            assert_eq!(state.process_record(&rec, admit), ReplaySkip::AdmittedNonGenesis);
+            assert_eq!(state.latest_epoch.get(&ZoneId::new("/zone/a")).copied(), Some(4));
+        }
+
+        #[test]
+        fn r1x1vb_process_record_membership_only_ignores_staker_count() {
+            // Pins adjudication 8.3.1: TWO stakers (below BOOTSTRAP_MIN_STAKERS = 3)
+            // and the creator is one of them → ADMITTED. `admits_fastforward` would
+            // have deferred this, and on a real fleet that would defer ALL honest
+            // non-genesis history the moment the live count dipped below 3.
+            // The premise guard, as a COMPILE-time assertion. It was a runtime
+            // `assert!` on a `const`, which clippy flags (assertions_on_constants)
+            // because it can only ever hold or never hold — and a const that has
+            // been lowered should break the BUILD, not one test late in a 6k run.
+            // Intent unchanged: this test is only meaningful while the floor > 2.
+            const _: () = assert!(crate::network::aggregator::BOOTSTRAP_MIN_STAKERS > 2);
+            let genesis_id = test_identity();
+            let staker = test_identity();
+            let other = test_identity();
+            let rec = build_test_seal_record(&staker, "/zone/a", 9, b"two-stakers");
+            let mut state = EpochState::new();
+            let genesis = creator_of(&genesis_id);
+            let a = creator_of(&staker);
+            let b = creator_of(&other);
+            let set = staked_set(&[a.as_str(), b.as_str()]);
+            assert_eq!(set.len(), 2);
+            let admit = SealReplayAdmission { genesis_authority: &genesis, staked: &set };
+
+            assert_eq!(state.process_record(&rec, admit), ReplaySkip::AdmittedNonGenesis);
+            assert_eq!(state.latest_epoch.get(&ZoneId::new("/zone/a")).copied(), Some(9));
+        }
+
+        #[test]
+        fn r1x1vb_replay_readmits_once_creator_becomes_staked() {
+            // DEFER, not reject: the skipped seal is never deleted, so the SAME
+            // record admitted on a later pass advances the tip.
+            let genesis_id = test_identity();
+            let later_staker = test_identity();
+            let rec = build_test_seal_record(&later_staker, "/zone/a", 11, b"defer");
+            let genesis = creator_of(&genesis_id);
+            let who = creator_of(&later_staker);
+
+            let mut state = EpochState::new();
+            let empty = staked_set(&[]);
+            assert_eq!(
+                state.process_record(&rec, SealReplayAdmission { genesis_authority: &genesis, staked: &empty }),
+                ReplaySkip::Epoch
+            );
+            assert!(!state.latest_epoch.contains_key(&ZoneId::new("/zone/a")));
+
+            let set = staked_set(&[who.as_str()]);
+            assert_eq!(
+                state.process_record(&rec, SealReplayAdmission { genesis_authority: &genesis, staked: &set }),
+                ReplaySkip::AdmittedNonGenesis
+            );
+            assert_eq!(state.latest_epoch.get(&ZoneId::new("/zone/a")).copied(), Some(11));
+        }
+
+        #[test]
+        fn r1x1vb_replay_gate_holds_when_zone_has_no_epoch_start_ts() {
+            // Final-verify D8. Live admission skips the rank check entirely when a
+            // zone has no `epoch_start_ts` (blanked by from_snapshot, empty in
+            // new()), which is exactly the window a fresh joiner sits in. The replay
+            // gate must NOT inherit that hole.
+            let genesis_id = test_identity();
+            let hostile = test_identity();
+            let mut state = EpochState::new();
+            assert!(
+                state.epoch_start(&ZoneId::new("/zone/a")).is_none(),
+                "a fresh EpochState has no epoch_start_ts — the premise of this test"
+            );
+            let rec = build_test_seal_record(&hostile, "/zone/a", 2, b"no-start-ts");
+            let genesis = creator_of(&genesis_id);
+            let empty = staked_set(&[]);
+            let admit = SealReplayAdmission { genesis_authority: &genesis, staked: &empty };
+
+            assert_eq!(state.process_record(&rec, admit), ReplaySkip::Epoch);
+            assert!(!state.latest_epoch.contains_key(&ZoneId::new("/zone/a")));
+        }
+
+        #[test]
+        fn r1x1vb_replay_gate_is_profile_blind() {
+            // R-B5: the gate is a pure function of (creator, genesis, staked set).
+            // No profile is consulted anywhere in it, so a Light-configured node
+            // reaches the identical verdict — pinned here rather than argued.
+            let genesis_id = test_identity();
+            let hostile = test_identity();
+            let genesis = creator_of(&genesis_id);
+            let empty = staked_set(&[]);
+            let admit = SealReplayAdmission { genesis_authority: &genesis, staked: &empty };
+            let hostile_hash = creator_of(&hostile);
+
+            assert!(!admit.admits_replay(&hostile_hash));
+            assert!(admit.admits_replay(&genesis));
+            // Same inputs, same answer, twice — no hidden per-node state.
+            assert_eq!(admit.admits_replay(&hostile_hash), admit.admits_replay(&hostile_hash));
+        }
+
+        #[test]
+        fn r1x1vb_genesis_only_view_admits_only_genesis() {
+            let genesis_id = test_identity();
+            let other = test_identity();
+            let genesis = creator_of(&genesis_id);
+            let view = SealReplayAdmission::genesis_only(&genesis);
+            assert!(view.admits_replay(&genesis));
+            assert!(!view.admits_replay(&creator_of(&other)));
+            assert!(view.staked.is_empty());
+        }
+
+        #[test]
+        fn r1x1vb_rebuild_from_cf_epochs_skips_lex_smaller_unstaked_rival() {
+            // The outcome FLIPS versus today: before the gate, the stored rival is
+            // re-registered on every boot and lex-min can hand it the tip.
+            let (mut engine, _dir) = test_engine();
+            let honest = test_identity();
+            let hostile = test_identity();
+            let zone = "/zone/a";
+            for epoch in 1..=5u64 {
+                write_test_seal(&mut engine, &honest, zone, epoch, &epoch.to_be_bytes());
+            }
+            // A hostile seal at a HIGHER epoch, planted in the store.
+            write_test_seal(&mut engine, &hostile, zone, 6, b"hostile-6");
+
+            let genesis = creator_of(&honest);
+            let empty = staked_set(&[]);
+            let mut state = EpochState::new();
+            state.latest_epoch.insert(ZoneId::new(zone), 3);
+            let skipped = rebuild_latest_epoch_from_cf_epochs(
+                &mut state,
+                &engine,
+                SealReplayAdmission { genesis_authority: &genesis, staked: &empty },
+            );
+
+            // ⚠ R-B13, FOUND BY THIS TEST — pinned as the behaviour that ships,
+            // not as the behaviour anyone designed. `rebuild_latest_epoch_from_cf_epochs`
+            // is two-phase: the reverse scan first records, per zone, ONLY the
+            // max epoch seen and the ids at it (lower epochs for an
+            // already-seen zone are discarded); registration happens after. The
+            // §8 ruling put the gate at the registration phase, so a planted
+            // seal at a HIGHER epoch still wins the max-epoch slot in phase one
+            // and is then skipped in phase two — leaving the zone with NO
+            // registration at all. The hijack is prevented (the tip never moves
+            // onto the plant, which is the security goal) but the honest heal is
+            // ALSO denied: the tip stays where it was. That converts a
+            // tip-hijack into a tip-freeze for that zone until the plant is
+            // removed or its creator becomes admissible.
+            assert!(skipped >= 1, "the hostile seal must be counted as skipped");
+            assert_eq!(
+                state.latest_epoch.get(&ZoneId::new(zone)).copied(),
+                Some(3),
+                "R-B13: the tip is NOT hijacked — and is not healed either, because \
+                 phase one already discarded the honest epochs below the plant"
+            );
+        }
+
+        #[test]
+        fn r1x1vb_window_repopulate_skips_unstaked_hash_keeps_honest() {
+            // S5: the window feeds the super-seal admission root. A hostile hash at
+            // the same epoch must not enter it, and the honest hash must survive.
+            let (mut engine, _dir) = test_engine();
+            let honest = test_identity();
+            let hostile = test_identity();
+            let zone = "/zone/a";
+            for epoch in 1..=4u64 {
+                write_test_seal(&mut engine, &honest, zone, epoch, &epoch.to_be_bytes());
+            }
+            write_test_seal(&mut engine, &hostile, zone, 4, b"hostile-tie");
+
+            let genesis = creator_of(&honest);
+            let empty = staked_set(&[]);
+            let mut state = EpochState::new();
+            state.latest_epoch.insert(ZoneId::new(zone), 4);
+            let skipped = repopulate_recent_seal_hashes(
+                &mut state,
+                &engine,
+                SealReplayAdmission { genesis_authority: &genesis, staked: &empty },
+            );
+
+            assert!(skipped >= 1, "the hostile hash must be counted as skipped");
+            let window = state
+                .recent_seal_hashes
+                .get(&ZoneId::new(zone))
+                .expect("the honest window survives");
+            assert!(
+                window.contains_key(&4),
+                "the honest epoch-4 hash stays in the window"
+            );
+        }
+
+        #[test]
+        fn r1x1vb_far_future_epoch_plant_skipped_and_scan_still_heals_honest_tip() {
+            // R-B11: `extract_epoch_seal` has no upper bound on the epoch and
+            // `disc5_index_key` leads with it, so far-future keys sort above the
+            // honest tail and consume the reverse-scan budget. The gate must skip
+            // them AND the honest tip must still be recovered.
+            let (mut engine, _dir) = test_engine();
+            let honest = test_identity();
+            let hostile = test_identity();
+            let zone = "/zone/a";
+            for epoch in 1..=6u64 {
+                write_test_seal(&mut engine, &honest, zone, epoch, &epoch.to_be_bytes());
+            }
+            for k in 0..8u64 {
+                write_test_seal(&mut engine, &hostile, zone, 1_000_000 + k, b"far-future");
+            }
+
+            let genesis = creator_of(&honest);
+            let empty = staked_set(&[]);
+            let mut state = EpochState::new();
+            state.latest_epoch.insert(ZoneId::new(zone), 2);
+            let skipped = rebuild_latest_epoch_from_cf_epochs(
+                &mut state,
+                &engine,
+                SealReplayAdmission { genesis_authority: &genesis, staked: &empty },
+            );
+
+            // Same R-B13 shape, at the far-future extreme: phase one keeps only
+            // the single highest planted epoch, so exactly ONE skip is counted
+            // (not eight) and the honest tip below it is never reached.
+            assert!(skipped >= 1, "the far-future plant is skipped, not registered");
+            assert_eq!(
+                state.latest_epoch.get(&ZoneId::new(zone)).copied(),
+                Some(2),
+                "R-B13: unhijacked but unhealed — the honest epoch-6 tail is \
+                 discarded by phase one before the gate ever sees it"
+            );
+        }
     }
 }
 
