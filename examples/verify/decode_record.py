@@ -326,36 +326,50 @@ def main(argv: list) -> int:
     print(f"  record_hash:    {record_hash}")
 
     # Self-check against the published vectors — the non-tautological proof.
+    #
+    # Each check is selected by the DATA it applies to, never by the file name: the
+    # record-hash vector is checked only when these bytes ARE the published record
+    # (same wire digest), and the identity vector only when this record carries the
+    # public key that vector pins. So decoding a copy under another name still
+    # self-checks, and decoding YOUR OWN record reports a clean decode instead of a
+    # false MISMATCH against expectations that were never about it.
     failed = 0
     rv = _vector("record-hash")
-    if rv:
+    want_wire = (rv or {}).get("input", {}).get("wire_sha3_256")
+    is_published = bool(want_wire) and sha3(wire) == want_wire
+    if is_published:
+        print(f"\n  OK   wire sha3 matches the published vector — checking it")
         if record_hash == rv["expected"]:
-            print(f"\n  OK   record-hash matches the published vector")
+            print(f"  OK   record-hash matches the published vector")
         else:
-            print(f"\n  FAIL record-hash {record_hash} != published {rv['expected']}")
-            failed += 1
-        want_wire = rv.get("input", {}).get("wire_sha3_256")
-        if want_wire and sha3(wire) != want_wire:
-            print(f"  FAIL wire sha3 {sha3(wire)} != published {want_wire}")
+            print(f"  FAIL record-hash {record_hash} != published {rv['expected']}")
             failed += 1
         want_id = rv.get("input", {}).get("record_id")
         if want_id and rec["id"] != want_id:
             print(f"  FAIL record_id {rec['id']} != published {want_id}")
             failed += 1
+    elif rv:
+        print(f"\n  --   not the published record's bytes (wire sha3 {sha3(wire)})")
+        print(f"       decoded on its own terms; the published vectors say nothing about it")
     else:
         print("\n  (no record-hash vector found to check against — decoded only)")
 
     iv = _vector("identity-derivation")
-    if iv and identity != iv["expected"]:
-        print(f"  FAIL identity {identity} != published {iv['expected']}")
-        failed += 1
-    elif iv:
-        print(f"  OK   identity-derivation matches the published vector")
+    iv_pk = (iv or {}).get("input", {}).get("creator_public_key")
+    if iv and iv_pk and rec["creator_public_key"].hex() == iv_pk:
+        if identity == iv["expected"]:
+            print(f"  OK   identity-derivation matches the published vector")
+        else:
+            print(f"  FAIL identity {identity} != published {iv['expected']}")
+            failed += 1
 
     if failed:
         print("\nMISMATCH — the independent decode did not reproduce the published bytes.")
         return 1
-    print("\nMATCH — wire decode + §4.4 canonicalization reproduce the record_hash in pure Python.")
+    if is_published:
+        print("\nMATCH — wire decode + §4.4 canonicalization reproduce the record_hash in pure Python.")
+    else:
+        print("\nDECODED — wire decode + §4.4 canonicalization completed; record_hash printed above.")
     return 0
 
 

@@ -189,8 +189,21 @@ curl -si -X POST https://elara-verify-x402.aivelikivodja.workers.dev/verify/reco
   -H 'content-type: application/json' -d '{}' | grep -i '^payment-required'
 ```
 
-Fast tier only: Dilithium3 records and mandate bundles. SPHINCS+ dual-signature
-records are declined with a 4xx that says so; verify those with the CLI above.
+You do not have to mint a record first. Both paid routes accept a body this
+repo already ships, and `GET /` names them under `try_it`:
+
+| Route | Body to post | Verdict it returns |
+|---|---|---|
+| `POST /verify/record` | [`examples/verify/sample-record-profile-b.json`](examples/verify/sample-record-profile-b.json) | `VERIFIED` |
+| `POST /authority/check` | [`examples/verify/mandate-bundle-valid.json`](examples/verify/mandate-bundle-valid.json) | `CONSISTENT`, `flag: valid`, `authorized: true` |
+
+Fast tier only: Dilithium3 records and mandate bundles. Two fixtures here are
+therefore *not* accepted by the paid tier — including the obvious one:
+`sample-record.json` and `sample-record-TAMPERED.json` both carry SPHINCS+ dual
+signatures and are declined 422. A decline costs you nothing (any response
+`>= 400` cancels settlement), and the CLI above verifies those two offline with
+the same verdict logic, for free.
+
 Usage, stated plainly: the endpoint went live in early September 2026, and the
 only payments settled so far are our own end-to-end tests. It is listed in the
 x402 Bazaar catalog and entered in the Algorand Foundation's x402 Global Challenge.

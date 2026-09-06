@@ -640,3 +640,96 @@ fi
 mv "$TMP" "$OUT"
 trap - EXIT
 echo "receipts: wrote $OUT"
+
+# ---------------------------------------------------------------------------
+# D13 (2026-09-06): commit our own output.
+#
+# This script used to write 17 tracked files and exit, leaving the tree dirty.
+# `deploy-elara-node.sh`'s pre-flight refuses to deploy on a non-empty
+# `git status --porcelain`, so from each refresh until somebody hand-committed
+# the churn, NO deploy could run — a six-hour window, four times a day. The
+# workaround had already been normalised into 58 hand commits titled "receipts
+# snapshot churn"; this stage does the same thing on the generator's own
+# schedule, so the deploy gate stops being hostage to whether anyone remembered.
+#
+# Deliberately NOT the other fix: teaching the pre-flight to ignore a
+# known-generated path set. An ignore-list on a dirty-tree guard is exactly how
+# the class it guards against comes back.
+#
+# Shape rules this stage obeys:
+#   * the pathspec is DERIVED from $OUT and $VERIFY_DIR — the only two things
+#     this script writes — never restated as a literal, so an overridden
+#     RECEIPTS_OUT cannot leave the commit silently pointed at the wrong files;
+#   * explicit pathspec on BOTH add and commit — the tree is shared with other
+#     hands, and `git commit -- <paths>` commits the working-tree content of
+#     those paths ONLY, never another hand's staged work;
+#   * `git add -N` first, so newly minted pair files (untracked) are included;
+#   * every git call bounded by `timeout`;
+#   * any unexpected repo state (path outside the repo, index lock, merge or
+#     rebase in progress, detached HEAD, not a repo) → log and leave the tree
+#     exactly as the hand-commit workflow would find it. This stage never fails
+#     the snapshot: the feed is written either way.
+# ---------------------------------------------------------------------------
+receipts_commit_own_output() {
+    local paths=() abs rel gd subject pairs acts branch
+
+    cd "$REPO_DIR" || { echo "receipts: commit skipped — cannot cd $REPO_DIR" >&2; return 0; }
+    timeout 15 git rev-parse --git-dir >/dev/null 2>&1 || {
+        echo "receipts: commit skipped — $REPO_DIR is not a git repo" >&2; return 0; }
+
+    for abs in "$OUT" "$VERIFY_DIR"; do
+        rel="$(realpath -m --relative-to="$REPO_DIR" "$abs")"
+        case "$rel" in
+            /*|../*|..) echo "receipts: commit skipped — $abs is outside $REPO_DIR" >&2; return 0 ;;
+        esac
+        paths+=("$rel")
+    done
+
+    if [ -z "$(timeout 30 git status --porcelain -- "${paths[@]}" 2>/dev/null)" ]; then
+        echo "receipts: nothing to commit (${paths[*]} already clean)"
+        return 0
+    fi
+
+    gd="$(timeout 15 git rev-parse --git-dir 2>/dev/null)"
+    if [ -e "$gd/index.lock" ]; then
+        echo "receipts: commit skipped — another git process holds the index lock" >&2
+        return 0
+    fi
+    if [ -d "$gd/rebase-merge" ] || [ -d "$gd/rebase-apply" ] || [ -e "$gd/MERGE_HEAD" ]; then
+        echo "receipts: commit skipped — merge/rebase in progress" >&2
+        return 0
+    fi
+    branch="$(timeout 15 git symbolic-ref -q --short HEAD 2>/dev/null)" || branch=""
+    if [ -z "$branch" ]; then
+        echo "receipts: commit skipped — detached HEAD" >&2
+        return 0
+    fi
+
+    # -N so freshly minted, still-untracked pair files land in the pathspec commit.
+    timeout 60 git add -N -- "${paths[@]}" >/dev/null 2>&1 || {
+        echo "receipts: commit skipped — git add -N failed" >&2; return 0; }
+
+    pairs="$(timeout 30 git status --porcelain -- "${paths[1]}" 2>/dev/null \
+             | grep -c '\.receipt\.json$' || true)"
+    acts="$(OUT="$OUT" python3 - <<'PY' 2>/dev/null || echo '?'
+import json, os
+print(json.load(open(os.environ["OUT"]))["count"])
+PY
+)"
+    subject="chore(site): receipts snapshot churn ($(date +%H:%M) refresh — ${pairs} envelope pair(s), ${acts} acts)"
+
+    if timeout 120 git commit -q -m "$subject" -m "Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_0145dWMAa8b5TAZrE2mrUfbV" -- "${paths[@]}"; then
+        echo "receipts: committed $(timeout 15 git rev-parse --short HEAD) — $subject"
+        if timeout 180 git push -q origin "$branch" 2>/dev/null; then
+            echo "receipts: pushed"
+        else
+            echo "receipts: WARNING — commit landed but push failed; it will ride the next push" >&2
+        fi
+    else
+        echo "receipts: WARNING — commit failed; tree left dirty for a hand commit" >&2
+    fi
+    return 0
+}
+
+receipts_commit_own_output

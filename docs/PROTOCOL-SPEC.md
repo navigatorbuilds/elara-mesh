@@ -568,9 +568,16 @@ the property a light client needs to detect withholding.
 
 ## 7. Epoch seals & finality (reference)
 
-> **Status: Stable in code; specified here at reference level.** The exact seal
-> byte layout is authoritative in `src/network/epoch.rs` / `src/light_verify.rs`;
-> a future revision of this spec will inline it. The trust *model* below is
+> **Status: Stable in code; specified here at reference level.** A seal travels
+> on the wire as an ordinary ValidationRecord: the §4.3.1–§4.3.3 framing decodes
+> it and §4.4 gives its `record_hash` and `signable_bytes`. So checking a seal
+> against a pinned anchor key (A.8) needs **no seal-specific byte layout**: the
+> enforcing `verify_seal_record_against_anchor`
+> (`crates/elara-verify/src/seal_record.rs`, re-exported by
+> `src/light_verify.rs`) has none — it calls the same record decoder any §4
+> reader already has, then ML-DSA-65 `Verify` over the §4.4 preimage. What remains authoritative in code
+> (`src/network/epoch.rs`) is the *set* of epoch fields the producer writes into
+> that record's `metadata` map, and their meaning. The trust *model* below is
 > binding for a light client.
 
 A **seal** finalizes a zone's state for an epoch. It binds (among other fields)
@@ -952,7 +959,11 @@ arrive.
   from the A.4.1 scope note alone. The 4 remaining vectors were the ones needing
   a byte layout this document deferred to code. Two of them — `record-hash` and
   `record-hash-v6` — needed the record wire layout, now inlined at §4.3.1–§4.3.3.
-  The other two — `seal-anchor-sig` and its reject twin — need the seal byte
-  layout, which §7 still defers, so they stay outside what this text supports.
+  The other two — `seal-anchor-sig` and its reject twin — turned out to sit on
+  that same record layout: a seal travels as an ordinary ValidationRecord (§7),
+  so they need §4.3.1–§4.3.3 and an ML-DSA-65 verifier, both of which this
+  reader already had. What blocked them was the record framing, never a
+  seal-specific layout — with §4 inlined, all four are reachable from this text
+  alone.
   The §6.4 sibling-order ambiguity they isolated (one reading out of 96
   enumerated) is fixed in that section. Both findings were theirs.

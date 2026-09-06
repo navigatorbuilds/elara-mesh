@@ -20,7 +20,7 @@ A published record carries **two** signatures from its creator — an
 (SPHINCS+, FIPS 205) co-signature — and **both cover the identical preimage**:
 `ValidationRecord::signable_bytes()` — crate
 [`elara-record`](https://crates.io/crates/elara-record) (0.3.x),
-`src/record.rs`. The verifier requires the ML-DSA-65 signature and grades the
+`crates/elara-record/src/record.rs`. The verifier requires the ML-DSA-65 signature and grades the
 SLH-DSA leg as the dual-signature profile check ("Profile A"). The preimage is
 domain-separated (a constant tag leads it from record version 6 on, followed by
 the length-prefixed network id), every variable-length field is
@@ -37,13 +37,13 @@ object itself.
 ## The trap, named so you do not repeat it
 
 `MandateRecord::canonical_signing_bytes` (crate
-[`elara-verify`](https://crates.io/crates/elara-verify), `src/mandate.rs`) is an
+[`elara-verify`](https://crates.io/crates/elara-verify), `crates/elara-verify/src/mandate.rs`) is an
 **id-derivation** preimage: `mandate_id` is SHA3-256 of those bytes, and that is
 the only thing they are used for. Despite the name, nothing anywhere verifies a
 signature over them. Its same-named neighbour `RealmCert::canonical_signing_bytes`
 IS genuinely signed and verified — so anyone who greps the method name finds a
 real sign/verify pair first and assumes it applies to mandates. It does not.
-The in-source correction is dated 2026-07-29 (`elara-verify/src/mandate.rs`,
+The in-source correction is dated 2026-07-29 (`crates/elara-verify/src/mandate.rs`,
 doc comment on the method); on 2026-08-22 it caught an independent implementer
 mid-mistake, which is why this paragraph now also lives here.
 
@@ -51,7 +51,7 @@ mid-mistake, which is why this paragraph now also lives here.
 
 An ingest-time equality rule, re-checked by the verifier:
 `sha3_256(carrier record's creator_public_key) == mandate.principal_identity_hash`
-(`elara-verify/src/mandate.rs`, chain-of-authority path). A mandate is
+(`crates/elara-verify/src/mandate.rs`, chain-of-authority path). A mandate is
 unforgeable by a third party because only the principal's key can create the
 carrier record that the mandate must arrive in — not because the mandate
 preimage carries its own signature.

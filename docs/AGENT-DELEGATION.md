@@ -109,7 +109,7 @@ honesty contract so a pruned or absent act can never read as a confident
 "not a mandate act". Full design + SDK/audit-binary contract:
 [`MANDATE-ACT-PERMANENCE.md`](MANDATE-ACT-PERMANENCE.md).
 
-**v0 core — LANDED 2026-06-19** (`src/mandate.rs`). Fusion-audited before code
+**v0 core — LANDED 2026-06-19** (`crates/elara-verify/src/mandate.rs`). Fusion-audited before code
 (the project's internal adversarial-review process: several independent AI
 reviewers + a result-checking pass, all claims verified against source — *not*
 an external third-party audit; "fusion-audited" below always means this). The
@@ -178,7 +178,7 @@ a scope check it does not run.
 before code (high-stakes tier: 3 Sonnet + 1 Opus panel → Opus synthesis → 1 Opus
 adversarial final-verify). The `evaluate_mandate` walk now replaces the
 `parent_mandate_id.is_some() → UnverifiedChain` short-circuit with a recursive
-leaf→root walk ([`walk_chain`], `src/mandate.rs`). Still **observational** (a
+leaf→root walk ([`walk_chain`], `crates/elara-verify/src/mandate.rs`). Still **observational** (a
 flag, never consensus weight) and pure/deterministic/integer-only. Per hop:
 
 - **Genealogy link** `child.principal == parent.agent` (`eq_ignore_ascii_case`).

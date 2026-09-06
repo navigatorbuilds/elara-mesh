@@ -79,7 +79,7 @@ balances are bookkeeping), and `/bootstrap/claim` is inert by design — a
 genesis-tagged mint is rejected once supply is at the cap (§4). Distributing
 the pool to participating nodes, with anti-sybil gating so one operator cannot
 farm it under many keys, is a mainnet-path milestone, not a property of the
-network today. *Source: `src/accounting/genesis.rs`; `src/network/routes/token.rs`
+network today. *Source: `src/accounting/genesis.rs`; `src/network/routes/ledger.rs`
 (`bootstrap_claim` guard).*
 
 ‡ **Founding Team and Early Contributors are reserved genesis pools with no

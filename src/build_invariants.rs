@@ -1277,6 +1277,28 @@ after";
             // symbol on lines that had only a number added more than that back.
             // 45 leaves room for five deletions before the floor trips and still
             // trips if any single module loses all of its citations.
+            // MODULE-COUNT floor — the same hole closed next door in
+            // `public_doc_citations_track_source`, found by asking whether that
+            // fix had a sibling. `!modules.is_empty()` above passes with ONE
+            // module of 32, and the citation floor only catches a loss big
+            // enough to cross its slack (measured 50 verified against a floor of
+            // 45), so a small `.tla` being renamed or deleted takes its module
+            // out of the guard SILENTLY.
+            //
+            // DELIBERATELY `>=`, NOT the `==` used for the shipped-doc list, and
+            // the asymmetry is the point rather than an oversight: that list is
+            // curated, so ADDING to it must force the floor re-derivation the
+            // D10 membership rule requires, and `==` is what forces it. Here the
+            // set is a glob over a spec directory another lane actively grows —
+            // failing someone's build for adding a module would be friction with
+            // no safety in it. A minimum closes the silent-loss hole, which is
+            // the whole defect, and leaves growth alone.
+            assert!(
+                modules.len() >= 32,
+                "spec-module floor: {} modules checked, expected at least 32 — a .tla file was \
+                 renamed or deleted and its citations left the guard silently",
+                modules.len()
+            );
             assert!(verified >= 45, "vacuity floor: only {verified} citations verified");
         }
 
@@ -1369,6 +1391,34 @@ after";
                     *n >= 1,
                     "{rel} has no verified citation left — it has drifted back to unverifiable \
                      prose, which is exactly the state D10 found these files in"
+                );
+            }
+            // THIRD floor: the LIST itself. The two above protect citations
+            // inside the files that are listed — neither notices a file being
+            // dropped from `DOCS` entirely, and then it is simply unguarded.
+            // Measured 2026-09-06: at 44 verified (17/5/3/4/15) against an
+            // aggregate floor of 33, deleting `MESH-BFT` (−17) or
+            // `IDENTITY-PARTITIONING` (−15) trips it, but deleting `MVEA` (−5),
+            // `proverif` (−4) or `REALMS` (−3) leaves 39/40/41 and passes
+            // SILENTLY. That is the same "an aggregate cannot catch a small
+            // loss" argument that justified the per-file floor, one layer up,
+            // and I missed it there.
+            //
+            // Asserted on `checked` rather than `DOCS.len()` so it also catches
+            // a listed file disappearing from disk, and gated on the private
+            // tree because the public mirror legitimately skips absent files
+            // (the `Err(e) if !is_private_tree` arm above).
+            //
+            // ADDING a doc is meant to fail here too: the D10 membership rule
+            // says a new entry must re-derive the aggregate floor from the new
+            // measured total, and being forced to touch this number is what
+            // makes that happen instead of being forgotten.
+            if is_private_tree(&root) {
+                assert_eq!(
+                    checked, 5,
+                    "shipped-doc guard covers {checked} files, expected 5 — a doc was dropped from \
+                     DOCS (or deleted); the aggregate floor cannot see a small file leave. If this \
+                     is a deliberate add/remove, update this count AND re-derive the floor below."
                 );
             }
             assert!(
