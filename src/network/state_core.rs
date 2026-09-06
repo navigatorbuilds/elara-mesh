@@ -1456,10 +1456,14 @@ pub fn spawn_delegation_prune_loop(state: Arc<NodeState>) {
 /// the cap. Tick interval and per-tick eviction cap are also
 /// configurable; defaults are 60s and 5_000 entries.
 ///
-/// The tick is a no-op when the CF is below cap (single RocksDB count
-/// op), so this is safe to run on every node — anchor / witness /
-/// archive / light alike. Operators on archive set
-/// `identity_user_cache_max = 0` to disable eviction entirely.
+/// Below the cap the tick costs one O(1) RocksDB key ESTIMATE and returns,
+/// so this is safe to run on every node — anchor / witness / archive / light
+/// alike. It used to say "a no-op … (single RocksDB count op)", which was
+/// false in both halves: the call was the exact `count_cf` iterator scan, so
+/// the tick was O(all identities) at every population and the count *was* the
+/// cost (D7 verdict 2026-09-06 §2). A comment that contradicts the code it
+/// describes is part of the bug, not a description of it. Operators on archive
+/// set `identity_user_cache_max = 0` to disable eviction entirely.
 ///
 /// Mirrors the `spawn_delegation_prune_loop` shape so the runtime is
 /// uniform across periodic-bounded-work spawners.

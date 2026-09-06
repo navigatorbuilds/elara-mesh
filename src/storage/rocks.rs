@@ -625,6 +625,23 @@ pub struct StorageEngine {
     /// approximate. Two writers bump it — `store_public_key_anchor` and the
     /// anchor route of `put_record_with_pk` (VRF-registration records).
     anchor_add_seq: std::sync::atomic::AtomicU64,
+    /// Identity Partitioning Phase C promotion counters, and the denominator
+    /// they are read against (W-IDENT-1 item 5, D7 §5).
+    ///
+    /// STORAGE-OWNED ON PURPOSE. These live beside `anchor_add_seq` because the
+    /// two writers that bump that field — `store_public_key_anchor` and the
+    /// anchor route of `put_record_with_pk_zone` — are exactly the two sites an
+    /// anchor entry can appear at, and both are inside this type. The obvious
+    /// alternative, bumping at the `ingest.rs` caller, is bypassed by
+    /// `bootstrap_store_record` ("pure storage: no ledger apply, no witness
+    /// scan, no slash") — choosing a site a known bypass path skips, when a site
+    /// it cannot skip exists, would repeat the bug being fixed.
+    ///
+    /// Invariant: `user_to_anchor + witness_to_anchor <= anchor_added`. The
+    /// difference is anchors that were new rather than promoted.
+    identity_user_to_anchor_total: std::sync::atomic::AtomicU64,
+    identity_witness_to_anchor_total: std::sync::atomic::AtomicU64,
+    identity_anchor_added_total: std::sync::atomic::AtomicU64,
     /// Serializes the read-modify-write of the durable act-index coverage floor
     /// (`ACTS_COVERAGE_FLOOR_KEY`). B5 (B4 fix): `advance_acts_coverage_floor` is
     /// `&self` and can be entered concurrently by the budget evictor and a
@@ -1050,6 +1067,9 @@ impl StorageEngine {
         Ok(Self {
             db,
             anchor_add_seq: std::sync::atomic::AtomicU64::new(0),
+            identity_user_to_anchor_total: std::sync::atomic::AtomicU64::new(0),
+            identity_witness_to_anchor_total: std::sync::atomic::AtomicU64::new(0),
+            identity_anchor_added_total: std::sync::atomic::AtomicU64::new(0),
             acts_floor_lock: std::sync::Mutex::new(()),
         })
     }
@@ -1406,7 +1426,133 @@ impl StorageEngine {
         // sees the record's own creator PK, not the attesting
         // witnesses, so the witness-class signal is unavailable here.
         let identity_cf_name = identity_tier_for_record(record);
-        batch.put_cf(&self.try_cf(identity_cf_name)?, identity_hash.as_bytes(), pk);
+        // Phase-C higher-tier guard on the USER branch (W-IDENT-1 item 3, D7 §3).
+        //
+        // `store_public_key_user_at` has always refused to write USER for an
+        // identity already held at a higher tier; this site — the one the node's
+        // live ingest and bootstrap pull actually use — had no such check, so an
+        // already-anchor identity wrote a stray CF_IDENTITIES_USER row on EVERY
+        // ordinary record it created. Read correctness was never at risk
+        // (`get_public_key` walks ANCHOR → WITNESS → USER → legacy, so a stray
+        // row can never win) but it inflated the one tier that is supposed to be
+        // bounded, and internal design notes §3.2 states the invariant
+        // this violated directly under the table naming this capture site.
+        //
+        // Costs two point reads, and ONLY on the USER branch — the anchor branch
+        // is untouched. MEASURED in release on the path that actually reaches
+        // this code (`bench_identity_tier_put`, not the test-only
+        // `insert`/`put_record` path, which writes no identity row at all):
+        //
+        //   before  53.312 µs  [51.308  55.410]
+        //   after   51.699 µs  [50.256  53.321]
+        //   criterion: change [−2.92%  +2.53%  +8.47%], p = 0.38 — "No change
+        //   in performance detected."
+        //
+        // The point estimate fell, which is noise, not a speed-up: the guard
+        // cannot make a put faster, and the confidence interval spans zero. The
+        // honest reading is that two point reads on two small, hot, block-cached
+        // CFs are not measurable against a ~52 µs write.
+        let write_identity_row = if identity_cf_name == CF_IDENTITIES_USER {
+            let held_higher = matches!(
+                self.db.get_cf(&self.try_cf(CF_IDENTITIES_ANCHOR)?, identity_hash.as_bytes()),
+                Ok(Some(_))
+            ) || matches!(
+                self.db.get_cf(&self.try_cf(CF_IDENTITIES_WITNESS)?, identity_hash.as_bytes()),
+                Ok(Some(_))
+            );
+            !held_higher
+        } else {
+            true
+        };
+        // W-IDENT-1 item 5 (D7 §5) — anchor branch: append the Phase-C rows to
+        // THIS batch and remember whether it was a real promotion.
+        //
+        // `was_anchor` short-circuit is mandatory, not an optimisation. This
+        // site has no demotion guard, so without it every restart or
+        // re-registration of an existing anchor would re-run the tombstone reads
+        // and count as a fresh promotion — the counter would measure node
+        // restarts. Checking ANCHOR first costs ONE point read in the steady
+        // state instead of three.
+        let mut anchor_promoted_from: Option<&'static str> = None;
+        let mut anchor_row_added = false;
+        if write_identity_row && identity_cf_name == CF_IDENTITIES_ANCHOR {
+            let was_anchor = matches!(
+                self.db.get_cf(&self.try_cf(CF_IDENTITIES_ANCHOR)?, identity_hash.as_bytes()),
+                Ok(Some(_))
+            );
+            if was_anchor {
+                batch.put_cf(&self.try_cf(CF_IDENTITIES_ANCHOR)?, identity_hash.as_bytes(), pk);
+            } else {
+                anchor_promoted_from = self.anchor_rows_to_batch(&mut batch, identity_hash, pk)?;
+                anchor_row_added = true;
+            }
+        } else if write_identity_row {
+            batch.put_cf(&self.try_cf(identity_cf_name)?, identity_hash.as_bytes(), pk);
+            // W-IDENT-1 item 4 (D7 §4) — TS/REV companions, RE-SHAPED.
+            //
+            // Without these, a USER row written here has no TS index entry, and
+            // the Phase-B evictor only ever walks the TS index — so every
+            // identity captured on the hot path was permanently unreachable and
+            // `identity_user_cache_max` was unenforceable exactly where it
+            // matters most.
+            //
+            // NOT a copy of `store_public_key_user_at`'s batch. That one writes
+            // a fresh `ts_ms||hash` key and deletes no prior TS key, which is
+            // fine at its call rate and catastrophic here: replicating it would
+            // write one TS row PER RECORD. Instead the prior TS key is read from
+            // REV and deleted in the SAME batch, so:
+            //
+            //   growth per record   : 0 net rows (the old TS key is replaced)
+            //   growth per identity : exactly 1 USER + 1 TS + 1 REV row, flat in
+            //                         the number of records that identity creates
+            //
+            // Cost is 1 point read plus 1 delete and 2 puts, on the USER branch
+            // only. Measured on `bench_identity_tier_put` in release, same
+            // instrument as item 3:
+            //
+            //   no guard, no companions   53.312 µs  [51.308  55.410]
+            //   + item 3 guard            51.699 µs  [50.256  53.321]
+            //   + these companions        55.700 µs  [53.932  57.571]
+            //
+            // Criterion reports "no change" at EACH step (p = 0.38, then 0.21),
+            // but read end to end the point estimate is ~4.5% above the original
+            // baseline and the intervals overlap heavily — so the honest claim is
+            // "a small cost consistent with one extra read and three extra batch
+            // ops, not separable from noise at n=100", NOT "free".
+            //
+            // The delete is queued BEFORE the put so the same-millisecond case
+            // (old key == new key) resolves to the put — a WriteBatch applies in
+            // insertion order.
+            //
+            // TIMESTAMP SOURCE IS DELIBERATE: node wall-clock at write time, the
+            // same source `store_public_key_user` uses — NEVER `record.timestamp`.
+            // This stamp is the eviction order, and a record's timestamp is set
+            // by its creator: sourcing it from the record would let anyone pin
+            // their own identity at the newest end of the index forever and push
+            // eviction onto honest identities. It is a cache-recency stamp, not a
+            // claim about the record.
+            if identity_cf_name == CF_IDENTITIES_USER {
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0);
+                let cf_ts = self.try_cf(CF_IDENTITIES_USER_TS)?;
+                let cf_rev = self.try_cf(CF_IDENTITIES_USER_REV)?;
+                if let Ok(Some(prev_ts)) = self.db.get_cf(&cf_rev, identity_hash.as_bytes()) {
+                    if prev_ts.len() == 8 {
+                        let mut old_ts_key = Vec::with_capacity(8 + identity_hash.len());
+                        old_ts_key.extend_from_slice(&prev_ts);
+                        old_ts_key.extend_from_slice(identity_hash.as_bytes());
+                        batch.delete_cf(&cf_ts, &old_ts_key);
+                    }
+                }
+                let mut ts_key = Vec::with_capacity(8 + identity_hash.len());
+                ts_key.extend_from_slice(&now_ms.to_be_bytes());
+                ts_key.extend_from_slice(identity_hash.as_bytes());
+                batch.put_cf(&cf_ts, &ts_key, []);
+                batch.put_cf(&cf_rev, identity_hash.as_bytes(), now_ms.to_be_bytes());
+            }
+        }
 
         // ARCH-4(b): atomic slot claim. The slot index entry lands in the
         // same WriteBatch as the record payload, so a sig-verify failure
@@ -1478,6 +1624,12 @@ impl StorageEngine {
         // ordinary user-record writes (the common case) don't thrash the cache.
         if identity_cf_name == CF_IDENTITIES_ANCHOR {
             self.anchor_add_seq.fetch_add(1, std::sync::atomic::Ordering::Release);
+        }
+        // Promotion counters bump only for an anchor row that did not exist
+        // before, and only after the write above succeeded — a failed write must
+        // never leave a counter claiming a promotion that is not durable.
+        if anchor_row_added {
+            self.bump_anchor_promotion_counters(anchor_promoted_from);
         }
         Ok(())
     }
@@ -4088,6 +4240,40 @@ impl StorageEngine {
     /// an existing lower-tier entry, `None` for a brand-new write or a
     /// no-op overwrite.
     pub fn store_public_key_anchor(&self, identity_hash: &str, pk: &[u8]) -> crate::errors::Result<Option<&'static str>> {
+        let mut batch = WriteBatch::default();
+        let promoted_from = self.anchor_rows_to_batch(&mut batch, identity_hash, pk)?;
+        self.db.write(batch)
+            .map_err(|e| crate::errors::ElaraError::Storage(format!("store_public_key_anchor: {e}")))?;
+        self.bump_anchor_promotion_counters(promoted_from);
+        // Staked-anchor cache coherence: this write added/refreshed an anchor
+        // CF entry (incl. a fresh anchor where the return is `None`). Bump
+        // unconditionally — an over-bump is a harmless extra cache rebuild,
+        // while a MISS is a stale staked-anchor view → potential chain freeze.
+        self.anchor_add_seq.fetch_add(1, std::sync::atomic::Ordering::Release);
+        Ok(promoted_from)
+    }
+
+    /// Append an anchor-tier write (plus its Phase-C lower-tier tombstones) to a
+    /// caller-owned `WriteBatch`, and report whether it promoted an existing
+    /// entry. W-IDENT-1 item 5 / D7 §5.
+    ///
+    /// This is the batch-building half of `store_public_key_anchor`, extracted
+    /// so the put path can append the SAME rows to the batch it already holds.
+    /// The put path must never call `store_public_key_anchor` itself: that opens
+    /// and commits its own batch, which would split one atomic write into two
+    /// and reopen exactly the hazard ARCH-4(b) exists to close. Same idiom as
+    /// `put_side_writes_to_batch`.
+    ///
+    /// Does NOT write the batch, bump `anchor_add_seq`, or touch the promotion
+    /// counters — all three belong to the caller, after its write succeeds, so a
+    /// failed write can never leave a counter claiming a promotion that did not
+    /// become durable.
+    fn anchor_rows_to_batch(
+        &self,
+        batch: &mut WriteBatch,
+        identity_hash: &str,
+        pk: &[u8],
+    ) -> crate::errors::Result<Option<&'static str>> {
         let cf_anchor = self.try_cf(CF_IDENTITIES_ANCHOR)?;
         let cf_witness = self.try_cf(CF_IDENTITIES_WITNESS)?;
         let cf_user = self.try_cf(CF_IDENTITIES_USER)?;
@@ -4098,7 +4284,6 @@ impl StorageEngine {
         // /metrics promotion counter).
         let was_witness = matches!(self.db.get_cf(&cf_witness, identity_hash.as_bytes()), Ok(Some(_)));
         let was_user = matches!(self.db.get_cf(&cf_user, identity_hash.as_bytes()), Ok(Some(_)));
-        let mut batch = WriteBatch::default();
         batch.put_cf(&cf_anchor, identity_hash.as_bytes(), pk);
         if was_witness {
             batch.delete_cf(&cf_witness, identity_hash.as_bytes());
@@ -4116,16 +4301,37 @@ impl StorageEngine {
             }
             batch.delete_cf(&cf_user_rev, identity_hash.as_bytes());
         }
-        self.db.write(batch)
-            .map_err(|e| crate::errors::ElaraError::Storage(format!("store_public_key_anchor: {e}")))?;
-        // Staked-anchor cache coherence: this write added/refreshed an anchor
-        // CF entry (incl. a fresh anchor where the return is `None`). Bump
-        // unconditionally — an over-bump is a harmless extra cache rebuild,
-        // while a MISS is a stale staked-anchor view → potential chain freeze.
-        self.anchor_add_seq.fetch_add(1, std::sync::atomic::Ordering::Release);
         Ok(if was_witness { Some(CF_IDENTITIES_WITNESS) }
            else if was_user { Some(CF_IDENTITIES_USER) }
            else { None })
+    }
+
+    /// Record one durable anchor-tier addition and, if it displaced a lower
+    /// tier, the promotion. Call ONLY after the batch carrying the rows has been
+    /// written. W-IDENT-1 item 5.
+    fn bump_anchor_promotion_counters(&self, promoted_from: Option<&'static str>) {
+        use std::sync::atomic::Ordering;
+        self.identity_anchor_added_total.fetch_add(1, Ordering::Relaxed);
+        match promoted_from {
+            Some(CF_IDENTITIES_WITNESS) => {
+                self.identity_witness_to_anchor_total.fetch_add(1, Ordering::Relaxed);
+            }
+            Some(CF_IDENTITIES_USER) => {
+                self.identity_user_to_anchor_total.fetch_add(1, Ordering::Relaxed);
+            }
+            _ => {}
+        }
+    }
+
+    /// Identity Partitioning Phase C promotion counters, for `/metrics`:
+    /// `(user_to_anchor, witness_to_anchor, anchor_added)`.
+    pub fn identity_promotion_counters(&self) -> (u64, u64, u64) {
+        use std::sync::atomic::Ordering;
+        (
+            self.identity_user_to_anchor_total.load(Ordering::Relaxed),
+            self.identity_witness_to_anchor_total.load(Ordering::Relaxed),
+            self.identity_anchor_added_total.load(Ordering::Relaxed),
+        )
     }
 
     /// Identity Partitioning Phase A + C — witness-tier write. Used
@@ -4185,8 +4391,27 @@ impl StorageEngine {
     /// timestamp is monotonic millis-since-epoch — rewriting the same
     /// hash advances both the TS-index and REV-index without deleting
     /// the prior TS entry; eviction handles the duplicate as a stale
-    /// row when it gets there. This avoids a read-modify-write on the
-    /// hot ingest path.
+    /// row when it gets there.
+    ///
+    /// That last sentence used to end "This avoids a read-modify-write on the
+    /// hot ingest path", which is no longer a true description of anything
+    /// (corrected 2026-09-06, W-IDENT-1). Two reasons, both worth keeping:
+    ///
+    /// 1. **This function is not on the hot ingest path.** D7 §3 established the
+    ///    live capture route is `identity_tier_for_record` → the identity branch
+    ///    of `put_record_with_pk_zone`. The production callers here are the
+    ///    on-miss peer fetch in `identity_fetcher` (rate = cache misses) and the
+    ///    non-witness arm of deferred-attestation processing in `state_core`
+    ///    (rate = attestations). Neither runs per record.
+    /// 2. **The real hot path now DOES the read-modify-write**, deliberately:
+    ///    W-IDENT-1 item 4 reads REV and deletes the prior TS key inside the
+    ///    record's own batch, because leaving one TS row per record was the
+    ///    memory bomb the audit re-shaped that item to avoid.
+    ///
+    /// So the two paths differ ON PURPOSE, not by accident: the per-record path
+    /// pays a read to stay flat per identity; this low-rate path keeps its
+    /// single-batch write and lets the (now budget-bounded) evictor reap the
+    /// duplicate. Whether to converge them is filed, not assumed.
     ///
     /// **Phase C — demotion guard**: if the identity is already in
     /// `CF_IDENTITIES_ANCHOR` or `CF_IDENTITIES_WITNESS`, the user
@@ -4242,17 +4467,23 @@ impl StorageEngine {
     /// to keep individual ticks short and the WriteBatch bounded.
     ///
     /// Algorithm:
-    ///   1. Count CF_IDENTITIES_USER entries; if `<= cap`, no-op.
+    ///   1. ESTIMATE CF_IDENTITIES_USER entries (O(1) RocksDB
+    ///      `estimate-num-keys`); if `<= cap`, no-op.
     ///   2. Iterate `CF_IDENTITIES_USER_TS` from start (oldest first).
     ///   3. For each `(ts || hash)` entry, look up `CF_IDENTITIES_USER_REV[hash]`:
     ///      - If REV missing or `REV[hash] != ts`: stale duplicate from
     ///        a re-write — delete only this TS entry, do NOT touch USER.
     ///      - If `REV[hash] == ts`: this is the canonical row — delete
     ///        all three (USER, TS, REV) and decrement count.
-    ///   4. Stop when count <= cap OR `evicted == max_per_call`.
+    ///   4. Stop when count <= cap OR the per-tick budget `max_per_call` is
+    ///      spent. The budget counts EVERY TS row deleted — canonical,
+    ///      stale-duplicate and malformed alike — because a bound that only
+    ///      counts evictions bounds nothing on a TS index full of stale rows
+    ///      (W-IDENT-1 item 2).
     ///
     /// Returns the count of (USER, TS, REV)-triples actually evicted —
-    /// stale-only TS deletes are not counted (they don't affect cap).
+    /// stale-only TS deletes are not counted in the RETURN value (they don't
+    /// affect the cap), but they do spend the per-tick budget.
     /// Anchor and witness CFs are never touched.
     ///
     /// Uses a single WriteBatch flushed at the end so eviction is
@@ -4268,7 +4499,27 @@ impl StorageEngine {
             // of the codebase (`gc_interval_secs: 0 = disabled`).
             return Ok(0);
         }
-        let mut count = self.count_cf(CF_IDENTITIES_USER);
+        // SCALE RULE (D7 verdict 2026-09-06 §2). This used to be the exact
+        // `count_cf(CF_IDENTITIES_USER)` — an O(all identities) iterator scan,
+        // run on EVERY 60-second tick at EVERY population, including far below
+        // the cap. `count_cf`'s own doc comment declares it TEST-ONLY and
+        // forbidden in production paths, and named the replacement used here.
+        //
+        // The estimate is not a weaker version of the count, it is the correct
+        // instrument: `identity_user_cache_max` is a SOFT cache bound, so being
+        // a few keys off is meaningless, while an O(N) scan on the way to that
+        // answer is exactly what the SCALE rule exists to forbid. RocksDB's
+        // estimate can drift high while deletes await compaction (evict a
+        // little early) or low right after a burst (evict a little late); both
+        // are self-correcting on the next tick, 60 seconds later.
+        //
+        // The alternative the spec offered — drop the pre-count entirely and
+        // let the bounded loop be the bound — was NOT taken, deliberately:
+        // without a population figure there is no `count <= cap` stop, so every
+        // tick would evict up to `max_per_call` live identities regardless of
+        // how far below the cap the CF sits. That trades an O(N) read for
+        // unconditional data loss.
+        let mut count = self.approximate_cf_size(CF_IDENTITIES_USER) as usize;
         if count <= cap {
             return Ok(0);
         }
@@ -4277,6 +4528,22 @@ impl StorageEngine {
         let cf_rev = self.try_cf(CF_IDENTITIES_USER_REV)?;
         let mut batch = WriteBatch::default();
         let mut evicted = 0usize;
+        // `evicted` counts canonical triples and is the RETURN value — its
+        // meaning is unchanged. `spent` is the real per-tick bound: EVERY TS row
+        // this call deletes, canonical or not (W-IDENT-1 item 2, D7 §4).
+        //
+        // Before this counter existed, the two stale-TS `continue` arms below
+        // sat outside the only break test and stale-only deletes did not count
+        // toward `evicted`, so on a TS index full of stale rows neither the
+        // iteration count nor the WriteBatch had ANY bound — measured at 195 TS
+        // deletes against a `max_per_call` of 8 by
+        // `idp_b_evict_stale_ts_arms_respect_the_per_tick_budget`. The doc
+        // comment above promised a bounded batch; this is what makes it true.
+        //
+        // Progress stays monotonic: a tick that spends its whole budget on
+        // stale rows still deletes them, so the next tick resumes nearer the
+        // canonical rows rather than re-walking the same prefix.
+        let mut spent = 0usize;
         let iter = self.db.iterator_cf(&cf_ts, rocksdb::IteratorMode::Start);
         for entry in iter {
             let (key, _) = match entry {
@@ -4286,6 +4553,10 @@ impl StorageEngine {
             if key.len() < 8 {
                 // Malformed TS entry — drop it.
                 batch.delete_cf(&cf_ts, &key);
+                spent += 1;
+                if spent >= max_per_call {
+                    break;
+                }
                 continue;
             }
             let ts_bytes: [u8; 8] = key[..8].try_into().unwrap_or([0; 8]);
@@ -4301,6 +4572,10 @@ impl StorageEngine {
                 // newer ts; that newer entry is somewhere later in the
                 // index). Drop just the TS row.
                 batch.delete_cf(&cf_ts, &key);
+                spent += 1;
+                if spent >= max_per_call {
+                    break;
+                }
                 continue;
             }
             // Canonical row — drop all three.
@@ -4308,8 +4583,13 @@ impl StorageEngine {
             batch.delete_cf(&cf_ts, &key);
             batch.delete_cf(&cf_rev, hash_bytes);
             evicted += 1;
+            spent += 1;
             count -= 1;
-            if count <= cap || evicted >= max_per_call {
+            // `spent >= max_per_call` subsumes the old `evicted >= max_per_call`
+            // (spent is incremented on every path evicted is), so the eviction
+            // ceiling this call has always advertised is unchanged for a TS
+            // index with no stale rows — where spent == evicted exactly.
+            if count <= cap || spent >= max_per_call {
                 break;
             }
         }
@@ -11508,6 +11788,9 @@ mod tests {
         let engine = StorageEngine {
             db,
             anchor_add_seq: std::sync::atomic::AtomicU64::new(0),
+            identity_user_to_anchor_total: std::sync::atomic::AtomicU64::new(0),
+            identity_witness_to_anchor_total: std::sync::atomic::AtomicU64::new(0),
+            identity_anchor_added_total: std::sync::atomic::AtomicU64::new(0),
             acts_floor_lock: std::sync::Mutex::new(()),
         };
         let save_res = engine.save_snapshot("probe", &42u32);
@@ -14270,6 +14553,46 @@ mod tests {
         assert!(engine.get_public_key("w1").is_some());
     }
 
+    /// Pins the ONE behavioural consequence of D7 §2's ruling (drop the exact
+    /// `count_cf` from the evict tick, use the O(1) key estimate): the estimate
+    /// counts an un-flushed overwrite as a second entry, so the evictor can see
+    /// a population slightly above the truth and evict slightly early.
+    ///
+    /// Measured 2026-09-06, and the numbers are the point of the test: with all
+    /// four writes still in the memtable the exact count is 3 and the estimate
+    /// is 4; after a flush both are 3. So the error is bounded by UN-FLUSHED
+    /// overwrite churn and self-corrects at the next flush — it does not
+    /// accumulate. That is what makes the estimate the right instrument for a
+    /// soft cache bound (`identity_user_cache_max`, default 100_000): a
+    /// transient off-by-a-few against an O(all identities) scan on a 60-second
+    /// production loop is not a close call.
+    ///
+    /// If this test ever fails with estimate == exact BEFORE the flush, RocksDB
+    /// changed its memtable accounting and the eviction-timing note in
+    /// `evict_user_identities_to_cap` should be re-read, not silently deleted.
+    #[test]
+    fn idp_b_population_estimate_overcounts_unflushed_overwrites_only() {
+        let (engine, _dir) = test_engine();
+        engine.store_public_key_user_at("u_a", &pk_bytes(1), 100).unwrap();
+        engine.store_public_key_user_at("u_b", &pk_bytes(2), 200).unwrap();
+        engine.store_public_key_user_at("u_b", &pk_bytes(3), 300).unwrap();
+
+        let exact_before = engine.count_cf(CF_IDENTITIES_USER);
+        let est_before = engine.approximate_cf_size(CF_IDENTITIES_USER) as usize;
+        assert_eq!(exact_before, 2, "two distinct identities, one of them rewritten");
+        assert_eq!(est_before, 3, "the un-flushed overwrite is counted as its own entry");
+
+        engine.db.flush_cf(&engine.cf(CF_IDENTITIES_USER)).unwrap();
+        let exact_after = engine.count_cf(CF_IDENTITIES_USER);
+        let est_after = engine.approximate_cf_size(CF_IDENTITIES_USER) as usize;
+        assert_eq!(exact_after, 2);
+        assert_eq!(
+            est_after, exact_after,
+            "the overcount must not survive a flush — if it does, the error accumulates \
+             instead of self-correcting and the soft-bound argument no longer holds"
+        );
+    }
+
     #[test]
     fn idp_b_evict_handles_duplicate_ts_after_overwrite() {
         let (engine, _dir) = test_engine();
@@ -14284,6 +14607,15 @@ mod tests {
         // Three logical entries, but four TS-index rows (one stale).
         assert_eq!(engine.count_cf(CF_IDENTITIES_USER), 3);
         assert_eq!(engine.count_cf(CF_IDENTITIES_USER_TS), 4);
+        // FLUSH IS LOAD-BEARING for this fixture, not incidental setup. The
+        // evictor's population figure is RocksDB's O(1) key estimate (D7 §2:
+        // `count_cf` is an O(N) scan forbidden in production), and in an
+        // unflushed memtable that estimate counts `u_recent`'s overwrite as a
+        // second entry — measured 2026-09-06: exact=3, estimate=4 unflushed;
+        // 3 and 3 after flush. Without this line the evictor sees a population
+        // of 4, evicts `u_mid` as well, and the assertions below fail for a
+        // reason that has nothing to do with the stale-TS behaviour under test.
+        engine.db.flush_cf(&engine.cf(CF_IDENTITIES_USER)).unwrap();
         // Evict to cap=2. Should drop u_old (oldest live), leave u_mid +
         // u_recent. The stale (200, u_recent) entry must NOT cause
         // u_recent's PK to be evicted.
@@ -14295,6 +14627,56 @@ mod tests {
             "u_recent must survive: stale TS row at ts=200 is not the canonical entry");
         // u_recent's PK is still the latest value (pk_bytes(3)).
         assert_eq!(engine.get_public_key("u_recent").unwrap(), pk_bytes(3));
+    }
+
+    /// W-IDENT-1 item 2 (D7 §4): the per-tick budget must bound EVERY path
+    /// through the loop, not just the canonical-eviction path.
+    ///
+    /// The two stale-TS `continue` arms used to sit outside the only break
+    /// test, and stale-only deletes did not count toward `evicted` — so on a
+    /// TS index full of stale rows the loop iterated, and the WriteBatch grew,
+    /// with no bound at all. The doc comment promised a "bounded WriteBatch";
+    /// this is the test that makes that sentence true.
+    ///
+    /// Shape: 10 identities each rewritten 20×. That leaves 10 live USER keys
+    /// and 200 TS rows, 190 of them stale — and the canonical rows sort LAST
+    /// (highest ts), so a run that is bounded only on canonical evictions must
+    /// first delete essentially every stale row to reach them. That is the
+    /// unbounded batch, reproduced deterministically.
+    #[test]
+    fn idp_b_evict_stale_ts_arms_respect_the_per_tick_budget() {
+        let (engine, _dir) = test_engine();
+        for i in 0..10u64 {
+            for j in 0..20u64 {
+                let hash = format!("u{i}");
+                engine
+                    .store_public_key_user_at(&hash, &pk_bytes((i * 20 + j) as u8), 1000 + j * 10 + i)
+                    .unwrap();
+            }
+        }
+        engine.db.flush_cf(&engine.cf(CF_IDENTITIES_USER)).unwrap();
+        assert_eq!(engine.count_cf(CF_IDENTITIES_USER), 10, "10 live identities");
+        let ts_before = engine.count_cf(CF_IDENTITIES_USER_TS);
+        assert_eq!(ts_before, 200, "20 TS rows per identity, 19 of them stale");
+
+        let max_per_tick = 8usize;
+        let evicted = engine.evict_user_identities_to_cap(5, max_per_tick).unwrap();
+        let ts_after = engine.count_cf(CF_IDENTITIES_USER_TS);
+        let ts_deleted = ts_before - ts_after;
+
+        assert!(
+            ts_deleted <= max_per_tick,
+            "the tick deleted {ts_deleted} TS rows against a budget of {max_per_tick} — the stale-TS \
+             arms are unbounded, so neither the iteration count nor the WriteBatch is bounded"
+        );
+        assert!(
+            evicted <= max_per_tick,
+            "evicted {evicted} triples against a budget of {max_per_tick}"
+        );
+        // Progress must be monotonic: a tick that spends its whole budget on
+        // stale rows still removes them, so the next tick starts closer to the
+        // canonical rows. A bounded loop that made no progress would spin.
+        assert!(ts_deleted > 0, "the tick must make progress, not stall");
     }
 
     #[test]
@@ -14851,6 +15233,247 @@ mod tests {
     // contract on the storage tier. None of them touch RocksDB or take
     // `&self` — sync `#[test]` (no tokio runtime, no tempdir) so they cost
     // ~zero suite time.
+
+    /// W-IDENT-1 item 5 (D7 §5): the two →ANCHOR promotion counters actually fire.
+    ///
+    /// Before this, both were "declared and exported but NO writer anywhere in
+    /// src/ or crates/, production OR test" — structurally incapable of moving,
+    /// while reading to an operator as "no promotions happened" on an
+    /// authority-granting path. This test is the difference between wired and
+    /// disclosed-as-dead.
+    ///
+    /// Also pins the `was_anchor` short-circuit, which is the part that makes
+    /// the number mean something: this site has no demotion guard, so without it
+    /// every re-registration of an existing anchor would count as a fresh
+    /// promotion and the counter would be measuring node restarts.
+    #[test]
+    fn idp_c_put_path_counts_user_to_anchor_promotion_once() {
+        let (engine, _dir) = test_engine();
+        let identity_hash = "promoted_identity";
+        let pk = pk_bytes(21);
+
+        assert_eq!(engine.identity_promotion_counters(), (0, 0, 0));
+
+        // 1. Ordinary record → USER tier.
+        let user_rec = test_record("r-user");
+        assert_eq!(identity_tier_for_record(&user_rec), CF_IDENTITIES_USER);
+        engine
+            .put_record_with_pk_zone(
+                &user_rec.id, &user_rec, identity_hash, &pk, [0u8; 8], None,
+                RecordSideWrites::default(), None,
+            )
+            .unwrap();
+        assert_eq!(engine.count_cf(CF_IDENTITIES_USER), 1);
+        assert_eq!(
+            engine.identity_promotion_counters(),
+            (0, 0, 0),
+            "a USER-tier write is not an anchor addition"
+        );
+
+        // 2. VRF-registration record for the SAME identity → ANCHOR tier.
+        let mut anchor_rec = test_record("r-anchor");
+        anchor_rec.metadata.insert("vrf_registration".into(), serde_json::json!(true));
+        assert_eq!(identity_tier_for_record(&anchor_rec), CF_IDENTITIES_ANCHOR);
+        engine
+            .put_record_with_pk_zone(
+                &anchor_rec.id, &anchor_rec, identity_hash, &pk, [0u8; 8], None,
+                RecordSideWrites::default(), None,
+            )
+            .unwrap();
+
+        assert_eq!(
+            engine.identity_promotion_counters(),
+            (1, 0, 1),
+            "USER→ANCHOR must count as one promotion and one anchor addition"
+        );
+        assert_eq!(engine.count_cf(CF_IDENTITIES_ANCHOR), 1);
+        assert_eq!(
+            engine.count_cf(CF_IDENTITIES_USER),
+            0,
+            "the lower-tier row must be tombstoned in the SAME batch"
+        );
+        assert_eq!(engine.count_cf(CF_IDENTITIES_USER_TS), 0, "TS companion tombstoned too");
+        assert_eq!(engine.count_cf(CF_IDENTITIES_USER_REV), 0, "REV companion tombstoned too");
+
+        // 3. Re-registration of an identity that is ALREADY an anchor — the
+        //    restart case. Must not count again.
+        let again = test_record("r-anchor-again");
+        let mut again = again;
+        again.metadata.insert("vrf_registration".into(), serde_json::json!(true));
+        engine
+            .put_record_with_pk_zone(
+                &again.id, &again, identity_hash, &pk, [0u8; 8], None,
+                RecordSideWrites::default(), None,
+            )
+            .unwrap();
+        assert_eq!(
+            engine.identity_promotion_counters(),
+            (1, 0, 1),
+            "was_anchor short-circuit: re-registering an existing anchor is not a new promotion"
+        );
+
+        // 4. The invariant the denominator exists for.
+        let (u2a, w2a, added) = engine.identity_promotion_counters();
+        assert!(u2a + w2a <= added, "user_to_anchor + witness_to_anchor <= anchor_added_total");
+    }
+
+    /// The other anchor-add site — `store_public_key_anchor` — feeds the same
+    /// storage-owned counters, so a WITNESS→ANCHOR promotion is counted wherever
+    /// it happens. Two sites, one set of atomics.
+    #[test]
+    fn idp_c_store_public_key_anchor_counts_witness_to_anchor() {
+        let (engine, _dir) = test_engine();
+        engine.store_public_key_witness("w1", &pk_bytes(31)).unwrap();
+        assert_eq!(engine.identity_promotion_counters(), (0, 0, 0));
+
+        let promoted = engine.store_public_key_anchor("w1", &pk_bytes(31)).unwrap();
+        assert_eq!(promoted, Some(CF_IDENTITIES_WITNESS));
+        assert_eq!(
+            engine.identity_promotion_counters(),
+            (0, 1, 1),
+            "witness→anchor via the direct API must count on the same atomics"
+        );
+
+        // A brand-new anchor is an addition but not a promotion.
+        engine.store_public_key_anchor("fresh", &pk_bytes(32)).unwrap();
+        assert_eq!(engine.identity_promotion_counters(), (0, 1, 2));
+    }
+
+    /// W-IDENT-1 item 4 (D7 §4): the hot put path writes TS/REV companions, and
+    /// rewriting the same identity must NOT accumulate TS rows.
+    ///
+    /// Two claims, both load-bearing. (a) Without a TS companion the Phase-B
+    /// evictor — which only walks the TS index — can never reach an identity
+    /// captured on the hot path, so `identity_user_cache_max` was unenforceable
+    /// exactly where the volume is. (b) Copying `store_public_key_user_at`'s
+    /// batch would have written one TS row PER RECORD; reading REV and deleting
+    /// the prior key in the same batch makes the cost flat per IDENTITY instead.
+    #[test]
+    fn idp_c_put_path_ts_companion_is_flat_per_identity_not_per_record() {
+        let (engine, _dir) = test_engine();
+        let identity_hash = "hot_path_identity";
+        let pk = pk_bytes(11);
+
+        for i in 0..25 {
+            let rec = test_record(&format!("r{i}"));
+            assert_eq!(identity_tier_for_record(&rec), CF_IDENTITIES_USER);
+            engine
+                .put_record_with_pk_zone(
+                    &rec.id,
+                    &rec,
+                    identity_hash,
+                    &pk,
+                    [0u8; 8],
+                    None,
+                    RecordSideWrites::default(),
+                    None,
+                )
+                .unwrap();
+        }
+
+        assert_eq!(engine.count_cf(CF_IDENTITIES_USER), 1, "one identity, one row");
+        assert_eq!(
+            engine.count_cf(CF_IDENTITIES_USER_TS),
+            1,
+            "25 records must leave ONE TS row — a per-record TS row is the memory bomb \
+             this shape exists to avoid"
+        );
+        assert_eq!(engine.count_cf(CF_IDENTITIES_USER_REV), 1);
+
+        // The whole point of the companion: the evictor can now reach it.
+        engine.db.flush_cf(&engine.cf(CF_IDENTITIES_USER)).unwrap();
+        let second = "hot_path_identity_2";
+        let rec = test_record("r-second");
+        engine
+            .put_record_with_pk_zone(
+                &rec.id, &rec, second, &pk_bytes(12), [0u8; 8], None,
+                RecordSideWrites::default(), None,
+            )
+            .unwrap();
+        engine.db.flush_cf(&engine.cf(CF_IDENTITIES_USER)).unwrap();
+        assert_eq!(engine.count_cf(CF_IDENTITIES_USER), 2);
+
+        let evicted = engine.evict_user_identities_to_cap(1, 100).unwrap();
+        assert_eq!(
+            evicted, 1,
+            "a hot-path identity must be evictable — before the TS companion it was \
+             invisible to the evictor forever"
+        );
+        assert_eq!(engine.count_cf(CF_IDENTITIES_USER), 1);
+    }
+
+    /// W-IDENT-1 item 3 (D7 §3): an identity already held at ANCHOR must not
+    /// get a stray CF_IDENTITIES_USER row from its ordinary records.
+    ///
+    /// `store_public_key_user_at` has always refused this. The live put path —
+    /// `put_record_with_pk_zone`, which is what ingest and the bootstrap pull
+    /// actually call — did not, so every ordinary record an anchor created wrote
+    /// a USER row. Never a read-correctness bug (`get_public_key` walks
+    /// ANCHOR → WITNESS → USER → legacy, so the stray row can never win) but it
+    /// inflated the one tier the Phase-B evictor is supposed to bound, and
+    /// internal design notes §3.2 states the violated invariant right
+    /// under the table that names this exact capture site.
+    #[test]
+    fn idp_c_put_path_does_not_write_user_row_for_an_anchor_identity() {
+        let (engine, _dir) = test_engine();
+        let rec = test_record("r-anchor-owned");
+        let identity_hash = "anchor_identity_hash";
+        let pk = pk_bytes(7);
+
+        // The record itself routes to USER — no vrf_registration metadata.
+        assert_eq!(identity_tier_for_record(&rec), CF_IDENTITIES_USER);
+
+        // But the identity is already an anchor.
+        engine.store_public_key_anchor(identity_hash, &pk).unwrap();
+        assert_eq!(engine.count_cf(CF_IDENTITIES_ANCHOR), 1);
+        assert_eq!(engine.count_cf(CF_IDENTITIES_USER), 0);
+
+        engine
+            .put_record_with_pk_zone(
+                &rec.id,
+                &rec,
+                identity_hash,
+                &pk,
+                [0u8; 8],
+                None,
+                RecordSideWrites::default(),
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(
+            engine.count_cf(CF_IDENTITIES_USER),
+            0,
+            "an anchor identity's ordinary record must not create a USER-tier row"
+        );
+        assert_eq!(engine.count_cf(CF_IDENTITIES_ANCHOR), 1, "the anchor row is untouched");
+        assert_eq!(
+            engine.get_public_key(identity_hash),
+            Some(pk.clone()),
+            "the PK still resolves, from the anchor tier"
+        );
+
+        // Control: an identity NOT held higher still gets its USER row, or the
+        // guard would be silently disabling identity capture altogether.
+        let rec2 = test_record("r-user-owned");
+        engine
+            .put_record_with_pk_zone(
+                &rec2.id,
+                &rec2,
+                "ordinary_identity_hash",
+                &pk_bytes(8),
+                [0u8; 8],
+                None,
+                RecordSideWrites::default(),
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            engine.count_cf(CF_IDENTITIES_USER),
+            1,
+            "the guard must only suppress the write for higher-tier identities"
+        );
+    }
 
     #[test]
     fn batch_x_identity_tier_for_record_routes_anchor_only_when_vrf_registered_and_node_type_anchor() {

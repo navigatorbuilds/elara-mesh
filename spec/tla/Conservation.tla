@@ -3,9 +3,9 @@
 (* TLA+ model of the Elara beat SUPPLY-CONSERVATION core                     *)
 (* (Phase D — spec/tla/README.md, §4.4 SupplyInvariant row).                *)
 (*                                                                         *)
-(* THE INVARIANT (the field doc-comment at src/accounting/ledger.rs:213):   *)
+(* THE INVARIANT (pending_xzone_locked doc, src/accounting/ledger.rs):      *)
 (*   sum(available) + total_staked + pending_xzone_locked                   *)
-(*     + conservation_pool = total_supply               (ledger.rs:213)     *)
+(*     + conservation_pool = total_supply               (ledger.rs)         *)
 (* i.e. value is never created or destroyed: every beat is in exactly one *)
 (* of four buckets, and the four-bucket sum is a constant. This is the     *)
 (* STRONGEST safety property because it must hold across EVERY action —    *)
@@ -13,31 +13,30 @@
 (* partition-merge seal demotion, 30-day stale-reap). It catches any path  *)
 (* that forgot to debit/credit symmetrically.                             *)
 (*                                                                         *)
-(* BUCKET <-> CODE MAP (the four terms of ledger.rs:213):                   *)
+(* BUCKET <-> CODE MAP (the four total_supply terms, ledger.rs):            *)
 (*   bal[a]   <-> AccountState.available  (per-account spendable balance)  *)
 (*   staked   <-> LedgerState.total_staked                                 *)
 (*   inflight <-> LedgerState.pending_xzone_locked  (NOT cross_zone.       *)
 (*                total_locked — that is a SEPARATE in-module tracker; the  *)
-(*                conservation invariant at ledger.rs:213 is keyed on       *)
-(*                pending_xzone_locked, mutated at ledger.rs:2067 (+=) and  *)
-(*                pending_xzone_locked -= at (:2108) (:2140) (:2227) (:2265)*)
-(*                (:1757) (:1784) — pending_xzone_locked saturating_sub).   *)
+(*                conservation invariant is keyed on                        *)
+(*                pending_xzone_locked (ledger.rs) — incremented in one     *)
+(*                place, decremented in six, every one a saturating_sub).   *)
 (*   pool     <-> LedgerState.conservation_pool                            *)
 (*                                                                         *)
 (* TRANSITION <-> CODE MAP (cross-zone lifecycle, the conservation-risky   *)
 (* path — single transfer, sender s -> recipient r):                       *)
-(*   Lock   <-> XZoneLock apply: available -= amt (ledger.rs:2059);         *)
-(*              pending_xzone_locked += amt (:2067). [bal[s]->inflight]     *)
+(*   Lock   <-> XZoneLock in apply_op: available -= amt (ledger.rs);        *)
+(*              pending_xzone_locked += amt (ledger.rs). [bal[s]->inflight] *)
 (*   Seal   <-> source-zone epoch seal commits the lock (set_proof +        *)
 (*              verify_finality_quorum). No bucket move.                    *)
-(*   Claim  <-> XZoneClaim apply: pending_xzone_locked -= amt (:2108) (sat);*)
-(*              recipient available += amt (:2101). [inflight->bal[r]]      *)
-(*   Abort  <-> XZoneAbort apply: pending_xzone_locked -= amt (:2227) (sat);*)
+(*   Claim  <-> XZoneClaim apply: pending_xzone_locked -= amt (ledger.rs);  *)
+(*              recipient available += amt (apply_op, ledger.rs). [->bal[r]]*)
+(*   Abort  <-> XZoneAbort apply: pending_xzone_locked -= amt (ledger.rs);  *)
 (*              sender available += amt. Sealed-only: abort_transfer refuses*)
-(*              an empty merkle_proof (cross_zone.rs:775). [inflight->bal[s]] *)
+(*              an empty merkle_proof (cross_zone.rs). [inflight->bal[s]]     *)
 (*   Refund <-> cancel/reject/passive-24h: pending -= amt (sat); sender     *)
 (*              += amt. UNSEALED-only (merkle_proof.is_empty()). [->bal[s]] *)
-(*   Reap   <-> apply_reap_batch (cross_zone.rs:1074): pending -= amt (sat);*)
+(*   Reap   <-> apply_reap_batch (cross_zone.rs): pending -= amt (sat);     *)
 (*              sender += amt. Sealed lock past expires_at+30d.[->bal[s]]    *)
 (*                                                                         *)
 (* DECREMENTS ARE SATURATING. Every pending_xzone_locked decrement in the  *)
@@ -66,7 +65,7 @@
 (*   >30-day partition zone B cannot see the reap and a pre-expiry claim    *)
 (*   record applies anyway (bal[r]+=amt). One lock backs two credits =>     *)
 (*   supply +amt. In normal synchrony the 24h claim-expiry gate (the        *)
-(*   expires_at check in claim_transfer, cross_zone.rs:495) keeps reap and  *)
+(*   expires_at check in claim_transfer, cross_zone.rs) keeps reap and      *)
 (*   claim disjoint; the >30d partition defeats that gate. Modeled by the   *)
 (*   ReapClaimExclusive switch.                                             *)
 (*                                                                         *)
@@ -80,13 +79,13 @@
 (*   and run-tlc.sh keep the two banners separate.                          *)
 (*                                                                         *)
 (* DELIBERATE ABSTRACTIONS (documented — audited 2026-06-28):              *)
-(*   - witness_bonded is NOT a conservation bucket. AccountState.total()    *)
-(*     (ledger.rs:97) and the conservation equation (ledger.rs:213) both    *)
+(*   - witness_bonded (ledger.rs) is NOT a conservation bucket. Both        *)
+(*     AccountState::total() and the conservation equation                  *)
 (*     EXCLUDE it, matching design-doc §4.4's four-term sum. So witness     *)
 (*     registration/bonding is out of scope here BY THE INVARIANT'S OWN     *)
 (*     definition — modeling it would be the error.                        *)
 (*   - Idle decay (demurrage-era name) is omitted: its debit SPLITS between *)
-(*     conservation_pool (ledger.rs:753) and active stakers — an economic   *)
+(*     conservation_pool (ledger.rs) and active stakers — an economic       *)
 (*     distribution, not a consensus-safety move (design doc §9). The       *)
 (*     conservation property it would exercise is identical to the          *)
 (*     Burn/Mint pair modeled below.                                        *)
@@ -286,14 +285,14 @@ Unstake ==
     /\ bal' = [bal EXCEPT ![Treasury] = bal[Treasury] + Unit]
     /\ UNCHANGED << inflight, pool, locked, sealed, claimed, aborted, refunded, stale, reaped, sealDemoted, resolved >>
 
-\* Burn / PoolFund: available -> conservation_pool (Burn apply, ledger.rs:1811).
+\* Burn / PoolFund: available -> conservation_pool (Burn apply, ledger.rs).
 Burn ==
     /\ bal[Treasury] >= Unit
     /\ bal' = [bal EXCEPT ![Treasury] = bal[Treasury] - Unit]
     /\ pool' = pool + Unit
     /\ UNCHANGED << inflight, staked, locked, sealed, claimed, aborted, refunded, stale, reaped, sealDemoted, resolved >>
 
-\* Reward emission / mint from pool: conservation_pool -> available (ledger.rs:1552).
+\* Reward emission / mint from pool: conservation_pool -> available (ledger.rs).
 Mint ==
     /\ pool >= Unit
     /\ pool' = pool - Unit

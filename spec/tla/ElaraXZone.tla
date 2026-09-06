@@ -8,7 +8,7 @@
 (* non-inclusion quorum — never both. Both outcomes would credit value     *)
 (* twice (recipient credited in zone B AND sender refunded in zone A), so   *)
 (* mutual exclusion is the load-bearing conservation property for the      *)
-(* sealed-abort path (src/accounting/cross_zone.rs process_expired doc :751-756).*)
+(* sealed-abort path (src/accounting/cross_zone.rs process_expired doc).    *)
 (*                                                                         *)
 (* THE KEY INSIGHT (why this is a faithful specialization of Phase B):     *)
 (* Both a global CLAIM and a global ABORT require a 2/3 quorum of zone B's  *)
@@ -25,17 +25,17 @@
 (* (ElaraConsensus.HonestFree), reframed as claim-side vs abort-side over   *)
 (* zone B's committee.                                                     *)
 (*                                                                         *)
-(* REFINEMENT MAP (TLA+ <-> Rust, src/accounting/cross_zone.rs):                *)
+(* REFINEMENT MAP (src/accounting/cross_zone.rs, verify_finality_quorum):   *)
 (*   Quorum(S)        <-> the count-based 2/3 gate `n*3 >= size*2` shared by *)
-(*                        verify_finality_quorum :1404 AND                  *)
-(*                        verify_abort_quorum     :1523 (BOTH plain count,  *)
+(*                        verify_finality_quorum AND                        *)
+(*                        verify_abort_quorum (BOTH plain count,            *)
 (*                        NOT diversity-weighted — so uniform "one witness  *)
 (*                        = one vote" is EXACT here, unlike Phase B).       *)
-(*   Claimed          <-> claim_transfer succeeds :464 (status -> Claimed)  *)
-(*   Aborted          <-> abort_transfer succeeds :657 (status -> Aborted), *)
+(*   Claimed          <-> claim_transfer succeeds (status -> Claimed)       *)
+(*   Aborted          <-> abort_transfer succeeds (status -> Aborted),      *)
 (*                        gated by verify_abort_quorum over the B2-anchored  *)
 (*                        dest committee (XZONE-ABORT-FORGERY-FIX-2026-06-22)*)
-(*   unsealedRefund   <-> cancel_transfer :590 / reject_transfer :699 /     *)
+(*   unsealedRefund   <-> cancel_transfer / reject_transfer /               *)
 (*                        process_expired passive-24h — all UNSEALED-only.  *)
 (*   SignClaim/Abort  <-> a zone-B committee member adding its attestation  *)
 (*                        to the claim seal / the abort proof.             *)
@@ -46,8 +46,9 @@
 (*     status of Phase B's HonestFree. The code relies on claim-record      *)
 (*     propagation so an honest zone-B member that sealed a claim observes   *)
 (*     the transfer is Claimed before the abort-signing loop selects it     *)
-(*     (epoch.rs abort emitter filters status==Locked). Modeling it as an   *)
-(*     honest invariant is the standard BFT idealization.                  *)
+(*     (the abort emitter inside epoch_seal_loop, epoch.rs, filters         *)
+(*     status==Locked). Modeling it as an honest invariant is the           *)
+(*     standard BFT idealization.                                           *)
 (*   - The zone-A seal-finality proof (verify_finality_quorum, a SEPARATE   *)
 (*     zone-A committee) is folded into the `Sealed` precondition: it makes  *)
 (*     the lock real and claimable but is not the claim-vs-abort CONFLICT,   *)
@@ -56,7 +57,7 @@
 (*   - `Sealed` is a non-reverting CONSTANT. The partition-merge seal-      *)
 (*     DEMOTION conservation tail (docs/PARTITION-MERGE.md Gap D / the      *)
 (*     unimplemented XZoneRevert, and the 30-day XZoneStaleReap path via    *)
-(*     apply_reap_batch cross_zone.rs:1074) is a SUPPLY-conservation break  *)
+(*     apply_reap_batch cross_zone.rs) is a SUPPLY-conservation break       *)
 (*     (a non-canonical debit), expressible only with `amount` /            *)
 (*     `total_locked` — that is Phase D (§4.4 SupplyInvariant), NOT this    *)
 (*     claim/abort mutual-exclusion model. See README "Not yet modelled".   *)
@@ -64,7 +65,7 @@
 (*     per-transfer mutual exclusion composes (the cross-transfer aggregate *)
 (*     supply invariant is Phase D).                                       *)
 (*   - Legacy/pre-B2 locks (dest_finality_committee = None) CANNOT be       *)
-(*     aborted (verify_abort_quorum :1479 fail-closed) — strictly safer     *)
+(*     aborted (verify_abort_quorum fail-closed) — strictly safer           *)
 (*     (one fewer terminal). Modeling the anchored case (abort POSSIBLE) is  *)
 (*     the conservative worst case for proving mutual exclusion.            *)
 (***************************************************************************)
@@ -92,8 +93,8 @@ TypeOK ==
     /\ unsealedRefund \in BOOLEAN
 
 (***************************************************************************)
-(* Count-based 2/3 quorum — mirrors BOTH verify_finality_quorum :1404 and  *)
-(* verify_abort_quorum :1523:  `n.saturating_mul(3) < denom.saturating_mul *)
+(* Count-based 2/3 quorum — mirrors BOTH verify_finality_quorum and         *)
+(* verify_abort_quorum:  `n.saturating_mul(3) < denom.saturating_mul        *)
 (* (2)` rejects, i.e. accept iff  3*|S| >= 2*|committee|.                   *)
 (***************************************************************************)
 Quorum(S) == Cardinality(S) * 3 >= Cardinality(Witnesses) * 2
@@ -112,7 +113,7 @@ Init ==
     /\ unsealedRefund = FALSE
 
 \* A zone-B witness contributes to the claim seal. Enabled only on a sealed
-\* transfer (claim requires seal — M7 gate, claim_transfer :428). An HONEST
+\* transfer (claim requires seal — M7 gate, claim_transfer). An HONEST
 \* witness will not also be on the abort side (the at-most-one-side trust
 \* assumption); a Byzantine witness has no such constraint.
 SignClaim(w) ==
@@ -123,7 +124,7 @@ SignClaim(w) ==
     /\ UNCHANGED << abortAtt, unsealedRefund >>
 
 \* Symmetric: a zone-B witness signs the non-inclusion abort attestation.
-\* Sealed-only (abort_transfer :650). Honest witnesses do not also seal the claim.
+\* Sealed-only (abort_transfer). Honest witnesses do not also seal the claim.
 SignAbort(w) ==
     /\ Sealed
     /\ w \notin abortAtt
@@ -132,8 +133,8 @@ SignAbort(w) ==
     /\ UNCHANGED << claimAtt, unsealedRefund >>
 
 \* The UNSEALED refund paths (cancel/reject/passive-24h) collapse to one
-\* action — all three require `merkle_proof.is_empty()` (cancel :581,
-\* reject :690, process_expired skips sealed). Disabled once a lock is sealed.
+\* action - all three require `merkle_proof.is_empty()` (cancel_transfer, *)
+\* reject_transfer, process_expired skips sealed). Disabled once sealed. *)
 Refund ==
     /\ ~Sealed
     /\ ~unsealedRefund

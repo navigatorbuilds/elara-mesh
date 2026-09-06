@@ -34,8 +34,10 @@ pub const DOMAIN_TAG_WITNESS_ATTESTATION_V1: &[u8] = b"ELARA_WITNESS_ATTESTATION
 /// enumeration method).
 ///
 /// Dispatch is on the RECORD's wire version: v≤5 attestations stay the bare
-/// `signable_bytes()` (byte-identical to today — nothing emits v6 until the
-/// `CURRENT_SIGNING_VERSION` flag day), v6+ prepends the attestation tag.
+/// `signable_bytes()` (byte-identical to the pre-flip bytes), v6+ prepends the
+/// attestation tag. Since the 2026-08-19 flag day (`CURRENT_SIGNING_VERSION`
+/// is 7) every FRESH record takes the tagged arm; the bare arm now serves only
+/// the v4-v5 records `WIRE_VERSION_MIN` still admits at decode.
 /// The record's own v6 preimage already carries `ELARA_RECORD_V1`, so the two
 /// domains are mutually exclusive by their leading bytes.
 pub fn witness_attestation_preimage(record: &elara_record::record::ValidationRecord) -> Vec<u8> {

@@ -36,9 +36,10 @@ pub const MAGIC: &[u8; 4] = b"ELRA";
 /// v6 (2026-08-18, T63/T65 shared flag-day vehicle): domain-separation prefix
 /// (`ELARA_RECORD_V1` tag + length-prefixed `network_id`) leads
 /// `signable_bytes()`, and `network_id` ships as a wire field after the nonce.
-/// Raising this to 6 is the DECODE-CAPABILITY rollout only — v≤5 bytes are
-/// untouched (pinned by `tests/kat_frozen_preimages.rs`), and nothing emits v6
-/// until `CURRENT_SIGNING_VERSION` is raised on the coordinated flag day.
+/// Raising this to 6 was the DECODE-CAPABILITY rollout only — v≤5 bytes are
+/// untouched (pinned by `tests/kat_frozen_preimages.rs`), and nothing emitted
+/// v6 until `CURRENT_SIGNING_VERSION` was raised on the coordinated flag day.
+/// That day came — 2026-08-19; see the constant below.
 /// v7 (2026-08-23, Merkle fold-tag flag-day vehicle — brief
 /// `MERKLE-FOLD-TAG-BRIEF-V2-2026-08-22`): no record-preimage change at all —
 /// v7 wire bytes are shape-identical to v6. The version is the PER-SEAL FOLD
@@ -596,8 +597,8 @@ mod tests {
     // Five fixture-free axes pinning the wire-format primitives that the
     // earlier 6-test surface covered only at happy-path / single-value
     // granularity:
-    //   1. module constants (MAGIC bytes, WIRE_VERSION=6 ceiling,
-    //      CURRENT_SIGNING_VERSION=5 emission, WIRE_VERSION_MIN=1,
+    //   1. module constants (MAGIC bytes, WIRE_VERSION=7 ceiling,
+    //      CURRENT_SIGNING_VERSION=7 emission, WIRE_VERSION_MIN=4,
     //      HEADER_SIZE=8, MAX_METADATA_ENTRIES=256, META_* tags 0..=6)
     //   2. encode_u16_prefixed u16::MAX boundary (clean encode) + u16::MAX+1
     //      (assertion-panic, prevents silent truncation)

@@ -6,7 +6,7 @@ argument across the `NETWORK_PUBLISH` boundary, and the safety case for
 *publication-as-attested-bundle* with zero standing. It introduces **no
 protocol code changes pre-publication**. It is the formal companion to the
 2026-06-14 DAG-merge audit that hard-disabled `NETWORK_PUBLISH`
-(`src/network/publish.rs:51`, `NETWORK_PUBLISH_ENABLED = false`) and the
+(`NETWORK_PUBLISH_ENABLED` in `src/network/publish.rs`) and the
 intellectual core of the "verifiable disclosure of long-running private
 provenance networks" grant line.
 
@@ -34,15 +34,30 @@ genesis (`docs/REALMS-SELF-ASSEMBLY.md`, OPEN / FEDERATED / SOVEREIGN). The
 disclose its history into the public mesh. The original design (now dead) had
 imported records **enter public consensus** and accrue **retroactive
 witnessing** (`ProcessedPublication.retroactive_witnessing: true`,
-`publish.rs:298`). The 2026-06-14 audit found that unsound on three
-code-verified facts:
+`ProcessedPublication` in `src/network/publish.rs`). The 2026-06-14 audit found
+that unsound on three code-verified facts:
+
+> ⚠ **F1 IS NO LONGER TRUE AS WRITTEN — corrected 2026-09-06.** G5 below has since
+> **shipped** (T63/T65 verdicts, 2026-08-18 / 2026-08-02): for `version >= 6` a
+> length-prefixed `network_id` rides in the domain-separation prefix of
+> `signable_bytes()` as **signed** content, led by `DOMAIN_TAG_RECORD_V1`. The
+> `network_id` field's own doc-comment names this document's assertion — "closing
+> the cross-network replay class (MESH-BFT A8)". **Precise scope, not a blanket
+> repeal:** v≤5 preimages are byte-identical to before (nothing prepended, pinned by
+> the frozen KATs), and a v6 record from an *unconfigured* emitter carries an empty
+> `network_id` — the tag alone separates domains there. So F1 still describes v≤5
+> records exactly, and the A8 analysis built on it is *unchanged for them*. Whether
+> the shipped v6 binding fully discharges A8 — or only for the v6 subset, leaving the
+> operational argument load-bearing for v≤5 — is a claims question filed for ruling,
+> not settled here.
 
 **F1 — records carry no realm/network binding in their signed bytes.**
-`ValidationRecord::signable_bytes` (`src/record.rs:270-332`) signs exactly:
+`ValidationRecord::signable_bytes` (`signable_bytes` in `crates/elara-record/src/record.rs`)
+signs exactly:
 `id`, `version`, `nonce` (v5+), `content_hash`, `creator_public_key`,
 `timestamp`, `num_parents`, sorted `parents`, `classification`, `metadata`,
-`zk_proof`. There is **no** `network_id`, realm id, or chain id in the
-pre-image. The code is explicit (`record.rs:327`): zone and ITC stamp are *not*
+`zk_proof`. At v≤5 there is **no** `network_id`, realm id, or chain id in the
+pre-image. The code is explicit (`signable_bytes`): zone and ITC stamp are *not*
 signed — "they are added by nodes during insertion, not by the record creator."
 A record's signature therefore proves *who* and *what*, never *which network*.
 An imported record is byte-for-byte indistinguishable, under signature
@@ -61,8 +76,19 @@ foreign realm's records as **native settlement parents** would let a stake
 universe the public mesh never measured determine public finality — outside
 the theorem entirely.
 
-**F3 — epoch seals carry no network binding either.** `ParsedEpochSeal`
-(`src/network/epoch.rs:1562-1612`) commits zone, epoch number, start/end,
+> ⚠ **F3 IS NO LONGER TRUE AS WRITTEN — corrected 2026-09-06 (D10-A8 ruling).** A seal is
+> itself a seal-class `ValidationRecord`, and committee co-signatures over it go through
+> `witness_attestation_preimage()` (`src/network/witness.rs`), which for `version >= 6`
+> prepends `ELARA_WITNESS_ATTESTATION_V1` over `signable_bytes()` — which already leads
+> with `ELARA_RECORD_V1` + the length-prefixed `network_id`. So a **v6+ seal IS network-
+> bound in its signed bytes**, through its carrier record's preimage, and both its
+> signature domains are separated. What survives of F3 is the narrow statement below:
+> `ParsedEpochSeal`'s *payload* declares no `network_id` field of its own — and it needs
+> none. The "records bound, seals not" **asymmetry does not survive the flag day**; the
+> paragraph as written describes the v≤5 seals `WIRE_VERSION_MIN` still admits.
+
+**F3 — epoch seals carry no network binding either.**
+`ParsedEpochSeal` in `src/network/epoch.rs` commits zone, epoch number, start/end,
 record count, `merkle_root`, `previous_seal_hash`, VRF output/proof, the
 record-hash set, zone-balance/registry roots, and the global
 `account_smt_root` — but **no** `network_id`. A seal proves "these records
@@ -87,7 +113,7 @@ same MESH-BFT instance** — one `I`, one `S_total`. The mesh already does this,
 two ways, both inside Theorem 1:
 
 **Partition-heal / DAG-fragment merge.** The DAM is a DAG, not a chain
-(`docs/REALMS-SELF-ASSEMBLY.md:48-51`). When one network partitions, fragments
+(`docs/REALMS-SELF-ASSEMBLY.md`, "Already built" § — *Partition tolerance is native*). When one network partitions, fragments
 keep writing locally and **merge on re-contact**. This is sound because every
 fragment shares the *same* identity set and stake universe — re-contact is
 ordinary DAG operation, not a foreign import. Conflicting records across the
@@ -102,8 +128,8 @@ source_merkle_root, source_seal_signers }`). This async-optimistic settlement
 spans zones but **not networks**: zones A and B draw on one `S_total`, and the
 proof B verifies is a Merkle path into A's epoch seal signed by *the same
 network's* witnesses. Cross-zone parents are a same-network concept
-(`register_cross_zone_parents`, `cross_zone_parents_finalized`,
-`src/network/consensus.rs:1919-1937`); there is no realm field in any of it,
+(`register_cross_zone_parents` and `cross_zone_parents_finalized` in `src/network/consensus.rs`);
+there is no realm field in any of it,
 because there was never meant to be cross-realm settlement here.
 
 **The boundary, stated once:** *one network = one MESH-BFT instance = one stake
@@ -150,7 +176,7 @@ finality, or true age of any imported record. The imported records are
 - not witnessable, not eligible for attestation weight;
 - conferring zero stake, zero trust score, zero witness eligibility — a
   publisher "arrives as a newcomer with a verifiable past, never as a veteran"
-  (`REALMS-SELF-ASSEMBLY.md:117-119`, the Zero-standing rule).
+  (`docs/REALMS-SELF-ASSEMBLY.md`, the Zero-standing rule).
 
 The imported records hang *beneath* the bundle as content addressed by
 `bundle_merkle_root`. They are bytes a verifier can check against external
@@ -170,7 +196,7 @@ These are the formal merge rules. They are deliberately restrictive: the only
   a causal settlement parent. Enforcement: the bundle's `bundle_merkle_root` is
   data; imported record ids never appear in a native record's signed `parents`
   list. (Contrast: same-network cross-zone parents *are* allowed and finalized
-  via `cross_zone_parents_finalized`, `consensus.rs:1928` — because they are
+  via `cross_zone_parents_finalized` in `src/network/consensus.rs` — because they are
   one stake universe. Cross-*realm* parents have no representation and must
   gain none.)
 
@@ -268,14 +294,14 @@ Legend: **✓** architecture upholds it today · **⚠** design-first, rides a g
 
 | # | Assumption | Enforcing rule / site | Status |
 |---|------------|-----------------------|--------|
-| **A1** | **Zero-standing** — no element of `F` adds to `S_total` or `I`, nor gains stake/trust/witness-eligibility. | Settlement reads native stake tables only (`is_settled_diverse`, `consensus.rs:2381`); `F` is never registered. | ✓ |
+| **A1** | **Zero-standing** — no element of `F` adds to `S_total` or `I`, nor gains stake/trust/witness-eligibility. | Settlement reads native stake tables only (`is_settled_diverse` in `src/network/consensus.rs`); `F` is never registered. | ✓ |
 | **A2** | **No foreign settlement parents** — no native record's signed `parents` names an element of `F`. | M1, enforced as an *ingest predicate* (foreign/unknown parent ids rejected, not silently tolerated). `parents` is in `signable_bytes`, so this must be an enforced check, not a convention. | ⚠ G1 |
 | **A3** | **No foreign state entries** — `F` enters no account SMT, `previous_seal_hash`, or settled `merkle_root`. | M2; the seal/SMT builder iterates settled *native* records only, and `F` lives under `bundle_merkle_root` *inside* `B`. | ✓ (once G1 types `B` as content-carrier) |
 | **A4** | **No exclusive disclosure key** (M4 integrity) — bundle insertion writes **no** native key two bundles can contend: no `source_realm_root` uniqueness registry, no per-publisher exclusive counter. Re-publication dedups by *content-equality*, never by exclusive slot. | A *prohibition* on the bundle schema. If violated, two bundles claiming the same exclusive key are conflicting records — Lemma 5.1(c) breaks and 2.1's conflict-set is no longer invariant. | ⚠ G1 (stated ban) |
 | **A5** | **Consensus-inert anchors** — consensus attests existence+publication of `B` only; `time_bracket` and `completeness_proof` are verifier-side. The drand not-before is **reference-only** (BLS unverified in-protocol); the Bitcoin/OTS existed-by is the trustless leg when its block header is pin-authenticated by the verifier (else reference). | M5; `ParsedEpochSeal` carries no bracket. In-protocol drand BLS verify is gate G2. | ✓ (reference-only honestly labelled) |
 | **A6** | **Bounded ingestion** — bundle admission is rate/size-limited so `{B_i}` cannot exhaust a zone's per-epoch sealing budget (Theorem 3's *implicit* resource premise). | `assess_mega_publication` / `max_records_per_day` (`publish.rs`) — **retained but ADVISORY-ONLY today** (both call sites are tests). Must be wired as an enforcing admission gate. | ✗ new gate G6 |
-| **A7** | **Bounded `F`-storage** — each `F` payload counts against the disk-pressure budget so no mega-bundle drives `under_avail_pressure()` true and starves **native** ingest. (The shared `insert_record_inner` funnel rejects *all* ingest under avail-pressure — `ingest.rs:473`.) Decide: `F` in-band (`⊆ B`, capped by `MAX_RECORD_BYTES = 64 KB`, so a large realm is *many* bundles — re-raising A6 at bundle granularity) vs out-of-band (content-addressed, needs its own bound the disk gate can see). | Open design decision + storage gate. | ✗ new gate G6 |
-| **A8** | **No replay-as-native** (the dangling premise) — no foreign-origin record settles **natively** outside a bundle. Enforced *today at the settlement layer*: a foreign creator not staked in `P` cannot reach `⅔·S_total`, so a replayed foreign record ingests as inert spam (an A6/A7 concern) but **never settles**. It FAILS only under **cross-realm key reuse** — an identity staked in `P` that also signs in a foreign realm — where the replayed record is a bona-fide native record that *can* settle, re-importing foreign history through the back door the killswitch blocks. `signable_bytes` carries no realm (`record.rs:270`); the ingest funnel has no realm gate (verified). | **Operational** today: no `P`-staked identity may sign in a replayable foreign realm. Protocol fix: a realm/network domain-separator in `signable_bytes`. | ✗ new gate G5 (fork-sensitive) |
+| **A7** | **Bounded `F`-storage** — each `F` payload counts against the disk-pressure budget so no mega-bundle drives `under_avail_pressure()` true and starves **native** ingest. (The shared `insert_record_inner` funnel rejects *all* ingest under avail-pressure — `insert_record_inner` in `src/network/ingest.rs`, gated on `under_avail_pressure` in `src/network/state.rs`.) Decide: `F` in-band (`⊆ B`, capped by `MAX_RECORD_BYTES = 64 KB`, so a large realm is *many* bundles — re-raising A6 at bundle granularity) vs out-of-band (content-addressed, needs its own bound the disk gate can see). | Open design decision + storage gate. | ✗ new gate G6 |
+| **A8** | **No replay-as-native** (the dangling premise) — no foreign-origin record settles **natively** outside a bundle. Enforced *today at the settlement layer*: a foreign creator not staked in `P` cannot reach `⅔·S_total`, so a replayed foreign record ingests as inert spam (an A6/A7 concern) but **never settles**. It FAILS only under **cross-realm key reuse** — an identity staked in `P` that also signs in a foreign realm — where the replayed record is a bona-fide native record that *can* settle, re-importing foreign history through the back door the killswitch blocks. `signable_bytes` carries no realm at v≤5 (`signable_bytes` in `crates/elara-record/src/record.rs`; see the F1 correction above for the shipped v6+ binding); the ingest funnel has no realm gate (verified). | **SPLIT (ruled 2026-09-06, D10-A8).** *Binding — SHIPPED and in force:* `CURRENT_SIGNING_VERSION = 7` (`crates/elara-record/src/wire.rs`) since the 2026-08-19 flag day, so every record this fleet emits signs `ELARA_RECORD_V1` + its `network_id`; A8 is discharged **in protocol** for all fresh traffic. *Ingest floor — OPEN:* `WIRE_VERSION_MIN = 4` still admits v4-v5, whose preimages carry no binding, so a cross-realm replay must present a **v4 or v5** record. The operational rule is load-bearing for exactly that window and nothing wider. Lever: raise `WIRE_VERSION_MIN` 4→6, preconditioned on `RocksStore::wire_version_histogram()` (`src/storage/rocks.rs`) proving no stored bytes below the new MIN (T63 Q5/A2 "proven by scan, never believed"; mind the RR4 count-drift trap documented beside it). | ◑ G5 binding SHIPPED / ingest floor ✗ (fork-sensitive — its own gated item) |
 | **A9** | **Light-client / checkpoint inertness** — checkpoints commit native state roots only (M2/A3), so `F` cannot enter a light client's settled-state view; SDKs that *render* `B`'s content apply the three-attestor separation and never upgrade `F` to settled/witnessed status. | M2 + a read-side discipline note (the G4 verifier surface). | ✓ |
 
 ### 5.4 Theorem (safety unconditional, liveness conditional)
@@ -329,7 +355,7 @@ Three distinct claims, three distinct attestors:
   Anchor trust model: existed-by is trustless only against a pin-authenticated
   Bitcoin header; not-before inherits drand's beacon trust).
 - **Nobody** attests: *the imported records are true.* Publication ≠ endorsement
-  (`REALMS-SELF-ASSEMBLY.md:122-123`, Attestation-semantics law).
+  (`docs/REALMS-SELF-ASSEMBLY.md`, the Attestation-semantics law).
 
 This is why inert-import is sound where retroactive-witnessing was not: the old
 model collapsed all three into "public consensus vouches for imported history,"
@@ -359,7 +385,7 @@ The `REALMS-SELF-ASSEMBLY.md` design laws map one-to-one onto this model:
 | **Anchor-density** | Imported age is credible only to the density of the bundle's external anchor trail. Internal consistency proves nothing about *when*; backdating window = inter-anchor interval. Verifiers reject spans inconsistent with anchor density (M5). |
 | **Zero-standing** | Imported records confer no stake, witness eligibility, or trust (§3). They never enter `S_total`, so they cannot perturb Theorem 1 (§5). |
 | **Attestation-semantics** | Consensus attests existence + identity continuity + the publication event — never internal truth (§5, three-attestor separation). |
-| **Ingestion-caps** | Bundle ingestion stays protocol-rate-limited, not publisher-voluntary (the `assess_mega_publication` / `max_records_per_day` machinery in `publish.rs:529-641` is retained for the bundle-rate dimension even though per-record import is dead). |
+| **Ingestion-caps** | Bundle ingestion stays protocol-rate-limited, not publisher-voluntary (the `assess_mega_publication` / `max_records_per_day` machinery — `assess_mega_publication` and `max_records_per_day` in `src/network/publish.rs` — is retained for the bundle-rate dimension even though per-record import is dead). |
 
 ---
 
@@ -393,8 +419,7 @@ verbatim from the 2026-06-14 DAG-merge design audit:
   (spec §18.7). Largely shipped in `elara-verify` (`--anchor`/`--inclusion`);
   the bundle verdict path is the remaining slice.
 - **G5 — realm domain-separator in the signed pre-image (closes A8).** A
-  realm/network-id bound into `ValidationRecord::signable_bytes` (`record.rs:308`,
-  which carries none today) so a signature is realm-scoped and a foreign record
+  realm/network-id bound into `ValidationRecord::signable_bytes` (`signable_bytes` in `crates/elara-record/src/record.rs`) so a signature is realm-scoped and a foreign record
   cannot be replayed as a *native* record under cross-realm key reuse. Until
   this ships, A8 holds only operationally (no `P`-staked identity signs in a
   replayable foreign realm). **Fork-sensitive** (changes the signing pre-image) —
@@ -421,7 +446,7 @@ verbatim from the 2026-06-14 DAG-merge design audit:
   its residual is larger than stated).** A later audit re-derived this gap
   independently before recognising it as G5. Both legs of the June reasoning were
   re-verified and both hold: `NETWORK_PUBLISH_ENABLED` is still `false`
-  (`src/network/publish.rs:54`), and A8's settlement-forgery math is unchanged.
+  (`NETWORK_PUBLISH_ENABLED` in `src/network/publish.rs`), and A8's settlement-forgery math is unchanged.
 
   What the June analysis did not account for is that **records are not only
   *ingested* untagged — they are also *co-signed* untagged.** The node exposes a

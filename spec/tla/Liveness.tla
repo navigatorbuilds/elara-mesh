@@ -7,8 +7,9 @@
 (* proves a single zone eventually PRODUCES the epoch seal in the first     *)
 (* place (the precondition Phase E folds into `Sealed == TRUE`).            *)
 (*                                                                         *)
-(* THE IN-ZONE MECHANISM IS A HYBRID (src/network/aggregator.rs +           *)
-(* consensus.rs), faithfully NOT textbook leader+view-change:               *)
+(* IN-ZONE MECHANISM = HYBRID: proposer_rank, src/network/aggregator.rs     *)
+(* plus is_settled, src/network/consensus.rs — faithfully NOT textbook      *)
+(* leader+view-change:                                                      *)
 (*                                                                         *)
 (*   1. PROPOSAL — a VRF-stake RANK LADDER. proposer_rank (aggregator.rs:   *)
 (*      290) ranks staked identities by hash(vrf||zone||id)/isqrt(stake);   *)
@@ -16,14 +17,14 @@
 (*      (current_allowed_rank), up to MAX_VIEW_DEPTH = 7 ranks. Lower rank   *)
 (*      = earlier eligibility.                                              *)
 (*   2. SETTLEMENT — a LEADERLESS 2/3 attestation snapshot. is_settled      *)
-(*      (consensus.rs:2706, is_settled) / is_global_seal_settled (:4519): a *)
+(*      (consensus.rs) / is_global_seal_settled (consensus.rs): a            *)
 (*      seal finalizes when attestations reach 2/3 of eligible (non-creator)*)
 (*      stake. ANY honest witness may attest; the proposer's identity is    *)
 (*      irrelevant to settlement.                                          *)
 (*   3. STALL RECOVERY — NOT view-change messages. The ladder unlocks       *)
 (*      higher ranks purely by elapsed time. If ALL ranks time out          *)
-(*      (elapsed > (2^7 - 1)*base, is_zone_stuck aggregator.rs:240) a        *)
-(*      CROSS-ZONE GLOBAL ESCALATION fires (escalation_decision :350):       *)
+(*      (elapsed > (2^7 - 1)*base, is_zone_stuck aggregator.rs) a            *)
+(*      CROSS-ZONE GLOBAL ESCALATION fires (escalation_decision):            *)
 (*      honest anchors in OTHER zones emit a global quorum seal that         *)
 (*      unsticks the zone. That escalation is itself a 2/3 quorum of         *)
 (*      non-stuck zones, so it needs cross-zone gossip (global GST) and      *)
@@ -63,9 +64,9 @@
 (* (Phase E) has NO in-zone analogue.                                      *)
 (*                                                                         *)
 (* THE BOOTSTRAP FREEZE TRAP (the one scenario NOTHING rescues). When        *)
-(* staked.len() < 3, the carve-out at aggregator.rs:316 collapses the       *)
+(* staked.len() < 3, the proposer_rank carve-out (aggregator.rs) drops the   *)
 (* ladder: ONLY the genesis authority may propose, and escalation has no     *)
-(* bootstrap path (escalation_decision :346). MCInZoneLiveBootstrap models   *)
+(* bootstrap path (escalation_decision). MCInZoneLiveBootstrap models        *)
 (* this as HonestRanks = {} (Byzantine genesis) + EscalationAvailable =      *)
 (* FALSE: LiveWithEscalation is VIOLATED with no safety net. This is the     *)
 (* formal statement of the operational invariant "never sit at 2 stakers;    *)
@@ -75,7 +76,7 @@
 (* checks ONE epoch's seal. A single epoch can be adversarially stuck (all   *)
 (* low ranks Byzantine), needing escalation. CHAIN progress — every epoch    *)
 (* eventually seals, []<>sealed — rests on the CHAINED VRF BEACON            *)
-(* chained_beacon(prev_seal_hash, epoch, zone) (aggregator.rs:180): the     *)
+(* chained_beacon(prev_seal_hash, epoch, zone) (aggregator.rs): the         *)
 (* proposer ranks RE-RANDOMIZE every epoch off the previous seal hash, so    *)
 (* an adversary cannot GRIND or SUSTAIN a worst-case rank assignment across  *)
 (* epochs. The worst-case single epoch modelled here is therefore an upper   *)
@@ -154,7 +155,7 @@ vars == << phase, proposedByHonest, attest, gst, extGst, extAttest, escalated, s
 \* abstraction of elapsed >= (2^k - 1)*base_timeout: only the ORDER matters.
 RankEligible(k) == phase >= k
 \* Escalation is eligible only AFTER the whole local ladder is exhausted
-\* (is_zone_stuck: elapsed > (2^MAX_VIEW_DEPTH - 1)*base, aggregator.rs:232).
+\* (is_zone_stuck: elapsed > (2^MAX_VIEW_DEPTH - 1)*base, aggregator.rs).
 EscalEligible   == phase >= NumRanks
 
 \* Count-based 2/3 quorums. Local == is_settled (uniform stake, creator_stake=0).

@@ -185,9 +185,16 @@ pub struct ValidationRecord {
     /// If None, zone is computed from `zone_for_record(id)` (legacy hash-based).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub zone: Option<crate::ZoneId>,
-    /// Identity hash from wire v4 deserialization (32 bytes, SHA3-256 of PK).
-    /// Used to resolve the full PK from CF_IDENTITIES when creator_public_key
-    /// was omitted from the wire format. None for v1-v3 records.
+    /// Identity hash (32 bytes, SHA3-256 of the PK) for transports that supply
+    /// it out of band, letting the receiver resolve the full PK from
+    /// CF_IDENTITIES instead of carrying 1952 bytes.
+    ///
+    /// **Not a wire field.** `to_bytes` never emits it and `from_bytes` sets it
+    /// to `None` unconditionally (see the assignment in `from_bytes`); it lives
+    /// on the JSON representation only. The earlier wording here ("from wire v4
+    /// deserialization ... when creator_public_key was omitted") described a
+    /// decode path that does not exist, and that wording had propagated into
+    /// the public spec §3.2 — both corrected 2026-09-06.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity_hash_wire: Option<Vec<u8>>,
     /// Slot nonce for MESH-BFT mutual exclusion (wire v5+).
@@ -302,11 +309,15 @@ pub fn id_prefix(s: &str, n: usize) -> &str {
 ///
 /// Version-honest by construction: the value is stamped onto fresh records
 /// ONLY at emission version >= 6 (`emission_network_id_for`), which is a
-/// compile-time constant fold — at `CURRENT_SIGNING_VERSION = 5` every record
-/// keeps `network_id: ""` (pinned by `fresh_records_carry_no_network_binding`
-/// below), and the field populates automatically at the Phase E flip with no
-/// further plumbing. Before that flip, an un-signed non-empty field can never
-/// dangle on a v5 record (the ARCH-4 "asserts what the preimage lacks" shape).
+/// compile-time constant fold. THE FLIP HAPPENED: `CURRENT_SIGNING_VERSION`
+/// went 5→6 on 2026-08-19 and 6→7 on 2026-08-23, so the production path IS the
+/// binding-carrying arm today and every fresh record signs the bound name
+/// (pinned by `t63_emission_network_binding_chokepoint` below — the pre-flip
+/// `fresh_records_carry_no_network_binding` this comment used to name was
+/// rewritten INTO that test at the flip; the name no longer exists).
+/// The pre-flip guarantee it replaced still holds for the v≤5 arm, which stays
+/// empty forever: an un-signed non-empty field can never dangle on a v5 record
+/// (the ARCH-4 "asserts what the preimage lacks" shape).
 static EMISSION_NETWORK_ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 /// Validate a network-id value: wire cap + ASCII, mirroring the decoder's
@@ -631,7 +642,9 @@ impl ValidationRecord {
         // Classification
         buf.push(self.classification as u8);
 
-        // Metadata — v4+: binary encoding, v3: JSON fallback.
+        // Metadata — binary TLV, unconditionally. The v1-v3 JSON fallback was
+        // deleted with the decode floor raise (WIRE_VERSION_MIN 1->4); there is
+        // no version branch here any more.
         // The encoder returns Err only when a count/length field would
         // overflow its wire prefix — unreachable by construction (every
         // decode path caps at MAX_METADATA_ENTRIES=256, ingest per-value

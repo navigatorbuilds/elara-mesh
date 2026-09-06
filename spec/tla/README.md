@@ -26,13 +26,13 @@ cross-zone core, proving a sealed transfer is never stuck in-flight forever.
 | **NoConflictingFinalization** | BFT *agreement*. Two conflicting records (claiming the same logical slot) can never both reach settlement while Byzantine stake stays below 1/3. | §4.1 |
 | **NoAbortAndClaim** *(Phase C)* | Cross-zone *conservation*. A sealed transfer is never both claimed in the destination zone and aborted via a B-committee non-inclusion quorum — the cross-zone double-credit (recipient credited in zone B **and** sender refunded in zone A) can never happen while Byzantine stake in zone B's committee stays below 1/3. | §4.3 |
 | **SealGateSound** *(Phase C)* | Structural conservation. Claim and abort require a *sealed* lock; the unsealed-refund paths (cancel/reject/passive-24h) require an *unsealed* lock. This code-path partition makes the "passive refund races a claim" double-credit impossible **without any** Byzantine-fraction assumption — it holds in every model, including the broken one. | §4.3 |
-| **SupplyInvariant** *(Phase D)* | beat **conservation**: the four-bucket supply sum `Σbal + in-flight + staked + pool` — the *exact* equation enforced at `ledger.rs:206` — is invariant. The **normal** lifecycle (lock/seal/claim, sealed-abort, unsealed-refund, stake/mint/burn) conserves on every reachable path. Crucially, Phase D also proves the two known **partition tails** are genuine supply-inflation breaks *without* their fixes — with **zero Byzantine nodes**: `MCConsRevertBreak` inflates supply by `Amt` when `XZoneRevert` is absent (it is design-only / unimplemented today); `MCConsReapBreak` inflates by `Amt` when the 30-day reap/claim exclusion is defeated by a >30-day partition. These are *guard-necessity* proofs, not threshold-tightness; Phase D does **not** claim the live protocol conserves under partition. | §4.4 |
+| **SupplyInvariant** *(Phase D)* | beat **conservation**: the four-bucket supply sum `Σbal + in-flight + staked + pool` — the *exact* equation enforced in `apply_op` (`src/accounting/ledger.rs`) — is invariant. The **normal** lifecycle (lock/seal/claim, sealed-abort, unsealed-refund, stake/mint/burn) conserves on every reachable path. Crucially, Phase D also proves the two known **partition tails** are genuine supply-inflation breaks *without* their fixes — with **zero Byzantine nodes**: `MCConsRevertBreak` inflates supply by `Amt` when `XZoneRevert` is absent (it is design-only / unimplemented today); `MCConsReapBreak` inflates by `Amt` when the 30-day reap/claim exclusion is defeated by a >30-day partition. These are *guard-necessity* proofs, not threshold-tightness; Phase D does **not** claim the live protocol conserves under partition. | §4.4 |
 | **LiveFast** *(Phase E)* | Cross-zone **liveness**, fast path — the temporal DUAL of `NoAbortAndClaim`. With a live ≥2/3-honest zone-B committee AND partial synchrony (after GST), a sealed transfer eventually reaches a terminal state via the committee (Claimed or Aborted). This is the liveness dual of the Phase C bound: safety needs `f < 1/3` so Byzantine cannot forge TWO quorums; liveness needs `f < 1/3` so the honest remainder CAN form ONE. Convergence is *earned* (per-witness views resolved by weak-fair gossip-delivery actions after GST), not assumed by a global oracle. | §4.6 |
-| **LiveBackstop** *(Phase E)* | Cross-zone **liveness**, unconditional. A sealed transfer eventually reaches a terminal state in **every** scenario — even with no GST and even at `f = 2` — because the quorum-FREE 30-day stale-reap (`REAP_HORIZON_SECS`) refunds the lock. The code is explicit that without a quorum a sealed transfer "stays Locked indefinitely" (`epoch.rs:7189`, `cross_zone.rs:768`), so the real *never-stuck-forever* guarantee is the reaper — it bounds the stuck window at ~30 days, NOT the abort quorum. This is the discriminating result: Byzantine/asynchrony can deny the fast path but cannot deny eventual reap. | §4.6 |
+| **LiveBackstop** *(Phase E)* | Cross-zone **liveness**, unconditional. A sealed transfer eventually reaches a terminal state in **every** scenario — even with no GST and even at `f = 2` — because the quorum-FREE 30-day stale-reap (`REAP_HORIZON_SECS`) refunds the lock. The code is explicit that without a quorum a sealed transfer "stays Locked indefinitely" (`try_sign_xzone_abort` in `src/network/epoch.rs`, `REAP_HORIZON_SECS` in `src/accounting/cross_zone.rs`), so the real *never-stuck-forever* guarantee is the reaper — it bounds the stuck window at ~30 days, NOT the abort quorum. This is the discriminating result: Byzantine/asynchrony can deny the fast path but cannot deny eventual reap. | §4.6 |
 | **LiveLocal** *(Phase E.2)* | In-zone **liveness**, committee path. A zone eventually PRODUCES its epoch seal when some honest proposer is eligible in the VRF rank ladder AND honest attesting stake reaches 2/3 under local GST. Covers both the rank-0 fast sub-case (`MCInZoneLiveSafe`) and the *ladder* sub-case (`MCInZoneLiveLadder`: rank-0 Byzantine, a later honest rank unlocks by elapsed and still seals). This is the precondition Phase E folds into its `Sealed == TRUE`. Broken by no-GST, all-Byzantine-proposers, or honest attesting stake < 2/3. | §4.5 |
 | **LiveWithEscalation** *(Phase E.2)* | In-zone **liveness** with the cross-zone escalation backstop. Even with **all** local proposers Byzantine, the zone still seals IF global GST holds and a 2/3-honest cross-zone quorum exists — modelled as an **explicit external committee**, not a `globalQuorumHealthy` flag (which would make it a vacuous two-state tautology). The headline asymmetry vs Phase E: there is **NO quorum-free in-zone floor** — an epoch seal *is itself* a 2/3 certificate, so global asynchrony (`MCInZoneLiveNoEscGST`) or global `f ≥ 1/3` (`MCInZoneLiveEscByz`) leaves the zone stuck, and the `staked < 3` freeze trap (`MCInZoneLiveBootstrap`) has no safety net at all. | §4.5 |
 | **RecurSealed** *(Phase E.3)* | Cross-epoch **liveness**: the chain seals *forever* (`[]<>sealed`), not just once. Phase E.2 bounds the worst *single* epoch; this proves the worst case cannot **recur** indefinitely. Holds whenever every epoch seals by some path (local when the beacon makes the committee viable, escalation otherwise). Violated only when a pinned worst-case recurs with **no** escalation floor (`MCRecurGrindStall`) — the cross-epoch restatement of the no-quorum-free-floor asymmetry. | §4.5 |
-| **RecurLocalSealed** *(Phase E.3)* | Cross-epoch **liveness**, fast path: the local committee path *recurs* (`[]<>(sealed ∧ ¬escalated)`). The headline contribution — it machine-checks that the **chained VRF beacon** (`chained_beacon`, `aggregator.rs:310`) re-randomizing proposer ranks each epoch is what keeps the protocol on its fast path. Holds under a re-randomizing beacon (`MCRecurSafe`, `MCRecurLadder`); **violated under a grindable / adversary-pinned beacon** (`MCRecurGrind`: the chain still seals, but only via escalation forever — a permanent liveness degradation). | §4.5 |
+| **RecurLocalSealed** *(Phase E.3)* | Cross-epoch **liveness**, fast path: the local committee path *recurs* (`[]<>(sealed ∧ ¬escalated)`). The headline contribution — it machine-checks that the **chained VRF beacon** (`chained_beacon`, `aggregator.rs`) re-randomizing proposer ranks each epoch is what keeps the protocol on its fast path. Holds under a re-randomizing beacon (`MCRecurSafe`, `MCRecurLadder`); **violated under a grindable / adversary-pinned beacon** (`MCRecurGrind`: the chain still seals, but only via escalation forever — a permanent liveness degradation). | §4.5 |
 
 `DiversitySoundness` is the load-bearing one: it is the property unique to
 Elara's correlation-discounted aggregation, and once it holds the classical BFT
@@ -118,7 +118,7 @@ network **partition** with a named protocol guard removed, proving each fix is
 
 `XZoneRevert` is design-only / unimplemented in the live protocol;
 the reap/claim exclusion holds under normal synchrony via the 24h claim-expiry
-gate (`cross_zone.rs:420`) but is defeated by a >30-day partition where a
+gate (`CLAIM_TIMEOUT_SECS`, `cross_zone.rs`) but is defeated by a >30-day
 pre-expiry claim record applies after a reap. Phase D therefore formalizes
 exactly *what conservation requires* — it does **not** assert the live protocol
 already has it. The saturating-`sub` decrement is load-bearing in both breaks: a
@@ -134,7 +134,8 @@ temporal companion to Phase C. Where `NoAbortAndClaim` proves a sealed transfer
 is never **both** claimed and aborted, Phase E proves it is never **stuck
 in-flight forever**: it eventually reaches a terminal state. This is the formal
 companion to the OPS-56 gauge `elara_xzone_sealed_locked_past_expiry_count`
-(`cross_zone.rs:973`), which exists precisely to detect stuck-sealed transfers.
+(`sealed_locked_past_expiry_count`, `cross_zone.rs`), which exists precisely
+to detect stuck-sealed transfers.
 
 It is **two discriminating theorems**, not one:
 
@@ -163,7 +164,7 @@ claim-gossip propagation. Pre-GST no view resolves, so honest cannot converge �
 exactly the partial-synchrony premise.
 
 **Faithfulness and honest scoping.** The honest weak-fairness abstracts the
-best-effort retry-on-next-tick emitter (`epoch.rs:7205` uses `try_read`/
+best-effort retry-on-next-tick emitter (`epoch.rs` uses `try_read`/
 `try_lock` and "re-attempts on the next tick") which under a fair scheduler
 eventually wins its locks — **not** a "deterministic per-tick emission." Phase E
 covers the post-seal cross-zone lifecycle ONLY; the in-zone precondition (that
@@ -178,18 +179,18 @@ Phase E assumes a sealed transfer; Phase E.2 (`Liveness.tla`) proves a zone
 eventually *produces* that seal. The in-zone mechanism is a **hybrid**, modelled
 faithfully (NOT the textbook leader/view-change the code does not have):
 
-1. **VRF rank ladder** (`aggregator.rs:290`) — a per-(zone,epoch) proposer order
+1. **VRF rank ladder** (`proposer_rank`, `aggregator.rs`) — a per-(zone,epoch) order
    where rank-k becomes eligible only after `elapsed ≥ (2^k − 1)·base` (collapsed
    to a monotone unit ladder `phase`, since only the *order* matters for
    liveness). `LiveLocal` holds in both the rank-0 fast case and the *ladder*
    case (rank-0 Byzantine, a later honest rank unlocks and seals) — the latter is
    what makes the ladder guarantee distinct from the fast path.
-2. **Leaderless 2/3 attestation snapshot** (`is_settled`, `consensus.rs:2515`) —
+2. **Leaderless 2/3 attestation snapshot** (`is_settled`, `consensus.rs`) —
    any honest witness attests; the proposer's identity is irrelevant to
    settlement. GST-gated delivery is a weak-fairness obligation, exactly as Phase
    E's `DeliverClaim`.
-3. **Cross-zone global-escalation backstop** (`escalation_decision`,
-   `aggregator.rs:350`) — once the local ladder is exhausted, honest anchors in
+3. **Cross-zone global-escalation backstop** (`escalation_decision`, `aggregator.rs`)
+   — once the local ladder is exhausted, honest anchors in
    OTHER zones emit a global quorum seal. Modelled as an **explicit external 2/3
    committee** (`ExternalAnchors` / `extGst` / `QuorumExt`), NOT a
    `globalQuorumHealthy` flag — a flag would make `LiveWithEscalation` a vacuous
@@ -216,7 +217,7 @@ the chain seals **forever** (`RecurSealed == []<>sealed`) and stays on its
 **fast local path forever** (`RecurLocalSealed == []<>(sealed ∧ ¬escalated)`).
 
 The mechanism under test is the **chained VRF beacon**
-`chained_beacon(prev_seal_hash, epoch, zone)` (`aggregator.rs:310`): proposer
+`chained_beacon(prev_seal_hash, epoch, zone)` (`aggregator.rs`): proposer
 ranks are re-derived every epoch off the *previous* seal hash, which is not
 known until that epoch seals and is honest-influenced — so an adversary cannot
 predict or steer which identities land in eligible ranks next epoch, and so
@@ -261,31 +262,32 @@ so a viable epoch always seals locally far earlier than escalation unlocks).
 ## Fidelity to the implementation
 
 The model mirrors the **deterministic fixed-point settlement path** in
-`src/network/consensus.rs` (the `*_q` functions) — the path that actually gates
+`src/network/consensus.rs` (the `*_q` fixed-point path, e.g. `gamma_effective_scaled_q`)
+— the path that actually gates
 consensus. The float path is RPC/explorer-only and is deliberately not modelled.
 
 | TLA+ operator | Rust function | Location |
 |---------------|---------------|----------|
-| `CorrQ` | `correlation_weighted_q` | `consensus.rs:2829` |
-| `IndependenceQ` | `independence_q` | `consensus.rs:2862` |
-| `EffStakeQ` | `effective_stake_q` | `consensus.rs:2884` |
-| `DiverseSettled` | `diverse_threshold_met_q` (via `is_settled_diverse`) | `consensus.rs:2906`, `:2583` |
+| `CorrQ` | `correlation_weighted_q` | `consensus.rs` |
+| `IndependenceQ` | `independence_q` | `consensus.rs` |
+| `EffStakeQ` | `effective_stake_q` | `consensus.rs` |
+| `DiverseSettled` | `diverse_threshold_met_q` (via `is_settled_diverse`) | `consensus.rs` |
 | `AttestHonest` / `AttestByz` | honest vs. equivocating attestation | — |
 
 The correlation weights (`ALPHA:BETA:GAMMA = 0.5:0.3:0.2`, summing to the
-`1.0` ceiling) match `consensus.rs:53–68`. The model scales the `SETTLEMENT_Q`
+`1.0` ceiling) match `consensus.rs`. The model scales the `SETTLEMENT_Q`
 fixed-point base to **1000ths** instead of the code's `1e9` — TLC uses 32-bit
 integers, and the settlement decision depends only on the ratios, so this is a
 faithful re-scaling, not an approximation (anticipated in the design doc §3).
 
-The **cross-zone** model (`ElaraXZone.tla`) mirrors `src/accounting/cross_zone.rs`:
+The **cross-zone** model (`ElaraXZone.tla`) mirrors `src/accounting/cross_zone.rs`, from `lock_transfer` onward:
 
 | TLA+ operator | Rust function | Location |
 |---------------|---------------|----------|
 | `Quorum(S)` | the `n*3 >= size*2` count gate shared by **both** quorum verifiers | `verify_finality_quorum:1404`, `verify_abort_quorum:1523` |
-| `Claimed` | `claim_transfer` → `status = Claimed` | `cross_zone.rs:464` |
-| `Aborted` | `abort_transfer` → `status = Aborted` (B2-anchored dest committee) | `cross_zone.rs:657` |
-| `unsealedRefund` | `cancel_transfer` / `reject_transfer` / passive `process_expired` | `cross_zone.rs:590`, `:699` |
+| `Claimed` | `claim_transfer` → `status = Claimed` | `cross_zone.rs` |
+| `Aborted` | `abort_transfer` → `status = Aborted` (B2-anchored dest committee) | `cross_zone.rs` |
+| `unsealedRefund` | `cancel_transfer` / `reject_transfer` / passive `process_expired` | `cross_zone.rs` |
 | `SignClaim`/`SignAbort` | a zone-B committee member adding its attestation | — |
 
 Both abort and seal-finality quorums are **plain count-based 2/3** in the code
@@ -322,7 +324,8 @@ vote" is **exact**, not an abstraction (unlike the in-zone diversity math).
 > TotalSupply` is now machine-checked in `Conservation.tla`, and both
 > partition-tail breaks — **partition-merge seal demotion** (`XZoneRevert`)
 > and **30-day stale-reap**
-> (`cross_zone.rs:936`) — are modelled as reachable, zero-Byzantine
+> (`REAP_HORIZON_SECS`, `cross_zone.rs`) — are modelled as reachable,
+> zero-Byzantine
 > supply-inflation counterexamples (see "Phase D — guard-necessity" above).
 
 ### Not yet modelled (future phases of the design doc)
@@ -351,7 +354,7 @@ vote" is **exact**, not an abstraction (unlike the in-zone diversity math).
 - **Cross-epoch seal recurrence Phase E.3 — NOW MODELLED**
   (`LivenessRecurrence.tla`, 2026-06-29). `Liveness.tla` checks ONE epoch's
   seal; chain progress across epochs (`[]<>sealed`) rests on the chained VRF
-  beacon (`chained_beacon(prev_seal_hash, …)`, `aggregator.rs:310`)
+  beacon (`chained_beacon(prev_seal_hash, …)`, `aggregator.rs`)
   re-randomizing proposer ranks every epoch so an adversary cannot *sustain* a
   worst-case rank assignment. Phase E.3 machine-checks exactly that: under a
   re-randomizing beacon the fast local path **recurs** (`RecurLocalSealed`),

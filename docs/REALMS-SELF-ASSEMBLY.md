@@ -31,14 +31,14 @@ Three realms (discovery profiles):
 
 ## Already built (the Terminator half)
 
-- **LAN self-discovery:** `src/network/mdns.rs` — zero-infrastructure peer
-  finding on the local network, feeds discovered peers into the DHT
-  (`discovery.rs:625` wrapper).
+- **LAN self-discovery:** `persisted_host_is_dialable_lan` in `src/network/mdns.rs` —
+  zero-infrastructure peer finding on the local network, feeding discovered peers
+  into the DHT via `insert_into_dht_pub` in `src/network/discovery.rs`.
 - **PEX (peer exchange):** `pq_list_peers` in `discovery.rs` — peers learn
   peers from peers, over Dilithium3-TOFU-authenticated PQ transport (no HTTPS
   fallback since AUDIT-10).
 - **Peer memory across death:** DHT routing table persists to disk
-  (`dht.rs:454`) — a rebooted node redials its last-known world.
+  (`save` in `crates/elara-dht/src/lib.rs`) — a rebooted node redials its last-known world.
 - **Seed bootstrap + reconnect heartbeat:** `discovery.rs` loop.
 - **NAT traversal:** `crates/elara-nat/` (extracted standalone crate).
 - **State rebirth:** archive snapshots + `/snapshot/state-delta` +

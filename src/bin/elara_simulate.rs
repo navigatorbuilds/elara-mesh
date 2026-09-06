@@ -647,16 +647,24 @@ async fn bootstrap_genesis_staked(nodes: &[SimNode]) -> Result<()> {
 
 /// Cross-register every node's identity into every node's anchor CF so the
 /// staked-anchor view sees ≥3 anchors on every node, lifting the
-/// `staked.len() < 3` bootstrap carve-out (`epoch.rs:4595` proposer /
-/// `verify_aggregator_rank:2924` verifier).
+/// `staked.len() < 3` bootstrap carve-out (the proposer-side gate in `epoch.rs`,
+/// the verifier-side one in `verify_aggregator_rank`).
 ///
-/// In production an anchor's seat propagates via a gossiped `vrf_registration`
-/// record (`ingest.rs:2714` → `store_public_key_anchor`). The sim's
-/// `start_node` only registers each node's VRF key in its *local* in-memory
-/// registry and never emits that record, so without this every node's anchor
-/// view is just itself → `staked_anchor_view().len() < 3` fires fleet-wide and
-/// the chain never seals once rank-0 is muted (confirmed empirically: every
-/// seal-loop tick logs `none_bootstrap=1 @0:bootstrap_non_genesis`).
+/// In production an anchor's seat is written by the anchor branch of
+/// `put_record_with_pk_zone`, which `identity_tier_for_record` selects when the
+/// record carries `vrf_registration` metadata — reached both from live ingest
+/// and from `bootstrap_store_record` on the gossip pull path. It is NOT written
+/// by `store_public_key_anchor`, which has no caller on the node's request path
+/// at all. This comment previously cited one, at a line that is in fact the
+/// global-seal emitter's VRF public-key lookup; corrected 2026-09-06 after the
+/// D7 audit. That rot is why the citations here name symbols and never lines.
+///
+/// The sim's `start_node` only registers each node's VRF key in its *local*
+/// in-memory registry and never emits that record, so without this every node's
+/// anchor view is just itself → `staked_anchor_view().len() < 3` fires
+/// fleet-wide and the chain never seals once rank-0 is muted (confirmed
+/// empirically: every seal-loop tick logs `none_bootstrap=1
+/// @0:bootstrap_non_genesis`).
 ///
 /// IMPORTANT — writes ONLY the anchor-CF seat, NOT the in-memory VRF *full*
 /// public key. The two stores gate different things:

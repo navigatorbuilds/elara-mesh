@@ -191,7 +191,7 @@ not a claimed property.
 | `msg1 = (ts0, exp(g,xi), kempk(ikem))` | `handshake.rs` timestamp ‖ X25519 eph pk ‖ ML-KEM eph pk |
 | `repk_x, ct, aead2` (msg2) | resp X25519 pk ‖ ML-KEM ct ‖ AEAD(pk‖sig) |
 | `aead(t3,(pk,sig),ksend)` (msg3) | AEAD(pk‖sig) |
-| `exp(_,_)` / `encap`/`decap`/`kemss` | X25519 ECDH (`crypto.rs`) / ML-KEM (`kem.rs`) |
+| `exp(_,_)` / `encap`/`decap`/`kemss` | X25519 ECDH (`crypto.rs`) / ML-KEM (`crates/elara-pq-transport/src/kem.rs`) |
 | `t1=h(msg1)`, `t2=h((t1,msg2pub))`, `t3=h((t2,aead2))` | running SHA3-256 transcript (`crypto.rs`) |
 | `kdf_send/recv(dh_ss,kem_ss,t2)` | `derive_session_keys`: HKDF, IKM `x25519‖ml_kem`, salt = transcript, two labels, role-flip (`crypto.rs`) |
 | `sign(t2,skR)` / `sign(t3,skI)` | Dilithium3 over the transcript snapshot, empty context (`handshake.rs`, `sig.rs`) |
@@ -322,7 +322,7 @@ reconstructed secrecy-`is false` for this *exact* key derivation is already
 machine-checked by handshake `both_broken` (probe under the transcript-AD
 handshake AEAD, which reconstructs). The
 counter-nonce boundary (handshake consumes counter 0 each direction; records
-start at counter 1, `stream.rs:606`) is verified by code-reading + the symbolic
+start at counter 1, `k_send` in `src/network/pq_transport/stream.rs`) is verified by code-reading + the symbolic
 `record_nonce_reuse` scenario, not re-mechanised here — the composition's
 contribution is **key genuineness**, and symbolic AEAD models no keystream/nonce-
 reuse harm regardless.
@@ -362,7 +362,7 @@ broken twins reach `Admitted` with an unissued identity, so the baseline's
 
 **Cleartext-cert model — and why it is the *strongest* form.** The model presents
 the cert in cleartext on the public wire, **not** inside the established AEAD
-session. realm.rs:10-17 asserts the cert "does NOT need to ride inside the
+session. The `RealmMembershipCert` doc-comment in `src/network/realm.rs` asserts the cert "does NOT need to ride inside the
 handshake transcript … the PQ handshake already proves the peer possesses the
 secret key behind `peer_identity_hash`; the cert binds that identity to the realm
 root." Modelling cleartext certs is the strongest Dolev-Yao attacker for the
@@ -371,7 +371,7 @@ admission integrity holding here **machine-validates that design claim** rather
 than assuming it. Confidentiality of the cert in transit (member-list privacy)
 is the *separate, weaker-attacker* property, and it is **already established** by
 the composed record-secrecy proof above: the real code carries admission messages
-as AEAD-encrypted `FrameType::Admission` frames (`realm.rs:196`) — typed
+as AEAD-encrypted `FrameType::Admission` frames (`AdmissionMsg` in `src/network/realm.rs`) — typed
 post-handshake record frames on the exact path whose payload secrecy
 `composed_baseline` proves and whose type-dispatch integrity the record
 `type_binding` scenarios pin. Member-list privacy is therefore inherited, not a

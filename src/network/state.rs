@@ -1923,8 +1923,13 @@ pub struct NodeState {
     /// witness-vs-user classification under load). Counters are
     /// atomic and exposed via `/metrics`.
     pub identity_promotion_user_to_witness_total: AtomicU64,
-    pub identity_promotion_user_to_anchor_total: AtomicU64,
-    pub identity_promotion_witness_to_anchor_total: AtomicU64,
+    // The two →ANCHOR counters used to live here as well. They are now
+    // STORAGE-owned (`StorageEngine::identity_promotion_counters`), because the
+    // only two sites an anchor row can appear at are both inside StorageEngine
+    // — `store_public_key_anchor` and the anchor route of
+    // `put_record_with_pk_zone` — and a `NodeState` copy could only ever be
+    // bumped by a caller that one of those paths bypasses. Deleted rather than
+    // left in place so nothing can bump a shadow copy (W-IDENT-1 item 5, D7 §5).
     /// Identity Partitioning Phase E: cumulative count of witness-tier
     /// PKs dropped from `CF_IDENTITIES_WITNESS` because the unsubscribed
     /// zone was their last claim — i.e. no surviving subscription had
@@ -4452,8 +4457,6 @@ impl NodeState {
             delegation_extend_rejected_total: AtomicU64::new(0),
             identity_user_evicted_total: AtomicU64::new(0),
             identity_promotion_user_to_witness_total: AtomicU64::new(0),
-            identity_promotion_user_to_anchor_total: AtomicU64::new(0),
-            identity_promotion_witness_to_anchor_total: AtomicU64::new(0),
             identity_witness_purged_total: AtomicU64::new(0),
             identity_pk_fetch_attempts_total: AtomicU64::new(0),
             identity_pk_fetch_hits_total: AtomicU64::new(0),

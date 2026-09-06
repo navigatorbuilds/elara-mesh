@@ -312,6 +312,49 @@ fn bench_batch_verify_tps(c: &mut Criterion) {
     }
 }
 
+
+/// W-IDENT-1 item 3 — the HOT ingest write path, `put_record_with_pk_zone`.
+///
+/// Deliberately NOT `bench_rocksdb_insert`: that one goes through
+/// `StorageEngine::insert` -> `put_record`, a bare payload store whose own doc
+/// says it writes "no identity/pk row" and is reachable only from tests. It
+/// never touches the identity-tier branch, so it cannot measure a change to it.
+/// This bench calls the function the node's live ingest and bootstrap pull
+/// actually call, which is where the higher-tier guard's two point reads land.
+///
+/// The measured case is the common one: an identity present in NEITHER
+/// CF_IDENTITIES_ANCHOR nor CF_IDENTITIES_WITNESS, so both guard reads MISS and
+/// the write proceeds — the worst case for the guard's cost, since a hit would
+/// short-circuit the write entirely.
+fn bench_identity_tier_put(c: &mut Criterion) {
+    use elara_runtime::storage::rocks::RecordSideWrites;
+    let identity = Identity::generate(EntityType::Device, CryptoProfile::ProfileB).unwrap();
+    let identity_hash = sha3_256_hex(&identity.public_key);
+
+    c.bench_function("put_record_with_pk_zone_user_tier", |b| {
+        b.iter_custom(|iters| {
+            let dir = tempfile::tempdir().unwrap();
+            let db = StorageEngine::open(dir.path()).unwrap();
+            let mut record = create_signed_record(&identity, vec![]);
+            let start = std::time::Instant::now();
+            for i in 0..iters {
+                record.id = format!("bench-idp-{i:010}");
+                let _ = db.put_record_with_pk_zone(
+                    &record.id,
+                    &record,
+                    &identity_hash,
+                    &identity.public_key,
+                    [0u8; 8],
+                    None,
+                    RecordSideWrites::default(),
+                    None,
+                );
+            }
+            start.elapsed()
+        });
+    });
+}
+
 criterion_group!(
     benches,
     bench_record_create_and_sign,
@@ -322,5 +365,6 @@ criterion_group!(
     bench_token_transfer_pipeline,
     bench_ledger_derivation,
     bench_batch_verify_tps,
+    bench_identity_tier_put,
 );
 criterion_main!(benches);

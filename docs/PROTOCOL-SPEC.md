@@ -13,7 +13,7 @@ conformance requirements, and names the **authoritative source** for each layer.
 > code is authoritative and this document is the bug.** Every normative claim
 > below names the source module that defines it. The byte layout of a
 > `ValidationRecord` is additionally guarded by the round-trip test
-> `test_wire_format_spec_locked` in `src/record.rs`.
+> `test_wire_format_spec_locked` in `crates/elara-record/src/record.rs`.
 
 > **Honest-claims rule.** Scale figures ("designed for N zones / records-per-day")
 > are *design targets that shaped the architecture*, never measured throughput.
@@ -56,9 +56,9 @@ with `O(log N)` proof data.
 | Layer | Purpose | This spec | Authoritative source |
 |-------|---------|-----------|----------------------|
 | L0 Crypto primitives | Hash + 2 PQ signatures | §2 (normative) | `src/crypto/` |
-| L1 Identity | Key → identity binding | §3 (normative) | `src/record.rs`, `src/verify_core.rs` |
-| L2 Record | The signed unit of data | §4 (normative) | `src/record.rs`, `src/wire.rs` |
-| L3 Record verification | Authenticity check | §5 (normative) | `src/verify_core.rs`, `src/light_verify.rs` |
+| L1 Identity | Key → identity binding | §3 (normative) | `crates/elara-record/src/record.rs`, `crates/elara-verify/src/lib.rs` |
+| L2 Record | The signed unit of data | §4 (normative) | `crates/elara-record/src/record.rs`, `crates/elara-record/src/wire.rs` |
+| L3 Record verification | Authenticity check | §5 (normative) | `crates/elara-verify/src/lib.rs`, `src/light_verify.rs` |
 | L4 Account SMT | State commitment + proofs | §6 (normative) | `crates/elara-smt`, `src/network/account_merkle.rs` |
 | L5 Seals & finality | Consensus output a client trusts | §7 (reference) | `src/network/epoch.rs`, `src/light_verify.rs` |
 | L6 Zones & routing | Sharding | §8 (normative) | `src/network/zone.rs`, `src/network/consensus.rs` |
@@ -92,7 +92,7 @@ other primitive participates in record authenticity.
 ### 2.1 Hash — SHA3-256 (FIPS 202)
 
 Every hash in the authenticity path is **SHA3-256** (NIST FIPS 202), **not**
-Keccak-256 and **not** SHA-2/BLAKE. Output is 32 bytes. Source: `src/crypto/hash.rs`.
+Keccak-256 and **not** SHA-2/BLAKE. Output is 32 bytes. Source: `crates/elara-record/src/hash.rs`.
 
 Known-answer test (a conforming implementation MUST reproduce it):
 
@@ -133,7 +133,7 @@ Source: `src/crypto/pqc.rs`. Present only on **Profile A** records (§2.4).
 **Wire consistency invariant (MUST):** the three SPHINCS+ fields
 (`sphincs_signature`, `creator_sphincs_pk`, `sphincs_algorithm`) are
 all-present-or-all-absent. A record with some-but-not-all MUST be rejected at
-decode (`src/record.rs`). When `sphincs_signature` is present,
+decode (`crates/elara-record/src/record.rs`). When `sphincs_signature` is present,
 `sphincs_algorithm` MUST be `0x02`.
 
 ### 2.5 Domain separation
@@ -162,7 +162,7 @@ identity_hash = SHA3-256(creator_public_key)        // 32 bytes
 identity_hex  = lowercase_hex(identity_hash)         // 64 chars, for display/API
 ```
 
-Source: `src/record.rs`, `src/verify_core.rs`, `src/crypto/hash.rs`. There is no
+Source: `crates/elara-record/src/record.rs`, `crates/elara-verify/src/lib.rs`, `crates/elara-record/src/hash.rs`. There is no
 domain tag — the input is exactly the raw 1952-byte public key. The SPHINCS+ key
 does **not** participate in identity derivation.
 
@@ -171,12 +171,16 @@ does **not** participate in identity derivation.
 Because `creator_public_key` is part of `signable_bytes()` (§4.4), the identity is
 transitively bound by the signature: a verifier that checks the signature has
 also checked that this key signed this record, and the identity is just the hash
-of that key. The optional v4+ `identity_hash_wire` field is a **bandwidth
-optimization** (omit the 1952-byte key, send its 32-byte hash, let the receiver
-resolve the full key from a local identity store). A verifier that is given a
-record carrying `identity_hash_wire` MUST confirm
+of that key.
+
+`identity_hash_wire` is a **bandwidth optimization** for transports that can
+supply the 32-byte hash out of band instead of the 1952-byte key: the receiver
+resolves the full key from a local identity store. It is **not carried by the
+binary wire codec** — the encoder never writes it and the decoder never reads it
+(§4.3.1), so a from-the-bytes implementation will not encounter it. Wherever it
+*is* supplied, a verifier MUST confirm
 `SHA3-256(creator_public_key) == identity_hash_wire` once the key is resolved
-(`src/verify_core.rs`).
+(`crates/elara-verify/src/lib.rs`).
 
 ---
 
@@ -220,27 +224,115 @@ The on-wire byte layout (8-byte header `"ELRA" + version + rec_type + reserved`,
 then the field sequence, with `u8`/`u16`/`u32`-prefixed variable fields and
 version-gated extensions) is fully specified by the reference codecs:
 
-- **Authoritative:** `src/record.rs` (`to_bytes` / `from_bytes`) and `src/wire.rs`
+- **Authoritative:** `crates/elara-record/src/record.rs` (`to_bytes` / `from_bytes`) and `crates/elara-record/src/wire.rs`
   (length-prefix helpers + the v4+ binary metadata TLV).
-- **Guard:** `test_wire_format_spec_locked` in `src/record.rs`.
+- **Guard:** `test_wire_format_spec_locked` in `crates/elara-record/src/record.rs`.
 
-A decoder MUST reject magic ≠ `"ELRA"`, `version ∉ [1,6]`, unknown `rec_type`
-(≠ `0x01`), and any length prefix that exceeds the §4.5 bounds. Metadata uses a
-binary TLV at v4+ and a sorted compact-JSON blob at v1–v3. **v6 is the emission version
-as of the 2026-08-19 flag day**: fresh records stamp `CURRENT_SIGNING_VERSION`
-(6) — the decode-everywhere-first rollout completed 2026-08-18 (crates 0.2.0
-published + registry-verified, fleet decode live) and emission flipped the
-following day per the pre-flip checklist. The v6 wire extension appends a
-`u16`-prefixed ASCII `network_id` (≤64 bytes) after the v5 nonce, and the v6
-signing preimage prepends `ELARA_RECORD_V1` ‖ `u16`-BE length ‖ `network_id`
-before the §4.4 body (see §4.4; the committed v6 sample
-`examples/verify/sample-record-v6.wire` + the `record-hash-v6` and
-`signable-prefix-v6` conformance vectors pin both byte layouts).
+A decoder MUST reject magic ≠ `"ELRA"`, any `version` outside the closed range
+**[`WIRE_VERSION_MIN`, `WIRE_VERSION`] = [4, 7]**, unknown `rec_type` (≠ `0x01`),
+and any length prefix that exceeds the §4.5 bounds. The range check is one
+statement — `read_header` in `crates/elara-record/src/wire.rs` — and both ends
+move only on a named flag day.
+
+- **Floor = 4** (raised 1→4 on 2026-08-18). v1–v3 are **no longer decodable**:
+  those versions carried metadata as a sorted compact-JSON blob that the
+  encoder could no longer re-emit, so the read path and the JSON branch were
+  deleted together in one commit rather than left as a silent round-trip
+  corruption. No stored or frozen artifact is below v4.
+- **Ceiling = 7.** Metadata is a binary TLV at v4+.
+
+**v7 is the emission version as of the 2026-08-23 flag day**: fresh records
+stamp `CURRENT_SIGNING_VERSION` (7). The two constants are deliberately split —
+the fleet becomes decode-capable at a version everywhere before any node emits
+it, so the ceiling is always raised in an earlier commit than the emission
+version, never the same one.
+
+Two flag days are folded into that range, and they are **not** alike:
+
+- **v6 (emission 2026-08-19)** changed bytes. The wire extension appends a
+  `u16`-prefixed ASCII `network_id` (≤64 bytes) after the v5 nonce, and the
+  signing preimage prepends `ELARA_RECORD_V1` ‖ `u16`-BE length ‖ `network_id`
+  before the §4.4 body (see §4.4). The committed v6 sample
+  `examples/verify/sample-record-v6.wire` and the `record-hash-v6` /
+  `signable-prefix-v6` conformance vectors pin both byte layouts.
+- **v7 (emission 2026-08-23)** changed **no record bytes at all** — v7 wire
+  bytes are shape-identical to v6, which is why the v6 sample still pins the
+  layout and no separate v7 sample exists. The version is a *dispatch signal
+  carried by the record*: it selects the Merkle fold recipe used for seals
+  (§7.1). An implementation that decodes v6 correctly already decodes v7
+  correctly; what it must additionally get right is the fold, not the parse.
+
+#### 4.3.1 Field order (NORMATIVE)
+
+Fields are emitted in exactly this order with no padding and no alignment.
+`u8-len`/`u16-len`/`u32-len` mean a big-endian length prefix of that width
+followed by that many bytes; all multi-byte integers are **big-endian**.
+
+| # | Field | Encoding | Notes |
+|---|-------|----------|-------|
+| — | `magic` | 4 raw bytes | `"ELRA"` (0x45 0x4C 0x52 0x41) |
+| — | `version` | `u16` | the record's own version, never the writer's ceiling |
+| — | `rec_type` | `u8` | `0x01`; any other value MUST be rejected |
+| — | `reserved` | `u8` | `0x00` |
+| 1 | `id` | `u8-len` + UTF-8 | UUID v7 in text form (36 bytes) |
+| 2 | `content_hash` | 32 raw bytes | **no** length prefix |
+| 3 | `creator_public_key` | `u16-len` + bytes | ML-DSA-65 public key, 1952 bytes |
+| 4 | `timestamp` | `f64` BE (8 bytes) | IEEE-754 binary64, Unix seconds |
+| 5 | `parents` | `u16` count, then per parent: `u8-len` + UTF-8 | |
+| 6 | `classification` | `u8` | §4.2 |
+| 7 | `metadata` | binary TLV — see §4.3.2 | |
+| 8 | `zk_proof` | `u32-len` + bytes | |
+| 9 | `signature` | `u16-len` + bytes | ML-DSA-65 |
+| 10 | `sphincs_signature` | `u16-len` + bytes | SLH-DSA |
+| **v2+** | | | present in every decodable record (floor = 4) |
+| 11 | `itc_stamp` | `u16-len` + bytes | |
+| 12 | `zone_refs` | `u16` count, then per ref: **24 raw bytes** | zone `u64` ‖ sequence `u64` ‖ epoch `u64`, each BE |
+| 13 | `creator_sphincs_pk` | `u16-len` + bytes | 48 bytes for Profile A |
+| 14 | `sig_algorithm` | `u8` | §2.4 |
+| 15 | `sphincs_algorithm` | `u8` | `0` when absent |
+| **v3+** | | | |
+| 16 | `zone_present` | `u8` | `0` or `1` |
+| 17 | `zone` | present only if the flag is `1`: `u16-len` + UTF-8 path | |
+| **v5+** | | | |
+| 18 | `nonce` | `u64` BE (8 bytes) | slot mutual exclusion |
+| **v6+** | | | |
+| 19 | `network_id` | `u16-len` + ASCII | ≤64 bytes; the same value the §4.4 preimage commits to |
+
+**Absent vs empty.** Every optional byte-string field above writes a zero length
+prefix when absent, so a zero-length field and an absent field are the *same
+bytes*. An implementation MUST treat length 0 as "absent" and MUST NOT invent a
+distinction the wire cannot carry.
+
+**`identity_hash_wire` is not a wire field.** §3.2 describes it as a bandwidth
+optimization; in this codec it is never written by the encoder and never read by
+the decoder (the struct field exists for the JSON representation only). The full
+`creator_public_key` is always on the wire. A transport that supplies the hash
+out of band still owes the §3.2 equality check.
+
+#### 4.3.2 Metadata TLV (v4+)
+
+`u16` entry count, then per entry a `u8-len` UTF-8 key followed by one value:
+
+| Tag | Type | Value bytes |
+|-----|------|-------------|
+| `0` | null | *(none)* |
+| `1` | bool | `u8` — `0` or `1` |
+| `2` | int | `i64` BE |
+| `3` | float | `f64` BE |
+| `4` | string | `u16-len` + UTF-8 |
+| `5` | array | `u16` count, then that many values (recursive) |
+| `6` | object | `u16` count, then that many `u8-len` key + value pairs (recursive) |
+
+A JSON number that fits `i64` MUST encode as tag `2`; otherwise as tag `3`.
+Object keys — top-level and nested alike — are emitted in **ascending byte
+order**, so two conforming encoders produce identical bytes for identical
+content. Depth and count limits are in §4.5; a decoder MUST enforce them before
+allocating.
 
 ### 4.4 `signable_bytes` — the signature preimage (NORMATIVE)
 
 The bytes signed by **both** signature schemes are **not** the wire serialization.
-They are the canonical subset produced by `signable_bytes()` (`src/record.rs`):
+They are the canonical subset produced by `signable_bytes()` (`crates/elara-record/src/record.rs`):
 
 ```
 domain_tag          "ELARA_RECORD_V1"  (only if version >= 6 — LEADS the preimage)
@@ -290,11 +382,11 @@ The record's content-address (`record_hash`) is `SHA3-256(signable_bytes())`.
 | Bound | Value | Source |
 |-------|-------|--------|
 | `MAX_RECORD_BYTES` | 65,536 (64 KiB) | `src/network/ingest.rs` |
-| Max parents | 256 | `src/record.rs` |
-| Max zone_refs | 256 | `src/record.rs` |
-| Max metadata entries | 64 admitted at ingest / 256 wire-decode bound | `src/network/ingest.rs` (64) · `src/wire.rs` (256) |
-| Max metadata nesting depth | 8 | `src/wire.rs` |
-| Max metadata JSON (v1–v3) | 102,400 (100 KiB) | `src/wire.rs` |
+| Max parents | 256 | `crates/elara-record/src/record.rs` |
+| Max zone_refs | 256 | `crates/elara-record/src/record.rs` |
+| Max metadata entries | 64 admitted at ingest / 256 wire-decode bound | `src/network/ingest.rs` (64) · `crates/elara-record/src/wire.rs` (256) |
+| Max metadata nesting depth | 8 | `crates/elara-record/src/wire.rs` |
+| Max metadata JSON (v1–v3) | 102,400 (100 KiB) | `crates/elara-record/src/wire.rs` |
 
 A conforming decoder MUST enforce these *before* allocating from a length prefix
 (length-gate-before-alloc), so a malformed frame cannot drive an unbounded
@@ -305,7 +397,7 @@ allocation.
 ## 5. Record verification (NORMATIVE)
 
 A conforming offline verifier performs the following ordered steps
-(`src/verify_core.rs`, `src/light_verify.rs`). Any failure ⇒ the record is
+(`crates/elara-verify/src/lib.rs`, `src/light_verify.rs`). Any failure ⇒ the record is
 **not verified**.
 
 1. **Decode** the wire bytes (§4.3). Reject on bad magic, unsupported version,
@@ -384,21 +476,49 @@ A proof for "key K maps to value V under root R" carries:
 - a **256-bit presence bitmap** (`present`, MSB-first by parent depth): bit `d`
   set ⇒ the sibling at depth `d` is non-empty and **present in the sibling list**;
   bit `d` clear ⇒ the sibling is `EMPTY_HASH` and is **omitted**;
-- the **sibling list**: only the non-empty siblings, in depth order (≈ `log₂(N)`
-  entries, never more than 256).
+- the **sibling list**: only the non-empty siblings, ordered **from the leaf's
+  parent (depth 255) up to the root (depth 0)** — **deepest-first (fold
+  order)**, i.e. by *descending* parent depth, the order the fold consumes them in (≈ `log₂(N)` entries, never more
+  than 256). This is the one place an independent implementation is most likely
+  to diverge: a root-first list folds to a different root and every proof fails.
 
 Verification (`verify_proof` in `crates/elara-smt`):
 
 1. Compute the leaf hash from `K` and `V` (§6.2).
 2. Derive the 256-bit path from `SHA3-256(K)`.
 3. Fold from depth 255 up to the root: at each depth, the sibling is the next
-   entry from the list if `present` bit is set, else `EMPTY_HASH`; combine
-   left/right by the path bit using the interior-node rule (§6.2).
-4. The folded result MUST equal the claimed root `R`.
+   entry from the list if `present` bit is set, else `EMPTY_HASH`; order the two
+   children by the path bit (path bit set ⇒ the running value is the *right*
+   child) and combine with the interior-node rule (§6.2) — **except** when both
+   children are `EMPTY_HASH`, in which case the parent is `EMPTY_HASH` itself,
+   **not** `interior_hash(EMPTY_HASH, EMPTY_HASH)`. This exception is the
+   §6.2 empty-subtree collapse expressed as a folding rule; it is normative, and
+   it is what makes a proof whose path crosses an empty region verify at all.
+4. Every entry of the sibling list MUST have been consumed exactly once. A proof
+   that folds to the right root while leaving siblings unread MUST be rejected —
+   otherwise a valid proof can be padded with arbitrary trailing entries and
+   stays valid, which is proof malleability.
+5. The folded result MUST equal the claimed root `R`.
 
 A conforming light client MUST bound the deserialized sibling list to 256 entries
 *before* folding, to prevent a deserialize-time amplification from a malformed
-proof.
+proof. Vectors `smt-proof/bob-in-abc` and `smt-proof-reject/bob-tampered-sibling`
+in `examples/verify/conformance-vectors.json` pin the accept and the reject.
+
+### 6.5 Exclusion (non-membership) proofs
+
+The same compressed shape proves a key is **absent**. An exclusion proof carries
+the key, the root, the presence bitmap and the sibling list, but no value; the
+verifier folds `EMPTY_HASH` at the leaf position instead of a leaf hash and
+requires the result to equal `R` (`verify_exclusion_proof` in `crates/elara-smt`;
+the fold, including the empty-collapse rule of §6.4 step 3, is bit-for-bit the
+same routine as inclusion).
+
+This is a **cryptographic** non-membership proof, not a trust-the-server
+assertion: the path is the full 256-bit `SHA3-256(K)`, so an absent key's slot is
+genuinely empty and no other key can occupy it. A verifier that can prove absence
+can answer "this record does not exist" without trusting the responder — which is
+the property a light client needs to detect withholding.
 
 ---
 
@@ -413,6 +533,33 @@ A **seal** finalizes a zone's state for an epoch. It binds (among other fields)
 the zone, the epoch number, and the zone's **`account_smt_root`** (§6), and is
 signed by the zone's witness committee. The genesis **anchor** key(s) form the
 root of trust a light client pins.
+
+### 7.1 Merkle fold recipe is versioned per seal (NORMATIVE)
+
+A seal's record tree is folded with one of two recipes, selected by **that
+seal's own signed wire version** — never by the verifier's build, and never by a
+global switch:
+
+| Seal version | Recipe | Interior preimage |
+|--------------|--------|-------------------|
+| ≤ 6 | v1 (bare) | untagged concatenation, as originally shipped |
+| ≥ 7 | v2 (tagged) | domain-tagged: `ELARA_SEAL_MERKLE_NODE_V1` for the zone record tree, `ELARA_SUPER_SEAL_MERKLE_NODE_V1` for the super-seal tree, and a distinct committee interior tag |
+
+The threshold is the constant `FOLD_V2_MIN_WIRE_VERSION` (= 7) in
+`crates/elara-record/src/wire.rs`; every fold site — producer, committee hasher,
+proof builder, parse gate — derives it from that one constant so the ungated and
+the consensus paths cannot disagree.
+
+Two consequences bind an implementer:
+
+1. **Pre-flip seals never migrate.** A seal stamped ≤6 folds bare v1 *forever*,
+   including when it is re-verified years later by a v7-only client. Dispatch is
+   per seal, so a client MUST keep both recipes.
+2. **The mismatch fails closed.** A v1 proof presented against a v2 root, or the
+   reverse, does not verify — it is rejected, not silently accepted. Vectors
+   `seal-merkle-fold-v2/tagged-roots`, `seal-merkle-inclusion-v2/proof-walk`,
+   `seal-merkle-inclusion-v2-reject/v1-proof-vs-v2-root` and
+   `seal-merkle-inclusion-v2-reject/v2-proof-vs-v1-root` pin all four corners.
 
 **Light-client trust chain** (the property a conforming light client establishes):
 
@@ -721,11 +868,11 @@ the wrong-anchor twin.
 
 | Module | Defines |
 |--------|---------|
-| `src/crypto/hash.rs` | SHA3-256 |
+| `crates/elara-record/src/hash.rs` | SHA3-256 |
 | `src/crypto/pqc.rs` | ML-DSA-65 + SLH-DSA-SHA2-192f params + verify |
-| `src/record.rs` | `ValidationRecord`, `to_bytes`/`from_bytes`, `signable_bytes`, `record_hash` |
-| `src/wire.rs` | length-prefix codecs, v4+ binary metadata TLV |
-| `src/verify_core.rs` | record verification algorithm |
+| `crates/elara-record/src/record.rs` | `ValidationRecord`, `to_bytes`/`from_bytes`, `signable_bytes`, `record_hash` |
+| `crates/elara-record/src/wire.rs` | length-prefix codecs, v4+ binary metadata TLV |
+| `crates/elara-verify/src/lib.rs` | record verification algorithm (`verify_record`) |
 | `src/light_verify.rs` | seal-against-anchor + inclusion verification |
 | `crates/elara-smt` | 256-level Sparse Merkle Tree engine + `verify_proof` |
 | `crates/elara-light-client` | pure wasm-portable light-client core: `verify_proof`, `verify_account_proof_against_header` (the A.7 binding), state-delta seal binding |
@@ -734,6 +881,25 @@ the wrong-anchor twin.
 | `src/network/epoch.rs` | epoch seal construction |
 | `src/network/zone.rs`, `consensus.rs` | zone routing, `zone_count` authority |
 | `crates/elara-pq-transport` | ELPQ frame + hybrid handshake |
+
+## Appendix D — Independent implementations
+
+An implementation written from this document *alone* is the only real test of
+whether the document says what the code does. Results are recorded here as they
+arrive.
+
+- **2026-09-06 — `elara_reader.py`**, an independent reader of the Appendix A
+  vector set by **Noûs**, an AI agent operating for
+  [@robertolocatelli81-dev](https://github.com/robertolocatelli81-dev), written
+  from this spec's text with the reference implementations unopened
+  ([reader](https://github.com/robertolocatelli81-dev/ap2-evidence-pack/blob/master/interop/elara_reader.py),
+  [report](https://github.com/google-agentic-commerce/AP2/issues/338#issuecomment-5560133862)).
+  **21 of 25 vectors byte-agreed**, including both ML-DSA-65 vectors verified
+  against a third FIPS 204 implementation, and the v7 tagged seal fold deduced
+  from the A.4.1 scope note alone. The 4 remaining vectors were the ones needing
+  the wire layout, which §4.3 then deferred to code — that gap is closed by
+  §4.3.1, and the §6.4 sibling-order ambiguity they isolated (one reading out of
+  96 enumerated) is fixed in that section. Both findings were theirs.
 
 ## Appendix C — References
 

@@ -235,6 +235,40 @@ mod refinement_map {
         let mut i = 0;
         while i < b.len() {
             if b[i] != b':' {
+                // A `path.rs` that pins no line still names a file, and the
+                // line's identifiers say which symbol. The scan was `:`-anchored
+                // until 2026-09-06, so these were invisible rather than checked:
+                // `Liveness.tla:13` cited `aggregator.rs:` with the number
+                // wrapped onto the next comment line and went unverified for
+                // months while pointing 16 lines off `proposer_rank`.
+                if b[i] == b'.' && line[i..].starts_with(".rs") {
+                    let after = i + 3;
+                    // A `.` right after `.rs` ends a sentence unless a word char
+                    // follows it: `consensus.rs.` is a citation, `foo.rs.bak` is a
+                    // filename. Without this the trailing period made `.` a path
+                    // char and the whole citation vanished silently.
+                    let sentence_dot = b.get(after) == Some(&b'.')
+                        && !matches!(b.get(after + 1), Some(&c) if is_word(c));
+                    if after >= b.len()
+                        || (!is_path_char(b[after]) && b[after] != b':')
+                        || sentence_dot
+                    {
+                        let mut s = i;
+                        while s > 0 && is_path_char(b[s - 1]) {
+                            s -= 1;
+                        }
+                        let path = &line[s..after];
+                        if path.len() > 3 {
+                            *last_path = Some(path.to_string());
+                            out.push(Citation {
+                                path: path.to_string(),
+                                lines: None,
+                            });
+                        }
+                        i = after;
+                        continue;
+                    }
+                }
                 i += 1;
                 continue;
             }
@@ -251,6 +285,16 @@ mod refinement_map {
             }
             let (n1, j) = read_num(b, i + 1);
             let Some(n1) = n1 else {
+                // `path.rs::tests` is a Rust path, not a citation. A `path.rs:`
+                // whose number wrapped to the next comment line still names the
+                // file, so it is checked as a file-only citation.
+                if explicit && b.get(i + 1) != Some(&b':') {
+                    *last_path = Some(path.to_string());
+                    out.push(Citation {
+                        path: path.to_string(),
+                        lines: None,
+                    });
+                }
                 i += 1;
                 continue;
             };
@@ -332,6 +376,16 @@ mod refinement_map {
         let lo = lo.max(1);
         let hi = hi.min(lines.len());
         (lo..=hi).filter(|&n| has_word(lines[n - 1], word)).collect()
+    }
+
+    /// 1-based lines that mention `word` as CODE — comment and bare-`use`
+    /// lines excluded. This is what a citation points at: the symbol's
+    /// mechanism, not a prose reference to it.
+    pub fn code_mentions_in(lines: &[&str], word: &str) -> Vec<usize> {
+        mentions_in(lines, word, 1, lines.len())
+            .into_iter()
+            .filter(|&m| is_code_mention(lines[m - 1]))
+            .collect()
     }
 
     /// 1-based lines that DEFINE `fn name(` / `fn name<` (comment lines skipped).
@@ -485,7 +539,20 @@ mod refinement_map {
         rows
     }
 
-    /// Every `*.rs` under `<root>/src`, as `/`-joined paths relative to `root`.
+    /// Every `*.rs` under `<root>/src` **and** `<root>/crates/*/src`, as
+    /// `/`-joined paths relative to `root`.
+    ///
+    /// The `crates/` half was added by D10 (2026-09-06). Lane 3 extracted whole
+    /// subsystems out of `src/` — the record type, the DHT, the PQ transport, the
+    /// verifier — and an index that stops at `src/` cannot see any of them, so a
+    /// citation naming `crates/elara-record/src/record.rs` failed with "no file
+    /// under src/ matches" even though both the file and the symbol were correct.
+    /// That is a guard blind spot, not a doc defect: the fix a "fix the FILE, not
+    /// the guard" reflex would produce is DELETION OF A TRUE CITATION, which is
+    /// the wrong direction. Verified safe before widening: only four basenames
+    /// (`anchor_proof.rs`, `kem.rs`, `lib.rs`, `pqc.rs`) exist in both trees, and
+    /// no citation that resolves today resolves to a different file afterwards —
+    /// a newly-ambiguous bare basename was already failing as unmatched.
     pub fn src_index(root: &Path) -> Vec<String> {
         fn walk(dir: &Path, root: &Path, out: &mut Vec<String>) {
             let Ok(rd) = std::fs::read_dir(dir) else { return };
@@ -502,6 +569,13 @@ mod refinement_map {
         }
         let mut out = Vec::new();
         walk(&root.join("src"), root, &mut out);
+        if let Ok(rd) = std::fs::read_dir(root.join("crates")) {
+            let mut crate_dirs: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
+            crate_dirs.sort();
+            for c in crate_dirs {
+                walk(&c.join("src"), root, &mut out);
+            }
+        }
         out.sort();
         out
     }
@@ -532,7 +606,7 @@ mod refinement_map {
                 }
                 Ok(hit)
             }
-            0 => Err(format!("`{cited}`: no file under src/ matches")),
+            0 => Err(format!("`{cited}`: no file under src/ or crates/*/src/ matches")),
             _ => hints.get(&base).cloned().ok_or_else(|| {
                 format!(
                     "`{cited}`: ambiguous ({}) — cite it with a directory prefix",
@@ -657,7 +731,7 @@ mod refinement_map {
                             }
                         }
                         if elsewhere.is_empty() {
-                            "not defined anywhere under src/ (renamed or removed?)".to_string()
+                            "not defined anywhere under src/ or crates/*/src/ (renamed or removed?)".to_string()
                         } else {
                             format!("defined elsewhere: {}", elsewhere.join(", "))
                         }
@@ -675,8 +749,10 @@ mod refinement_map {
         rep
     }
 
-    /// Spec half: every `file.rs:N` citation in a module comment must have one
-    /// of the line's identifiers mentioned within ±`LINE_DRIFT` of N.
+    /// Spec half: every citation in a module comment names a FILE and a SYMBOL,
+    /// and one of the line's identifiers must occur as CODE somewhere in that file.
+    /// A citation carrying `:N` is REJECTED outright (D5, 2026-09-06) — there is no
+    /// tolerance window any more, because a tolerance is what let pins accumulate.
     pub fn check_spec_text(
         module: &str,
         text: &str,
@@ -700,7 +776,6 @@ mod refinement_map {
             }
             let tokens = code_tokens(&scrubbed);
             for c in &cits {
-                let Some((lo, hi)) = c.lines else { continue };
                 let rel = match resolve(&c.path, index, &mut hints) {
                     Ok(r) => r,
                     Err(e) => {
@@ -716,54 +791,60 @@ mod refinement_map {
                     }
                 };
                 let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
-                if lo > refs.len() {
+                // D5 ENFORCEMENT (2026-09-06): a citation that names a LINE is a
+                // FAILURE. The old shape ACCEPTED `foo.rs:123` and validated it
+                // against a +/-LINE_DRIFT window — permissive, not prohibitive, so
+                // nothing stopped the next contributor reintroducing the pins that
+                // cost 22 repairs across 10 commits in a single day. The convention
+                // is prohibitive, so the guard prohibits. Checked BEFORE the
+                // `tokens.is_empty()` note, or a pin on an identifier-free line
+                // would slip through as a note instead of failing.
+                // The old `lo > refs.len()` bounds check died here: after this
+                // branch it had no reachable caller, and a branch that cannot run
+                // is worse than no branch.
+                if let Some((lo, _)) = c.lines {
                     rep.failures.push(format!(
-                        "{module}:{n}: cites {rel}:{lo} but the file has {} lines",
-                        refs.len()
+                        "{module}:{n}: cites {rel}:{lo} — citations name a FILE and a SYMBOL, never a line. \
+                         Drop the `:{lo}` and keep the symbol on this same line (the guard resolves a \
+                         citation against the identifiers on its own line, so splitting them silently \
+                         unverifies it)."
                     ));
                     continue;
                 }
                 if tokens.is_empty() {
                     rep.notes.push(format!(
-                        "{module}:{n}: {rel}:{lo} — no identifier on the line, unverifiable"
+                        "{module}:{n}: {rel} — no identifier on the line, unverifiable"
                     ));
                     continue;
                 }
-                let win_lo = lo.saturating_sub(LINE_DRIFT);
-                let win_hi = hi + LINE_DRIFT;
-                if tokens
-                    .iter()
-                    .any(|t| !mentions_in(&refs, t, win_lo, win_hi).is_empty())
                 {
-                    rep.verified += 1;
-                    continue;
-                }
-                let mut nearest: Vec<String> = Vec::new();
-                for t in &tokens {
-                    if let Some((best, was_code)) =
-                        nearest_mention_preferring_code(&refs, t, lo)
-                    {
-                        let defs = fn_def_lines(&refs, t);
-                        let tag = if !defs.is_empty() {
-                            format!("{t} defined at {rel}:{}", defs[0])
-                        } else if was_code {
-                            format!("{t} nearest CODE mention {rel}:{best}")
-                        } else {
-                            // Say so rather than presenting a comment/import as
-                            // if it were the site — the reader must not copy it.
-                            format!("{t} appears only in comments/imports, nearest {rel}:{best}")
-                        };
-                        nearest.push(tag);
+                    // The only remaining shape: some identifier on the line must occur
+                    // as CODE somewhere in the file. Skipping these silently (the
+                    // shape before 2026-09-06) meant a citation that carried no
+                    // line number was verified by nothing while the guard still
+                    // printed `ok` — the failure mode a line-free convention
+                    // would otherwise have walked straight into.
+                    if tokens.iter().any(|t| !code_mentions_in(&refs, t).is_empty()) {
+                        rep.verified += 1;
+                        continue;
                     }
+                    let mut prose: Vec<String> = Vec::new();
+                    for t in &tokens {
+                        if let Some(&first) = mentions_in(&refs, t, 1, refs.len()).first() {
+                            prose.push(format!(
+                                "{t} appears only in comments/imports, first {rel}:{first}"
+                            ));
+                        }
+                    }
+                    let hint = if prose.is_empty() {
+                        format!("none of {tokens:?} appears anywhere in {rel}")
+                    } else {
+                        prose.join("; ")
+                    };
+                    rep.failures.push(format!(
+                        "{module}:{n}: {rel} has no CODE mention of {tokens:?} — {hint}"
+                    ));
                 }
-                let hint = if nearest.is_empty() {
-                    format!("none of {tokens:?} appears anywhere in {rel}")
-                } else {
-                    nearest.join("; ")
-                };
-                rep.failures.push(format!(
-                    "{module}:{n}: {rel}:{lo} has none of {tokens:?} within ±{LINE_DRIFT} — {hint}"
-                ));
             }
         }
         rep
@@ -852,6 +933,37 @@ mod refinement_map {
             let mut none = None;
             assert!(parse_citations("(:12) alone", &mut none).is_empty());
 
+            // A `path.rs` pinning no line is a file-only citation, and so is a
+            // `path.rs:` whose number wrapped onto the next comment line.
+            let mut bare = None;
+            let file_only = |p: &str| Citation {
+                path: p.to_string(),
+                lines: None,
+            };
+            assert_eq!(
+                parse_citations(
+                    "map (src/accounting/cross_zone.rs + epoch.rs): proposer_rank (aggregator.rs:",
+                    &mut bare
+                ),
+                vec![
+                    file_only("src/accounting/cross_zone.rs"),
+                    file_only("epoch.rs"),
+                    file_only("aggregator.rs"),
+                ]
+            );
+            assert_eq!(bare.as_deref(), Some("aggregator.rs"));
+
+            // Sentence-final `.` used to make the citation vanish: `.` is a path
+            // char, so `b[after]` failed the test and no branch ever matched.
+            let mut b2 = None;
+            assert_eq!(
+                parse_citations("the gate lives in consensus.rs.", &mut b2),
+                vec![file_only("consensus.rs")]
+            );
+            // ...but a real extension is still part of the filename.
+            let mut b3 = None;
+            assert_eq!(parse_citations("see consensus.rs.bak now", &mut b3), vec![]);
+
             assert_eq!(
                 code_tokens("is_zone_stuck (aggregator.rs:224) CorrQ attest REAP_HORIZON_SECS d_q 12_3"),
                 vec!["is_zone_stuck", "REAP_HORIZON_SECS", "d_q"]
@@ -898,13 +1010,14 @@ after";
         /// name, a stale line beyond ±5, an ambiguous bare basename, and a
         /// citation past EOF — and PASS inside the drift budget.
         #[test]
-        fn refinement_map_checks_fail_on_drift_and_pass_within_budget() {
+        fn refinement_map_checks_reject_pins_and_verify_symbol_only() {
             let root = root();
             let index = vec![
                 "src/a/consensus.rs".to_string(),
                 "src/a/cross_zone.rs".to_string(),
                 "src/a/ledger.rs".to_string(),
                 "src/b/ledger.rs".to_string(),
+                "src/a/park_lane.rs".to_string(),
             ];
             let mut src = Sources::new(&root);
             let mut body = String::new();
@@ -918,6 +1031,7 @@ after";
             src.seed("src/a/ledger.rs", "fn x() {}\n");
             src.seed("src/b/ledger.rs", "fn x() {}\n");
             src.seed("src/a/cross_zone.rs", "// cross_zone module\nfn y() {}\n");
+            src.seed("src/a/park_lane.rs", "// only_in_comment is named here\nfn z() {}\n");
 
             let doc = "\
 | TLA+ action | Rust function | File:line |
@@ -944,13 +1058,71 @@ after";
 (* add_attestation consensus.rs:999 past eof *)
 (* src/a/ledger.rs:1 qualifies the hint, then ledger.rs:1 resolves *)
 (* cross_zone.rs:1 — the path stem alone is not evidence *)
+(* add_attestation a/consensus.rs symbol-only, no line *)
+(* only_in_comment a/park_lane.rs is never code *)
+(* absent_symbol_here a/park_lane.rs is nowhere at all *)
 ";
             let rep = check_spec_text("Spec.tla", spec, &index, &mut src);
-            assert_eq!(rep.verified, 3, "{rep:?}");
-            assert_eq!(rep.notes.len(), 4, "{rep:?}");
-            assert_eq!(rep.failures.len(), 2, "{rep:?}");
-            assert!(rep.failures[0].contains("Spec.tla:3") && rep.failures[0].contains("defined at src/a/consensus.rs:42"));
-            assert!(rep.failures[1].contains("Spec.tla:5") && rep.failures[1].contains("has 43 lines"));
+            // D5 (2026-09-06): this fixture deliberately still carries the nine
+            // line-pinned shapes the OLD window rule graded — "ok within drift",
+            // "STALE", "past eof", "no identifier here". Under the prohibitive
+            // rule every one of them is a REJECTION, so the counts invert: what
+            // used to be verified=4 / notes=4 / failures=4 is now
+            // verified=1 / notes=0 / failures=11. The lines are kept rather than
+            // deleted so the fixture proves the pins are refused, not merely absent.
+            //
+            // notes went 4 -> 0 ON PURPOSE: the pin check runs BEFORE the
+            // `tokens.is_empty()` note, so `consensus.rs:12 no identifier here`
+            // now FAILS instead of being filed as unverifiable. A pin on an
+            // identifier-free line must not be able to launder itself into a note.
+            assert_eq!(rep.verified, 1, "{rep:?}");
+            assert_eq!(rep.notes.len(), 0, "{rep:?}");
+            assert_eq!(rep.failures.len(), 11, "{rep:?}");
+            // Every pinned line is refused, and the message names the offending
+            // number so the author can delete exactly it.
+            for (i, line_no) in [(0usize, "40"), (1, "39"), (2, "43"), (3, "10"), (4, "12"), (5, "999")] {
+                assert!(
+                    rep.failures[i].contains("never a line") && rep.failures[i].contains(line_no),
+                    "failure {i} must refuse the pin :{line_no} — {rep:?}"
+                );
+            }
+            // The only VERIFIED line is the symbol-only one: `add_attestation
+            // a/consensus.rs` with no `:N`. That is the whole convention in one case.
+            assert!(
+                rep.failures.iter().all(|f| !f.contains("Spec.tla:8")),
+                "the symbol-only citation must verify, not fail — {rep:?}"
+            );
+            // A file-only citation is verified by a CODE mention — a symbol that
+            // only ever appears in a comment does NOT satisfy it, and one that
+            // appears nowhere says so distinctly.
+            assert!(
+                rep.failures[9].contains("Spec.tla:9")
+                    && rep.failures[9].contains("no CODE mention")
+                    && rep.failures[9].contains("only in comments/imports, first src/a/park_lane.rs:1"),
+                "{rep:?}"
+            );
+            assert!(
+                rep.failures[10].contains("Spec.tla:10")
+                    && rep.failures[10].contains("appears anywhere in src/a/park_lane.rs"),
+                "{rep:?}"
+            );
+
+            // A bare ambiguous basename with nothing qualifying it above resolves
+            // to no file at all. The hint that lets `ledger.rs` work downstream is
+            // seeded by the FIRST citation in the module, so editing that one line
+            // breaks every citation below it — the guard must say which file to
+            // name rather than guess one. Hit for real 2026-09-06: dropping the
+            // directory prefix from Conservation.tla's opening citation failed 13
+            // rows at once, all of them correct until that seed went away.
+            let unseeded = "(* add_attestation ledger.rs, nothing qualifies it above *)\n";
+            let rep = check_spec_text("Unseeded.tla", unseeded, &index, &mut src);
+            assert_eq!(rep.verified, 0, "{rep:?}");
+            assert_eq!(rep.failures.len(), 1, "{rep:?}");
+            assert!(
+                rep.failures[0].contains("ambiguous")
+                    && rep.failures[0].contains("directory prefix"),
+                "{rep:?}"
+            );
         }
 
         /// internal design notes §6 table vs the live source.
@@ -976,10 +1148,44 @@ after";
             }
             assert!(
                 rep.failures.is_empty(),
-                "internal design notes §6 refinement table drifted from src/ (fix the table, ±{LINE_DRIFT} lines allowed):\n  {}",
+                "internal design notes §6 refinement table does not match src/ (fix the table; cite file+symbol — check_doc_rows still tolerates a legacy ±{LINE_DRIFT} range, but the shipped table carries no pins):\n  {}",
                 rep.failures.join("\n  ")
             );
             assert!(rep.verified >= 9, "vacuity floor: only {} functions verified", rep.verified);
+        }
+
+        /// D5 ENFORCEMENT: a citation that names a LINE must FAIL, not be
+        /// validated against a tolerance window. Permissive-but-validating is
+        /// what let the pins exist in the first place; after 22 line repairs in
+        /// one day the convention is prohibitive, so the guard must prohibit.
+        #[test]
+        fn spec_citation_carrying_a_line_number_is_rejected() {
+            let root = root();
+            let index = src_index(&root);
+            let mut src = Sources::new(&root);
+            // A pin that is CORRECT under the old window rule — VERIFIED, not
+            // assumed: `CLAIM_TIMEOUT_SECS` really is at cross_zone.rs:29, so the
+            // old code counted this as `verified` and produced zero failures. That
+            // is what makes this test discriminating: it must go from 0 failures
+            // (old, permissive) to exactly 1 (new, prohibitive). A pin that was
+            // merely WRONG would fail under both rules and prove nothing — the
+            // first draft of this fixture made exactly that mistake.
+            let text = "(* CLAIM_TIMEOUT_SECS src/accounting/cross_zone.rs:29 *)\n";
+            let rep = check_spec_text("probe.tla", text, &index, &mut src);
+            assert_eq!(
+                rep.failures.len(),
+                1,
+                "a line-carrying citation must produce exactly one failure; got {:?} (verified={}, notes={:?})",
+                rep.failures,
+                rep.verified,
+                rep.notes
+            );
+            assert!(
+                rep.failures[0].contains("29"),
+                "the failure must name the offending line so the author can delete it: {:?}",
+                rep.failures[0]
+            );
+            assert_eq!(rep.verified, 0, "a rejected citation must not count as verified");
         }
 
         /// `spec/tla/*.tla` refinement-map comments vs the live source.
@@ -991,7 +1197,18 @@ after";
                 Ok(rd) => rd
                     .flatten()
                     .map(|e| e.path())
-                    .filter(|p| p.extension().is_some_and(|x| x == "tla"))
+                    // README.md is INCLUDED deliberately (D5-ENFORCE commit 2). The
+                    // `extension == "tla"` filter meant spec/tla/README.md was checked
+                    // by NOTHING, which is exactly why its 20 pins had gone stale
+                    // unnoticed — `consensus.rs:2829` for correlation_weighted_q, and
+                    // an `aggregator.rs:290` for a proposer_rank living at 306. A guard
+                    // that skips a file by extension is a guard that file does not have.
+                    // check_spec_text is generic over text — it parses per line and does
+                    // not care about TLA+ syntax — so no parser work is needed.
+                    .filter(|p| {
+                        p.extension().is_some_and(|x| x == "tla")
+                            || p.file_name().is_some_and(|f| f == "README.md")
+                    })
                     .collect(),
                 Err(e) if !is_private_tree(&root) => {
                     eprintln!("refinement_map: {} absent ({e}) — spec half skipped", dir.display());
@@ -1005,6 +1222,7 @@ after";
             let mut src = Sources::new(&root);
             let mut failures = Vec::new();
             let mut verified = 0;
+            let mut readme_verified = 0usize;
             for m in &modules {
                 let name = m.file_name().unwrap_or_default().to_string_lossy().to_string();
                 let text = std::fs::read_to_string(m).unwrap_or_else(|e| panic!("read {name}: {e}"));
@@ -1012,15 +1230,152 @@ after";
                 for n in &rep.notes {
                     eprintln!("refinement_map note: {n}");
                 }
+                if name == "README.md" {
+                    readme_verified = rep.verified;
+                }
                 verified += rep.verified;
                 failures.extend(rep.failures);
             }
             assert!(
                 failures.is_empty(),
-                "spec/tla refinement-map citations drifted from src/ (fix the comment, ±{LINE_DRIFT} lines allowed):\n  {}",
+                "spec/tla refinement-map citations do not match src/ (fix the comment; a citation names a FILE and a SYMBOL, never a line):\n  {}",
                 failures.join("\n  ")
             );
-            assert!(verified >= 15, "vacuity floor: only {verified} citations verified");
+            // Print the tally unconditionally. The floor below only reports on
+            // the way down, so without this the one number that says whether a
+            // citation-convention change kept its coverage is invisible unless
+            // it already broke — and "did the flip lose citations?" has to be
+            // answerable before the floor trips, not after.
+            // README.md gets its OWN vacuity floor, not just a share of the
+            // aggregate: it was checked by NOTHING until D5-ENFORCE commit 2 (the
+            // `extension == "tla"` filter skipped it), which is precisely how its
+            // 20 pins went stale unnoticed. A floor only on the 32-module total
+            // would let the README silently fall back to zero verified citations
+            // while the .tla files carried the number — the same invisibility,
+            // re-created one layer up.
+            // DERIVATION: measured 16 verified of 23 citations today (the other 7
+            // are identifier-free lines, correctly NOTES). Floor set to 12 — room
+            // for four citations to be deleted or reworded before it trips, the
+            // same four-to-five-deletion slack the aggregate floor of 45 uses
+            // against its own measured count. Raise it if the README grows; never
+            // lower it to make a red run green.
+            eprintln!("refinement_map: README.md alone verified {readme_verified} (floor 12)");
+            assert!(
+                readme_verified >= 12,
+                "README.md vacuity floor: only {readme_verified} citations verified — the file was \
+                 unchecked entirely before D5-ENFORCE; do not let it drift back to unverified"
+            );
+            eprintln!(
+                "refinement_map: {verified} spec citations verified across {} modules",
+                modules.len()
+            );
+            // Measured 50 on 2026-09-06 after the spec half moved to file+symbol
+            // citations (48 while `.tla` still carried line pins; 45 before
+            // file-only citations became visible at all). Dropping the pins did
+            // not cost coverage: it consolidated six line numbers for one symbol
+            // in one file into the one citation they always were, and naming a
+            // symbol on lines that had only a number added more than that back.
+            // 45 leaves room for five deletions before the floor trips and still
+            // trips if any single module loses all of its citations.
+            assert!(verified >= 45, "vacuity floor: only {verified} citations verified");
+        }
+
+        /// The docs we SHIP publicly, checked exactly like the spec modules (D10).
+        ///
+        /// The D5 arc closed the guard over `spec/tla/*` and internal design notes and stopped
+        /// there. A census of everything else found 9,009 line pins across 309 files
+        /// — and most of those are FOSSILS: in `docs/AUDIT-REPORTS/*` or a dated
+        /// `*-VERDICT-*.md`, a pin records where the code stood on that date, so
+        /// rewriting it would fabricate history. The set that is not a fossil is the
+        /// intersection with `packaging/public-mirror-allowlist.txt` — a rotten line
+        /// number in a doc we PUBLISH is a defect a stranger can hit, and
+        /// `src/network/publish.rs`'s own doc-comment points readers at the first
+        /// file in this list, so the path is public code → public doc → dead
+        /// citation. Every pin sampled there was wrong: `src/record.rs`,
+        /// `token/ledger.rs` and `dht.rs` had not existed for months;
+        /// `is_settled_diverse` pointed at a blank line; `insert_record_inner` was
+        /// 847 lines off and `ParsedEpochSeal` 853.
+        ///
+        /// The list is EXPLICIT, not a glob over `docs/`: membership here is the
+        /// judgement "this doc is read as current truth", which is exactly the
+        /// judgement a glob would erase by sweeping the fossils back in.
+        #[test]
+        fn public_doc_citations_track_source() {
+            let root = root();
+            const DOCS: [&str; 5] = [
+                "docs/MESH-BFT-MERGE-SEMANTICS.md",
+                "docs/MULTI-VALIDATOR-EMITTER-AUTH.md",
+                "docs/REALMS-SELF-ASSEMBLY.md",
+                "spec/proverif/README.md",
+                // Not mirror-allowlisted, so not a public-surface defect — but it
+                // is a LIVE design doc that governs current behaviour, and the
+                // 2026-09-06 D7 audit cited its §3.2 as the invariant the code
+                // violated. Its own pins were 17, 506 and 679 lines out at the
+                // time. "Read as current truth" is the membership test here, not
+                // "published".
+                "internal design notes",
+            ];
+            let index = src_index(&root);
+            let mut src = Sources::new(&root);
+            let mut failures = Vec::new();
+            let mut verified = 0usize;
+            let mut checked = 0usize;
+            let mut per_file: Vec<(&str, usize)> = Vec::new();
+            for rel in DOCS {
+                let text = match std::fs::read_to_string(root.join(rel)) {
+                    Ok(t) => t,
+                    Err(e) if !is_private_tree(&root) => {
+                        eprintln!("public_doc_citations: {rel} absent ({e}) — skipped");
+                        continue;
+                    }
+                    Err(e) => panic!("private tree but {rel} unreadable: {e}"),
+                };
+                checked += 1;
+                let rep = check_spec_text(rel, &text, &index, &mut src);
+                for n in &rep.notes {
+                    eprintln!("public_doc_citations note: {n}");
+                }
+                eprintln!("public_doc_citations: {rel} verified {}", rep.verified);
+                per_file.push((rel, rep.verified));
+                verified += rep.verified;
+                failures.extend(rep.failures);
+            }
+            assert!(
+                failures.is_empty(),
+                "shipped-doc citations do not match src/ (fix the DOC; a citation names a FILE and a SYMBOL, never a line):\n  {}",
+                failures.join("\n  ")
+            );
+            eprintln!("public_doc_citations: {verified} verified across {checked} shipped docs");
+            // TWO floors, because one aggregate number cannot express both failures.
+            //
+            // PER-FILE (>= 1): measured 2026-09-06 as 14 / 5 / 3 / 4. An aggregate
+            // floor alone cannot catch a SMALL file going silently empty — drop all
+            // 3 of REALMS' citations and a 26-measured aggregate still sits well
+            // above any sane threshold, so the file quietly reverts to the
+            // unverifiable prose this guard exists to prevent, and the total covers
+            // for it. Tightening the aggregate until it caught that (24 of 26) would
+            // leave two deletions of slack and trip on ordinary editing. So the
+            // "every file still carries at least one verified citation" property is
+            // asserted directly rather than approximated by a bigger number.
+            //
+            // AGGREGATE (>= 33): from the measured 41 — 14 / 5 / 3 / 4 / 15 on
+            // 2026-09-06 — eight deletions of slack, the same proportional slack
+            // the spec floors keep against their own counts. RAISED from 20 when
+            // internal design notes joined the list: a floor derived from a
+            // 26-citation corpus does not floor a 41-citation one, so leaving it
+            // would have quietly stopped covering the file just added.
+            for (rel, n) in &per_file {
+                assert!(
+                    *n >= 1,
+                    "{rel} has no verified citation left — it has drifted back to unverifiable \
+                     prose, which is exactly the state D10 found these files in"
+                );
+            }
+            assert!(
+                verified >= 33,
+                "shipped-doc vacuity floor: only {verified} citations verified — these files were \
+                 unchecked entirely before D10; do not let them drift back to unverified"
+            );
         }
     }
 }

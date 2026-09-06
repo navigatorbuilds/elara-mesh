@@ -4926,12 +4926,11 @@ pub(crate) async fn metrics_body_tiered(
     let idp_promo_user_to_witness = state
         .identity_promotion_user_to_witness_total
         .load(std::sync::atomic::Ordering::Relaxed);
-    let idp_promo_user_to_anchor = state
-        .identity_promotion_user_to_anchor_total
-        .load(std::sync::atomic::Ordering::Relaxed);
-    let idp_promo_witness_to_anchor = state
-        .identity_promotion_witness_to_anchor_total
-        .load(std::sync::atomic::Ordering::Relaxed);
+    // Storage-owned since W-IDENT-1 item 5: the two sites that can add an anchor
+    // row are both inside StorageEngine, and one of them (bootstrap_store_record)
+    // bypasses the ingest caller entirely, so a NodeState copy could not see it.
+    let (idp_promo_user_to_anchor, idp_promo_witness_to_anchor, idp_anchor_added) =
+        state.rocks.identity_promotion_counters();
     let idp_witness_purged = state
         .identity_witness_purged_total
         .load(std::sync::atomic::Ordering::Relaxed);
@@ -5451,27 +5450,30 @@ pub(crate) async fn metrics_body_tiered(
          # HELP elara_identity_user_evicted_total Cumulative count of USER-tier identity entries dropped by the LRU eviction loop. Climbs steadily once CF_IDENTITIES_USER hits identity_user_cache_max; plateaus when inflow ≈ eviction.\n\
          # TYPE elara_identity_user_evicted_total counter\n\
          elara_identity_user_evicted_total {identity_user_evicted}\n\
-         # HELP elara_identity_tier_anchor_count Estimated entry count in CF_IDENTITIES_ANCHOR (VRF-registered anchor PKs, never evicted). RocksDB estimate-num-keys, O(1) per scrape; replaces O(N) full-CF scan that was 4× per /metrics call.\n\
+         # HELP elara_identity_tier_anchor_count Estimated entry count in CF_IDENTITIES_ANCHOR (VRF-registered anchor PKs, never evicted). RocksDB estimate-num-keys, O(1) per scrape; replaces an O(N) full-CF scan that ran 4x per scrape. NEVER CONCLUDE TIER DIVERGENCE FROM THIS SERIES (D7 verdict 2026-09-06): it is an estimate, and five consecutive samples of the user-tier gauge on one node with ZERO evictions throughout read 23, 89, 17, 25, 31 — measured, not hypothesised. A gap between this and elara_vrf_registry_identities is not evidence of a second anchor. The exact counterpart is banned from the scrape path by its own doc, so reading this gauge harder is not a substitute for the bounded exact surface that does not exist yet.\n\
          # TYPE elara_identity_tier_anchor_count gauge\n\
          elara_identity_tier_anchor_count {idp_anchor_count}\n\
          # HELP elara_identity_tier_witness_count Estimated entry count in CF_IDENTITIES_WITNESS (zone-witness PKs, evicted on zone unsubscribe). RocksDB estimate-num-keys, O(1) per scrape.\n\
          # TYPE elara_identity_tier_witness_count gauge\n\
          elara_identity_tier_witness_count {idp_witness_count}\n\
-         # HELP elara_identity_tier_user_count Estimated entry count in CF_IDENTITIES_USER (catch-all, LRU-bounded by identity_user_cache_max). RocksDB estimate-num-keys, O(1) per scrape; eviction loop still uses exact count_cf to enforce cap boundary.\n\
+         # HELP elara_identity_tier_user_count Estimated entry count in CF_IDENTITIES_USER (catch-all, LRU-bounded by identity_user_cache_max). RocksDB estimate-num-keys, O(1) per scrape. CORRECTED 2026-09-06: this used to end \"eviction loop still uses exact count_cf to enforce cap boundary\", which stopped being true when W-IDENT-1 item 1 removed that exact O(all identities) count from the 60-second evict tick — the tick now takes the same estimate this gauge does. Same divergence caveat as the anchor series above; the estimate also counts un-flushed overwrites as separate entries, so it reads high after a write burst and settles at the next flush.\n\
          # TYPE elara_identity_tier_user_count gauge\n\
          elara_identity_tier_user_count {idp_user_count}\n\
          # HELP elara_identity_tier_legacy_count Estimated entry count in legacy CF_IDENTITIES (pre-partition data, drained by future migration). RocksDB estimate-num-keys, O(1) per scrape.\n\
          # TYPE elara_identity_tier_legacy_count gauge\n\
          elara_identity_tier_legacy_count {idp_legacy_count}\n\
-         # HELP elara_identity_promotion_user_to_witness_total Count of identities that physically migrated USER→WITNESS via class promotion (write to CF_IDENTITIES_WITNESS + tombstone of USER+TS+REV in one atomic batch). Bumps in process_deferred_attestations when a witness write finds a pre-existing user-tier entry.\n\
+         # HELP elara_identity_promotion_user_to_witness_total Count of identities that physically migrated USER→WITNESS via class promotion (write to CF_IDENTITIES_WITNESS + tombstone of USER+TS+REV in one atomic batch). NEAR-DEAD IN PRACTICE, corrected 2026-09-06 (W-IDENT-1 item 5): the bump sits behind a guard that returns true for ANY tier, so the USER arm is reachable only through a TOCTOU race. Expect 0 on a healthy node and do NOT read it as a promotion rate. The earlier text here presented it as the correctly-wired model for its ANCHOR siblings; it was not.\n\
          # TYPE elara_identity_promotion_user_to_witness_total counter\n\
          elara_identity_promotion_user_to_witness_total {idp_promo_user_to_witness}\n\
-         # HELP elara_identity_promotion_user_to_anchor_total NOT WIRED — ALWAYS 0. Intended: identities that physically migrated USER→ANCHOR. Verified 2026-09-06: the field is declared and exported but has NO writer anywhere in src/ or crates/, production OR test, so this series is structurally incapable of moving. Do NOT read 0 as no-promotions-happened; it means not-measured. The previous text here said it was triggered by tests, which is also false now — no test writes it either. Its sibling elara_identity_promotion_user_to_witness_total IS wired (state_core.rs, process_deferred_attestations) and is the one to trust. Wiring the two ANCHOR counters is a design question on an authority-granting path, filed rather than patched once the genesis-anchor and VRF flows migrate to store_public_key_anchor.\n\
+         # HELP elara_identity_promotion_user_to_anchor_total Identities that physically migrated USER→ANCHOR: an anchor-tier write that found and tombstoned a pre-existing user-tier entry (USER+TS+REV) in the same atomic batch. WIRED 2026-09-06 (W-IDENT-1 item 5) — a value of 0 on a node booted before that date means not-measured, and this marker is permanent, not a transitional note. Counted at both sites that can add an anchor row: live ingest and the bootstrap/gossip-pull path, so a resynced node reports its learned promotions rather than a misleading zero. Never seeded from history — these are since-boot atomics, so a restart legitimately returns them to 0.\n\
          # TYPE elara_identity_promotion_user_to_anchor_total counter\n\
          elara_identity_promotion_user_to_anchor_total {idp_promo_user_to_anchor}\n\
-         # HELP elara_identity_promotion_witness_to_anchor_total NOT WIRED — ALWAYS 0. Intended: identities that physically migrated WITNESS→ANCHOR (write to CF_IDENTITIES_ANCHOR + tombstone of WITNESS in one atomic batch). Verified 2026-09-06: declared and exported, NO writer anywhere in src/ or crates/, production or test. Do NOT read 0 as no-promotions-happened; it means not-measured. See the user_to_anchor HELP above for the same disclosure.\n\
+         # HELP elara_identity_promotion_witness_to_anchor_total Identities that physically migrated WITNESS→ANCHOR (anchor write + tombstone of the witness row in one atomic batch). WIRED 2026-09-06 (W-IDENT-1 item 5); same permanent marker, same both-sites counting and no-seeding rule as the user_to_anchor series above.\n\
          # TYPE elara_identity_promotion_witness_to_anchor_total counter\n\
          elara_identity_promotion_witness_to_anchor_total {idp_promo_witness_to_anchor}\n\
+         # HELP elara_identity_anchor_added_total Anchor-tier rows durably added, promotions and brand-new anchors alike — the DENOMINATOR the two promotion counters are read against. Invariant: user_to_anchor + witness_to_anchor <= anchor_added_total; the difference is anchors that were new rather than promoted. Bumped only after the batch carrying the row is written, so a failed write cannot inflate it. WIRED 2026-09-06 (W-IDENT-1 item 5).\n\
+         # TYPE elara_identity_anchor_added_total counter\n\
+         elara_identity_anchor_added_total {idp_anchor_added}\n\
          # HELP elara_identity_witness_purged_total Cumulative count of witness-tier PKs dropped from CF_IDENTITIES_WITNESS because the unsubscribed zone was their last claim. Climbs when an operator unsubscribes a zone whose witness set was disjoint from every other zone they serve. Anchor-tier PKs are never touched.\n\
          # TYPE elara_identity_witness_purged_total counter\n\
          elara_identity_witness_purged_total {idp_witness_purged}\n\

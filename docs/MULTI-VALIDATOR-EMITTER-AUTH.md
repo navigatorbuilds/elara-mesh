@@ -80,7 +80,8 @@ no-dead-code seam. Promoting it to a typed set is the first S3 step (§4).
   authority never changes mid-chain (see §5 epoch-scoping caveat).
 
 Precedent for the S3 set form (not a new abstraction): `trust_set = trusted_snapshot_signers ∪
-{genesis}` with `.contains()` at `sync.rs:756/919` → `snapshot.rs:544`, and
+{genesis}` with `.contains()` — `trust_set` is built in `src/network/sync.rs` and enforced by
+`enforce_snapshot_signer_trust` in `src/network/snapshot.rs` — and
 `genesis_validators: Vec<…>` — "deterministic membership over a genesis-pinned trusted set"
 already ships.
 
@@ -184,5 +185,6 @@ user-submitted. So multi-validator's hard problem is *emission*, not *authorizat
 **Review provenance:** independent adversarial design-review panel (2 Sonnet + 1 Opus), Opus-judged,
 2026-06-17. Ground truth verified against source: Gate A ≈ 23 comparison sites
 (`validate.rs` + `ledger.rs`), Gate B emission sites (`slashing.rs`×4, `reward.rs`×2,
-`health.rs`), `trust_set` precedent (`sync.rs:756/919`). Supersedes the one-line "still open"
+`health.rs`).
+The `trust_set` precedent is `trust_set` in `src/network/sync.rs`. Supersedes the one-line "still open"
 note in the apply-path float-determinism sweep.
