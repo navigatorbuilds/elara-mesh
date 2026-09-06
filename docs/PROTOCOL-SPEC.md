@@ -329,6 +329,51 @@ order**, so two conforming encoders produce identical bytes for identical
 content. Depth and count limits are in §4.5; a decoder MUST enforce them before
 allocating.
 
+#### 4.3.3 Decoder tolerance and cross-field rules (NORMATIVE)
+
+Every version-gated block above is guarded by a **remaining-bytes test as well
+as a version test** (`from_bytes` in `crates/elara-record/src/record.rs`). A
+frame that ends at any field boundary from #11 onward decodes *successfully*,
+with the absent tail taking defaults:
+
+| Frame ends before | Result |
+|-------------------|--------|
+| `itc_stamp` / `zone_refs` (11–12) | `None` / empty |
+| `creator_sphincs_pk` (13) | `None` |
+| `sig_algorithm` / `sphincs_algorithm` (14–15) | Dilithium3 / `None` |
+| `zone` (16–17) | `None` |
+| `nonce` (18) | `0` |
+| `network_id` (19) | `""` |
+
+Two of those defaults are fail-closed and the rest are not, and the difference
+is the reason for the rules below:
+
+- `nonce` and `network_id` **are** in the §4.4 preimage. A stripped field
+  changes the recomputed preimage, so the signature fails. Truncation there is
+  caught by verification.
+- Fields 11–17 are **not** in the preimage. Truncating or rewriting them is
+  invisible to the signature, so the following checks are enforced at *decode*
+  or not at all.
+
+A conforming decoder MUST reject:
+
+1. A `sig_algorithm` byte other than the ML-DSA-65 identifier, and a
+   `sphincs_algorithm` byte other than `0` or the SLH-DSA-SHA2-192f identifier.
+2. Any disagreement among the three SPHINCS+ fields: an algorithm byte declared
+   without both a signature and a public key, or a signature present with a `0`
+   algorithm byte. All three travel together or none do.
+3. A `network_id` that is non-ASCII or longer than 64 bytes — rejected here, not
+   deferred to the signature.
+4. A `zone_refs` count above 256, or an element that is not exactly 24 bytes.
+
+**One divergence risk, stated because from-text implementation cannot guess
+it.** A `zone_present` flag of `1` followed by a *malformed* zone body yields
+`zone = None` in the reference decoder and consumes nothing, so the bytes that
+follow are then read as `nonce`. A decoder that treats a malformed body as an
+error is strictly more conservative and will reject frames the reference
+accepts. This revision does not rule which is correct; treat a well-formed zone
+body as required and do not build on the tolerant behaviour.
+
 ### 4.4 `signable_bytes` — the signature preimage (NORMATIVE)
 
 The bytes signed by **both** signature schemes are **not** the wire serialization.
@@ -386,7 +431,6 @@ The record's content-address (`record_hash`) is `SHA3-256(signable_bytes())`.
 | Max zone_refs | 256 | `crates/elara-record/src/record.rs` |
 | Max metadata entries | 64 admitted at ingest / 256 wire-decode bound | `src/network/ingest.rs` (64) · `crates/elara-record/src/wire.rs` (256) |
 | Max metadata nesting depth | 8 | `crates/elara-record/src/wire.rs` |
-| Max metadata JSON (v1–v3) | 102,400 (100 KiB) | `crates/elara-record/src/wire.rs` |
 
 A conforming decoder MUST enforce these *before* allocating from a length prefix
 (length-gate-before-alloc), so a malformed frame cannot drive an unbounded
@@ -882,6 +926,15 @@ the wrong-anchor twin.
 | `src/network/zone.rs`, `consensus.rs` | zone routing, `zone_count` authority |
 | `crates/elara-pq-transport` | ELPQ frame + hybrid handshake |
 
+## Appendix C — References
+
+In-repository (also in the public mirror): `docs/ELARA-VERIFY.md`,
+`docs/api.md`, `docs/PROTOCOL-ECONOMICS.md`, `docs/AGENT-DELEGATION.md`,
+`docs/MESH-BFT-MERGE-SEMANTICS.md`.
+
+Standards: FIPS 202 (SHA3), FIPS 204 (ML-DSA), FIPS 205 (SLH-DSA), RFC 2119 /
+RFC 8174 (conformance keywords), RFC 9562 (UUID v7).
+
 ## Appendix D — Independent implementations
 
 An implementation written from this document *alone* is the only real test of
@@ -897,15 +950,9 @@ arrive.
   **21 of 25 vectors byte-agreed**, including both ML-DSA-65 vectors verified
   against a third FIPS 204 implementation, and the v7 tagged seal fold deduced
   from the A.4.1 scope note alone. The 4 remaining vectors were the ones needing
-  the wire layout, which §4.3 then deferred to code — that gap is closed by
-  §4.3.1, and the §6.4 sibling-order ambiguity they isolated (one reading out of
-  96 enumerated) is fixed in that section. Both findings were theirs.
-
-## Appendix C — References
-
-In-repository (also in the public mirror): `docs/ELARA-VERIFY.md`,
-`docs/api.md`, `docs/PROTOCOL-ECONOMICS.md`, `docs/AGENT-DELEGATION.md`,
-`docs/MESH-BFT-MERGE-SEMANTICS.md`.
-
-Standards: FIPS 202 (SHA3), FIPS 204 (ML-DSA), FIPS 205 (SLH-DSA), RFC 2119 /
-RFC 8174 (conformance keywords), RFC 9562 (UUID v7).
+  a byte layout this document deferred to code. Two of them — `record-hash` and
+  `record-hash-v6` — needed the record wire layout, now inlined at §4.3.1–§4.3.3.
+  The other two — `seal-anchor-sig` and its reject twin — need the seal byte
+  layout, which §7 still defers, so they stay outside what this text supports.
+  The §6.4 sibling-order ambiguity they isolated (one reading out of 96
+  enumerated) is fixed in that section. Both findings were theirs.

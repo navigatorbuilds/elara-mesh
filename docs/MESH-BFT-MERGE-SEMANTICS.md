@@ -46,10 +46,18 @@ that unsound on three code-verified facts:
 > repeal:** v≤5 preimages are byte-identical to before (nothing prepended, pinned by
 > the frozen KATs), and a v6 record from an *unconfigured* emitter carries an empty
 > `network_id` — the tag alone separates domains there. So F1 still describes v≤5
-> records exactly, and the A8 analysis built on it is *unchanged for them*. Whether
-> the shipped v6 binding fully discharges A8 — or only for the v6 subset, leaving the
-> operational argument load-bearing for v≤5 — is a claims question filed for ruling,
-> not settled here.
+> records exactly, and the A8 analysis built on it is *unchanged for them*.
+>
+> **RULED the same day — D10-A8, SPLIT.** This block used to end "is a claims question
+> filed for ruling, not settled here", which stopped being true within hours; the
+> answer is in this file, in the A8 row of the assumptions table. *Binding:*
+> DISCHARGED in protocol — `CURRENT_SIGNING_VERSION` is past the flag day, so every
+> record this fleet emits signs its `network_id`, and because a seal is itself a
+> seal-class record the "records bound, seals not" asymmetry F3 asserts does not
+> survive it either (see the F3 correction below). *Ingest floor:* OPEN —
+> `WIRE_VERSION_MIN` still admits v4-v5, whose preimages carry no binding, so the
+> operational no-key-reuse rule is load-bearing for exactly that window and nothing
+> wider. Raising the floor is fork-sensitive and stays its own gated item.
 
 **F1 — records carry no realm/network binding in their signed bytes.**
 `ValidationRecord::signable_bytes` (`signable_bytes` in `crates/elara-record/src/record.rs`)
