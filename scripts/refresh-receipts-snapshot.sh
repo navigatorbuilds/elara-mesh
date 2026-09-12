@@ -42,6 +42,11 @@
 #   RECEIPTS_BACKFILL_MAX     per-run cap on backfill mints (default 400) —
 #                             a backstop; steady-state backfill work is only
 #                             acts the newest-N harvest missed between runs.
+#   RECEIPTS_GAPFILL_MAX      per-run cap on gap-fill rows (default 200): acts
+#                             the node's feed lists that NO snapshot ever
+#                             carried (the newest-LIMIT window skipped them —
+#                             measured 2026-09-12: 142 acts from Jul-19 on).
+#                             Oldest first, so the heal is monotone across runs.
 
 set -u
 
@@ -51,9 +56,19 @@ set -u
 # A caller-set ELARA_MAINTAINER_MANDATE still wins (only fills unset vars).
 [[ -f "$HOME/.elara/receipts.env" ]] && . "$HOME/.elara/receipts.env"
 
+# cargo (2026-09-12): the pathspec commit below runs the repo's pre-commit hook,
+# whose Guard 6 calls `cargo` from the hook's own shell. cron's PATH is
+# /usr/bin:/bin — no ~/.cargo/bin — so under cron that guard reported "a doc
+# cites a symbol that no longer resolves" in 3-32 s, 3/3, at 04:00Z and 10:00Z,
+# while the identical commit passed by hand. Hook v12 prepends this itself; the
+# line here keeps the commit path independent of which hook version a machine
+# has installed. Idempotent.
+export PATH="$HOME/.cargo/bin:$PATH"
+
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 NODE="${ELARA_NODE_DATAPLANE:-http://127.0.0.1:9472}"
 LIMIT="${RECEIPTS_LIMIT:-50}"
+GAPFILL_MAX="${RECEIPTS_GAPFILL_MAX:-200}"
 OUT="${RECEIPTS_OUT:-$REPO_DIR/site/receipts.json}"
 MANDATE="${ELARA_MAINTAINER_MANDATE:-}"
 VERIFY_N="${RECEIPTS_VERIFY_N:-8}"
@@ -101,7 +116,7 @@ trap 'rm -f "$TMP"' EXIT
 # NOTE: acts page goes in via env (NOT stdin — the heredoc IS python's stdin).
 if ! ACTS_JSON="$ACTS_JSON" NODE="$NODE" MANDATE="$MANDATE" BUILD_MANDATE="${ELARA_BUILD_MANDATE:-}" TMP_OUT="$TMP" \
     VERIFY_N="$VERIFY_N" VERIFY_DIR="$VERIFY_DIR" DECODER="$DECODER" \
-    VERIFY_BIN="$VERIFY_BIN" ANCHOR_PK="$ANCHOR_PK" LIMIT="$LIMIT" \
+    VERIFY_BIN="$VERIFY_BIN" ANCHOR_PK="$ANCHOR_PK" LIMIT="$LIMIT" GAPFILL_MAX="$GAPFILL_MAX" \
     OUT_PATH="$OUT" \
     python3 <<'PYEOF'
 import json, os, re, subprocess, sys, datetime, tempfile
@@ -226,30 +241,69 @@ from collections import deque
 limit = max(1, int(os.environ.get("LIMIT") or "50"))
 MAX_PAGES = 10000  # backstop against a pathological/looping next_from
 
+# Prior snapshot ids, read EARLY (the archive merge below re-reads the file for
+# the rows themselves). The walk uses them for two things the newest-LIMIT
+# window cannot tell (2026-09-12):
+#   gap-fill — an act the node lists that NO snapshot ever carried. The window
+#     keeps the newest LIMIT and the merge keeps prior ∪ window, so an act that
+#     was never inside a window (a dark week, a broken cron, a burst past LIMIT
+#     between runs) stayed out forever: 142 acts from Jul-19 on, measured.
+#   node_seen — which prior rows the node's feed STILL lists, so `archived`
+#     can mean what the page says it means (see the merge).
+# Memory: O(prior rows) for the sets, O(GAPFILL_MAX) for the gap items —
+# never O(node total).
+prior_ids = set()
+_prior_path = os.environ.get("OUT_PATH") or ""
+if _prior_path and os.path.isfile(_prior_path):
+    try:
+        with open(_prior_path) as _f:
+            prior_ids = {a.get("record_id") for a in (json.load(_f).get("acts") or [])
+                         if a.get("record_id")}
+    except Exception:
+        prior_ids = set()  # the archive merge refuses to overwrite an unreadable prior
+GAPFILL_MAX = max(0, int(os.environ.get("GAPFILL_MAX") or "200"))
+gap_items = []     # feed items (ascending = oldest first) absent from every prior snapshot
+node_seen = set()  # prior ids the node's feed still lists (subset of prior_ids)
+
 def walk_mandate(mid, first_page):
-    """Walk one mandate's acts feed to its tail; return (newest-limit items, complete)."""
+    """Walk one mandate's acts feed to its tail; return (newest-limit items, complete, walk_ok).
+
+    `complete` carries the node's authoritative_complete across pages; `walk_ok`
+    says the walk reached the tail (a mid-walk fetch failure clears it, and the
+    merge then keeps prior `archived` values rather than inferring pruning from
+    an absence nobody observed)."""
     w = deque(maxlen=limit)
     complete = True
+    walk_ok = True
     page = first_page
     pages_walked = 0
     while True:
         for it in page.get("acts") or []:
             w.append(it)
+            rid = (it.get("record_id") or it.get("id")) if isinstance(it, dict) else it
+            if rid in prior_ids:
+                node_seen.add(rid)
+            elif rid and len(gap_items) < GAPFILL_MAX:
+                gap_items.append(it)
         complete = complete and bool(page.get("authoritative_complete", False))
         nxt = page.get("next_from")
         pages_walked += 1
-        if not nxt or pages_walked >= MAX_PAGES:
+        if not nxt:
+            break
+        if pages_walked >= MAX_PAGES:
+            walk_ok = False
             break
         nextpage = fetch(f"{node}/mandate/{mid}/acts?from={nxt}&limit={limit}")
         if not isinstance(nextpage, dict) or nextpage.get("error"):
             # Mid-walk fetch failure: stop with the newest-seen window rather than
             # write a torn snapshot. Mark not-authoritative so the page says so.
             complete = False
+            walk_ok = False
             break
         page = nextpage
-    return list(w), complete
+    return list(w), complete, walk_ok
 
-maint_items, auth_complete = walk_mandate(mandate, acts_page)
+maint_items, auth_complete, walks_ok = walk_mandate(mandate, acts_page)
 
 # T94: union the build mandate's chain (commit/deploy bookkeeping). Fail-CLOSED on a
 # missing first page — a feed written without the build chain silently drops every
@@ -262,13 +316,29 @@ if build_mandate:
         print(f"receipts: FAILED to fetch build-mandate acts — refusing partial feed",
               file=sys.stderr)
         sys.exit(1)
-    build_items, bcomplete = walk_mandate(build_mandate, bpage)
+    build_items, bcomplete, bwalk_ok = walk_mandate(build_mandate, bpage)
     auth_complete = auth_complete and bcomplete
+    walks_ok = walks_ok and bwalk_ok
 
 # Merge both chains, keep the newest `limit` overall, emit newest-first for the page.
 merged = maint_items + build_items
 merged.sort(key=lambda it: (it.get("act_timestamp_ms") or 0) if isinstance(it, dict) else 0)
 windowed_items = merged[-limit:][::-1]
+
+# ── Gap-fill (2026-09-12): rows for acts no snapshot ever carried ───────────
+# Oldest first (the walk is ascending), bounded by GAPFILL_MAX per run, so a
+# large hole heals monotonically across runs. These rows are enriched exactly
+# like window rows and then sort into place by act time; they are NOT archived
+# (the node lists them — that is how they were found). The harvest below still
+# picks its newest-N by timestamp, so old gap rows never displace fresh mints;
+# the bounded backfill pass gives them envelope pairs like any other row.
+window_ids = {(it.get("record_id") or it.get("id")) if isinstance(it, dict) else it
+              for it in windowed_items}
+gap_fill = [it for it in gap_items
+            if ((it.get("record_id") or it.get("id")) if isinstance(it, dict) else it) not in window_ids]
+if gap_fill:
+    print(f"receipts: gap-fill {len(gap_fill)} act(s) no snapshot carried "
+          f"(oldest first; per-run cap {GAPFILL_MAX})", file=sys.stderr)
 
 entries = []
 wires = {}      # rid -> record wire bytes (for the harvest step)
@@ -287,7 +357,7 @@ META_PASSTHROUGH_DENY = {
     "timestamp", "created_at", "epoch", "zone", "content_hash",
     "mandate_status", "browser_verify", "archived", "seal_id",
 }
-for item in windowed_items:
+for item in windowed_items + gap_fill:
     rid = item if isinstance(item, str) else (item.get("record_id") or item.get("id") or "")
     if not rid:
         continue
@@ -463,7 +533,18 @@ for a in prior_acts:
     rid = a.get("record_id")
     if not rid or rid in live_ids:
         continue
-    a["archived"] = True
+    # archived (2026-09-12 correction): TRUE only when the node's feed no longer
+    # lists the act — which is what the page text claims ("aged out of the hot
+    # tier"). It used to mean "outside the newest-LIMIT window", which labelled
+    # 695 of 745 rows as pruned while the node still listed every one of them
+    # (two-mandate walk, 2026-09-12; only 50 had really aged out).
+    # On an incomplete walk the prior value is kept: an absence nobody observed
+    # is not evidence of pruning. (feed-publish-gates.sh allows this field to
+    # move in either direction; nothing else on a published row changes here.)
+    if walks_ok and prior_ids:
+        a["archived"] = rid not in node_seen
+    elif "archived" not in a:
+        a["archived"] = True
     if a.get("browser_verify"):
         # The flag survives only while its envelope pair is still on disk.
         if (verify_dir
@@ -473,7 +554,7 @@ for a in prior_acts:
         else:
             a.pop("browser_verify", None)
     entries.append(a)
-    archived_n += 1
+archived_n = sum(1 for e in entries if e.get("archived"))
 
 def _sort_ms(e):
     v = e.get("act_timestamp_ms") or 0
@@ -736,24 +817,36 @@ PY
 )"
     subject="chore(site): receipts snapshot churn ($(date +%H:%M) refresh — ${pairs} envelope pair(s), ${acts} acts)"
 
-    # RETRY (2026-09-07): this commit's pre-commit hook opens with
-    # `cargo test --lib --no-run`, so it BLOCKS whenever anything else holds the
-    # cargo target-dir lock — an agent's gate, a manual build — and then the 120s
-    # timeout fires. Measured live at 04:00:54Z that day: a concurrent
-    # clippy+lib gate stranded 17 site/ files dirty, which is exactly the
-    # deploy-blocking state D13 was closed to prevent. The failure is fail-safe
-    # (nothing lands half-done), so the fix is patience, not force — wait the
-    # lock out. Three attempts spans ~4 min against a 6-hourly cadence, and a
-    # permanent failure still ends in the same honest dirty-tree warning below.
-    local _commit_ok=1 _attempt
+    # RETRY (2026-09-07): the pre-commit hook opens with `cargo test --lib
+    # --no-run`, so a commit BLOCKS while anything else holds the cargo
+    # target-dir lock (an agent's gate, a manual build) and the timeout fires;
+    # measured live at 04:00:54Z that day, when a concurrent clippy+lib gate
+    # stranded 17 site/ files dirty. The failure is fail-safe (nothing lands
+    # half-done), so the fix is patience — three attempts span ~4 min against a
+    # 6-hourly cadence; a permanent failure still ends in the honest dirty-tree
+    # warning below.
+    #
+    # CORRECTED (2026-09-12): the lock was NOT what failed the 04:00Z and 10:00Z
+    # runs that day — those attempts died in 3-32 s, 3/3, far short of any
+    # timeout. The hook's Guard 6 could not find `cargo` on cron's PATH (see the
+    # export near the top) and reported it as a doc-citation failure. The old
+    # log line blamed the lock unconditionally, and the hook's stderr went to
+    # /dev/null with the cron's, so the log could not say otherwise. Now the
+    # commit's output is captured and its verdict lines ride the log entry, and
+    # the timeout allows a cold rebuild (300 s) instead of killing it mid-hook.
+    local _commit_ok=1 _attempt _commit_out _commit_rc _commit_why
     for _attempt in 1 2 3; do
-        if timeout 120 git commit -q -m "$subject" -m "Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_0145dWMAa8b5TAZrE2mrUfbV" -- "${paths[@]}"; then
+        _commit_out="$(timeout 300 git commit -q -m "$subject" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LERxPpYadc9zzDgZnuL4fy" -- "${paths[@]}" 2>&1)" && _commit_rc=0 || _commit_rc=$?
+        if (( _commit_rc == 0 )); then
             _commit_ok=0
             break
         fi
+        _commit_why="$(printf '%s\n' "$_commit_out" | grep -E 'FAILED|error|fatal|not found|timed out' | tail -n 3 | cut -c1-200 | tr '\n' '|')"
+        [ -n "$_commit_why" ] || _commit_why="$(printf '%s\n' "$_commit_out" | tail -n 2 | cut -c1-200 | tr '\n' '|')"
+        rlog "receipts: commit attempt ${_attempt}/3 failed rc=${_commit_rc} (124 = timeout, usually the cargo target-dir lock; 4 = setup, e.g. cargo not on PATH; 9 = doc-citation guard) — ${_commit_why:-no output}"
         if (( _attempt < 3 )); then
-            rlog "receipts: commit attempt ${_attempt}/3 failed (cargo target-dir lock is the usual cause) — retrying in 120s"
+            rlog "receipts: retrying in 120s"
             sleep 120
         fi
     done
