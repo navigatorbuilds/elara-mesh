@@ -116,7 +116,10 @@ pub struct LedgerState {
     /// Total currently staked across all accounts.
     pub total_staked: u64,
     /// Conservation Pool balance (base units).
-    /// Hard cap: CONSERVATION_POOL_MAX_FRACTION * total_supply.
+    /// Cap: CONSERVATION_POOL_MAX_FRACTION * total_supply — enforced on the
+    /// discretionary credit paths only. Burn and the demurrage batch credit
+    /// this field uncapped; see `pool_cap`'s note (LEDGER-CONS-02) for why that
+    /// is probably correct and what is still open.
     pub conservation_pool: u64,
     /// Pool disbursement tracking: (month_start_timestamp, amount_disbursed_this_month).
     /// Hard limit: max 1% of pool balance per 30-day window (economics §2.4).
@@ -402,10 +405,28 @@ impl LedgerState {
         count
     }
 
-    /// Conservation Pool hard cap based on current total supply.
-    /// Integer 10% (1/10): `pool_headroom` gates confiscation/slash/reclaim/burn
-    /// amounts in `apply_op` on every node, so the cap must be node-identical
-    /// (the old `total_supply as f64 * 0.10` forked once supply > 2^53).
+    /// Conservation Pool cap based on current total supply.
+    /// Integer 10% (1/10): `pool_headroom` gates confiscation / slash /
+    /// dormancy-reclaim / pool-fund credits in `apply_op` on every node, so the
+    /// cap must be node-identical (the old `total_supply as f64 * 0.10` forked
+    /// once supply > 2^53).
+    ///
+    /// **It does NOT gate Burn or the demurrage batch** — both credit the pool
+    /// with a bare `+=`. Corrected 2026-09-07 (audit R2/ledger-conservation/
+    /// LEDGER-CONS-02): this rustdoc named `burn` among the gated amounts and
+    /// that has never been true of the code.
+    ///
+    /// ⚠ **Which side is the defect is an OPEN decision, deliberately not made
+    /// here.** Burn is a *redirect*, not a credit — `account.available -= amount`
+    /// immediately precedes the pool `+=`, so capping it would break this
+    /// ledger's own conservation invariant (`sum(available) + total_staked +
+    /// pending_xzone_locked + conservation_pool = total_supply`): the capped
+    /// remainder has nowhere to go that keeps supply conserved. On that reading
+    /// the cap is hard for *discretionary* credits and deliberately inapplicable
+    /// to conservation-preserving redirects, and only this doc was wrong. If
+    /// instead the cap is meant to be unconditional, the repair is in code
+    /// (`.min(pool_headroom())` at both sites plus overflow handling) and it
+    /// changes token accounting — not a call to make from a doc comment.
     pub fn pool_cap(&self) -> u64 {
         ((self.total_supply as u128) * CONSERVATION_POOL_MAX_FRACTION_NUM
             / CONSERVATION_POOL_MAX_FRACTION_DEN) as u64
@@ -6682,14 +6703,41 @@ mod tests {
     // ── Conservation Fuzz ─────────────────────────────────────────────────
 
     /// Verify conservation invariant: all_balances + all_staked + conservation_pool + pending_xzone = total_supply.
+    /// LEDGER-CONS-01 (audit R2/ledger-conservation, 2026-09-07): this used to
+    /// sum only the four buckets named in `LedgerState`'s invariant rustdoc —
+    /// and `available` also drains into two the invariant never mentioned.
+    /// `WitnessRegister` moves it to the per-account `witness_bonded`, and
+    /// `Predict` moves it into `predictions`; neither has a global accumulator,
+    /// so both are summed here from the state that already exists (no new
+    /// fields, no serialization change).
+    ///
+    /// The prediction term filters on `outcome.is_none()` deliberately: entries
+    /// are NOT removed on settlement, they keep their row with `outcome:
+    /// Some(..)` after the funds are paid out — the same discriminator the two
+    /// settlement loops use. Summing unconditionally would count settled
+    /// predictions as still locked and report a violation on a correct ledger.
     fn assert_conservation(ledger: &LedgerState, label: &str) {
         let total_balances: u64 = ledger.accounts.values().map(|a| a.available).sum();
         let total_staked: u64 = ledger.accounts.values().map(|a| a.staked).sum();
-        let accounted = total_balances + total_staked + ledger.conservation_pool + ledger.pending_xzone_locked;
+        let total_witness_bonded: u64 =
+            ledger.accounts.values().map(|a| a.witness_bonded).sum();
+        let total_predict_locked: u64 = ledger
+            .predictions
+            .values()
+            .filter(|p| p.outcome.is_none())
+            .map(|p| p.amount)
+            .sum();
+        let accounted = total_balances
+            + total_staked
+            + ledger.conservation_pool
+            + ledger.pending_xzone_locked
+            + total_witness_bonded
+            + total_predict_locked;
         assert_eq!(
             accounted, ledger.total_supply,
             "CONSERVATION VIOLATION at {label}: balances={total_balances} staked={total_staked} \
-             pool={} pending_xzone={} sum={accounted} != supply={}",
+             pool={} pending_xzone={} witness_bonded={total_witness_bonded} \
+             predict_locked={total_predict_locked} sum={accounted} != supply={}",
             ledger.conservation_pool, ledger.pending_xzone_locked, ledger.total_supply
         );
     }
@@ -6753,7 +6801,11 @@ mod tests {
         // 1000 random operations
         for round in 0..1000 {
             op_id += 1;
-            let op_type = rng.range(7); // 0-6: transfer, stake, unstake, reward, slash, burn, pool_fund
+            // LEDGER-CONS-01: arm 7 (witness_register) added 2026-09-07. Without it the
+            // witness_bonded term in assert_conservation is permanently zero, i.e. a
+            // check that cannot fire — which is how this gap survived: the invariant,
+            // the assertion and the op set all shared the same four-bucket blind spot.
+            let op_type = rng.range(8); // 0-7: transfer, stake, unstake, reward, slash, burn, pool_fund, witness_register
             let sender_idx = 1 + rng.range(4) as usize; // users 1-4
             let id = format!("fuzz-{op_id}");
 
@@ -6842,6 +6894,14 @@ mod tests {
                         ops.push((rec, parsed));
                     }
                 }
+                7 => {
+                    // Witness register: bonds `available` into `witness_bonded`.
+                    let meta = types::witness_register_metadata("0", types::WITNESS_BOND_MIN);
+                    let rec = make_record_with_pk(&id, &pks[sender_idx], ts, meta);
+                    if let Ok(Some(parsed)) = extract_ledger_op(&rec) {
+                        ops.push((rec, parsed));
+                    }
+                }
                 _ => unreachable!(),
             }
 
@@ -6859,6 +6919,21 @@ mod tests {
         // Total supply should never change from genesis
         assert_eq!(ledger.total_supply, 40_000 * BASE_UNITS_PER_BEAT,
             "total supply changed from genesis — this should be impossible");
+
+        // LEDGER-CONS-01: prove the witness arm actually LANDS. Adding op 7 to
+        // the selector is not the same as exercising the `witness_bonded` term
+        // in `assert_conservation` — if every WitnessRegister were rejected
+        // (insufficient balance, duplicate registration, a future validation
+        // change), the term would sit at zero and the conservation check would
+        // be back to the four-bucket blind spot this arm exists to close, while
+        // still reporting green. Fail loudly instead of silently going inert.
+        let bonded: u64 = ledger.accounts.values().map(|a| a.witness_bonded).sum();
+        assert!(
+            bonded > 0,
+            "fuzz op set must actually exercise witness bonds — total witness_bonded is 0, \
+             so the witness_bonded term in assert_conservation was never non-zero and the \
+             check is inert"
+        );
     }
 
     #[test]

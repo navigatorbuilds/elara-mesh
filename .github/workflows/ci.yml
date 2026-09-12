@@ -452,6 +452,118 @@ jobs:
           fi
           echo "OK: verify-cli graph is liboqs-free (pure-Rust verifier, no C toolchain needed)."
 
+  script-lint:
+    name: script lint (shell + python + js)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      # A 2026-09-07 census found that NO gate in this project had ever linted a
+      # shell script OR compiled a python file: every leg in ci.yml, the local
+      # pre-release sweep, the pre-commit hook and release.yml was a Rust leg.
+      # The scripts this repo ships are the ones a new joiner actually runs —
+      # init-join.sh, wsl2-join.sh, check-my-join.sh, build.sh,
+      # elara-verify-*.sh — and the allowlist ships `sdks/` and `examples/`
+      # wholesale, so the published Python SDK reached users with nothing
+      # proving it parses. A break here is a broken first-run experience, not an
+      # internal inconvenience. Local gates were closed the same day; this is
+      # the CI half.
+      #
+      # SELF-SCOPING BY DESIGN — do not replace with a hardcoded path list. This
+      # workflow runs in two repos with DIFFERENT script sets: the private
+      # upstream carries ~174 *.sh, the public mirror only the allowlisted
+      # subset. `git ls-files` asks the checkout what it actually contains, so
+      # the job is correct in both and cannot break when the mirror allowlist
+      # changes. A literal list would go stale in exactly the direction that
+      # turns this red for contributors.
+      - name: install shellcheck if the runner image lacks it
+        run: command -v shellcheck || { sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck; }
+      # `bash -n` is the non-negotiable half: a script that does not parse cannot
+      # run at all, and the check is built into bash.
+      - name: bash -n (parse every tracked shell script)
+        run: |
+          rc=0
+          while read -r f; do
+            bash -n "$f" || { echo "::error file=$f::does not parse"; rc=1; }
+          done < <(git ls-files '*.sh')
+          exit $rc
+        shell: bash
+      # ERROR severity only. `-S warning` reported 59 findings across the private
+      # tree on the day this landed — a cleanup project, not a gate, and a check
+      # that starts red teaches its reader to skip it. `xargs -r` matters: a
+      # checkout with no *.sh must run nothing, not invoke shellcheck with no
+      # arguments and fail on an empty corpus.
+      - name: shellcheck -S error (0 tolerated)
+        run: git ls-files '*.sh' | xargs -r shellcheck -S error -f gcc
+      # Parse only. No python linter is installed in this project's local gates,
+      # and adding one to CI alone would make the two disagree — a check that is
+      # red here and absent there is worse than no check. ast.parse in a single
+      # process (0.14s over 51 files locally) and it writes no __pycache__.
+      # Same self-scoping rule as the shell steps: `git ls-files` asks the
+      # checkout, so this covers the mirror's shipped subset (the SDK, the verify
+      # examples, scan-prod-panics.py) without naming a single path.
+      - name: python parse (every tracked *.py)
+        run: |
+          git ls-files '*.py' | python3 -c "
+          import ast, sys
+          bad = 0
+          for line in sys.stdin:
+              f = line.strip()
+              if not f:
+                  continue
+              try:
+                  ast.parse(open(f, 'rb').read(), filename=f)
+              except SyntaxError as e:
+                  print('::error file=%s,line=%s::%s' % (f, e.lineno, e.msg)); bad += 1
+              except OSError as e:
+                  print('::error file=%s::unreadable: %s' % (f, e)); bad += 1
+          sys.exit(1 if bad else 0)
+          "
+        shell: bash
+      # The Python SDK ships to the mirror (allowlist carries `sdks/` as a
+      # directory prefix), and its own smoke suite had been dormant since
+      # 2026-06-16 — no gate ran it, and the command in its docstring did not
+      # work. 13 tests against an in-process HTTP stub, ~4.6s, stdlib unittest
+      # only: no pytest to install, and no dependency on the pyo3 extension.
+      # Its five siblings under tests/ are deliberately NOT here — they import a
+      # hand-built, untracked _native…so, so gating them would gate an artifact
+      # no gate builds.
+      - name: python SDK smoke suite (sdks/python)
+        run: cd sdks/python && python3 -m unittest discover -s tests -p 'test_agent.py'
+      # `node --check` is the JS analogue of `bash -n`: parse only, no linter to
+      # install, and node is preinstalled on the ubuntu runner images. Nothing in
+      # any gate parsed a JS file before 2026-09-07, and one of them is
+      # `sdks/github-action/dist/index.js` — the entry point of a PUBLISHED
+      # GitHub Action, where a syntax error breaks other people's workflows
+      # rather than ours. Self-scoping like the steps above.
+      - name: node --check (every tracked *.js / *.mjs)
+        run: |
+          rc=0
+          while read -r f; do
+            node --check "$f" >/dev/null 2>&1 || { echo "::error file=$f::does not parse"; rc=1; }
+          done < <(git ls-files '*.js' '*.mjs')
+          exit $rc
+        shell: bash
+      # The mirror ships the receipts feed, and a malformed receipt is a
+      # record_id an outside verifier cannot resolve — on the exact surface this
+      # project asks to be judged by. 1561 files parse in 0.3s with stdlib json.
+      - name: json parse (every tracked *.json)
+        run: |
+          git ls-files '*.json' | python3 -c "
+          import json, sys
+          bad = 0
+          for line in sys.stdin:
+              f = line.strip()
+              if not f:
+                  continue
+              try:
+                  json.load(open(f, 'rb'))
+              except Exception as e:
+                  print('::error file=%s::invalid json: %s' % (f, str(e)[:100])); bad += 1
+          sys.exit(1 if bad else 0)
+          "
+        shell: bash
+
   supply-chain:
     name: supply-chain (cargo-deny)
     runs-on: ubuntu-latest

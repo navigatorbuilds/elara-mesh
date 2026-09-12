@@ -1535,6 +1535,9 @@ async fn insert_record_inner(state: &Arc<NodeState>, mut record: ValidationRecor
     // and ledger validation (stale ops fail against current ledger state).
     let max_age = state.config.max_record_age_secs;
     if max_age > 0.0 && (now_ts - record.timestamp) > max_age {
+        state
+            .ingest_old_records_accepted_total
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         warn!(
             "old record accepted: timestamp {:.0} is {:.1} days old (threshold: {:.1} days)",
             record.timestamp,
@@ -6714,6 +6717,62 @@ mod tests {
     // expensive validation work, and the rejection counter advances. An
     // earlier version checked the flag only on `/records` POST; gossip wrote
     // through the gate and ate the last GB of disk.
+
+    /// The accept-but-warn path for old records now has a COUNTER, and it fires.
+    ///
+    /// Accepting a record older than `max_record_age_secs` is deliberate — an
+    /// offline-first node reconnecting submits records it made days ago, and
+    /// replay is bounded elsewhere (storage dedup on duplicate IDs, ledger
+    /// validation rejecting stale ops). What was missing is observability: the
+    /// site emitted a per-record WARN and nothing else, so the only way to know
+    /// the rate was grepping the journal, where `grep -c` is never a
+    /// denominator. This pins that the counter advances exactly once per old
+    /// record, and — the half that matters — that a FRESH record leaves it
+    /// alone, or the series would just be counting ingest.
+    #[tokio::test]
+    async fn old_record_accept_advances_its_counter_and_fresh_records_do_not() {
+        use std::sync::atomic::Ordering;
+
+        let state = crate::network::state::build_test_node_state();
+        let max_age = state.config.max_record_age_secs;
+        assert!(max_age > 0.0, "threshold must be enabled for this test to mean anything");
+
+        let before = state.ingest_old_records_accepted_total.load(Ordering::Relaxed);
+
+        // Older than the threshold by a clear margin.
+        let mut old = crate::record::ValidationRecord::create(
+            b"old_record_counter_probe",
+            vec![0u8; 32],
+            vec![],
+            crate::record::Classification::Public,
+            None,
+        );
+        old.timestamp = super::now() - (max_age + 86_400.0);
+        let _ = super::insert_record_inner_direct(&state, old, None, false).await;
+
+        let after_old = state.ingest_old_records_accepted_total.load(Ordering::Relaxed);
+        assert_eq!(
+            after_old,
+            before + 1,
+            "an over-threshold record must advance the counter exactly once"
+        );
+
+        // CONTROL: a fresh record must NOT advance it. Without this the counter
+        // could be incrementing on every ingest and the test would still pass.
+        let fresh = crate::record::ValidationRecord::create(
+            b"fresh_record_counter_control",
+            vec![0u8; 32],
+            vec![],
+            crate::record::Classification::Public,
+            None,
+        );
+        let _ = super::insert_record_inner_direct(&state, fresh, None, false).await;
+        assert_eq!(
+            state.ingest_old_records_accepted_total.load(Ordering::Relaxed),
+            after_old,
+            "a within-threshold record must leave the counter untouched"
+        );
+    }
 
     #[tokio::test]
     async fn ops157_disk_pressure_blocks_new_record_ingest() {

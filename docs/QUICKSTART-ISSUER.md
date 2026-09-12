@@ -167,7 +167,7 @@ record_hash: df75ca51…
 The pure-stdlib Python reimplements the wire format and the signing preimage
 from the spec — no Rust, no node. For full signature verification and the
 graded verdicts (VERIFIED / PARTIAL / FAILED with the honest UNPROVEN
-states), use the published crate: `cargo install elara-verify` — or read
+states), use the published crate: `cargo install elara-verify --features cli` — or read
 `examples/verify/verify.sh` for the complete offline evidence walk.
 
 Three committed mandate-bundle vectors — harvested from exactly this flow on

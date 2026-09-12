@@ -1944,6 +1944,14 @@ pub struct NodeState {
     /// captured at ingest. Mainnet under heavy onboarding will see
     /// this climb as bootstrapping nodes verify records signed by
     /// identities they haven't observed yet.
+    /// Records accepted despite being older than `max_record_age_secs`.
+    ///
+    /// Accepting them is DELIBERATE (offline-first nodes submit records made
+    /// days ago when they reconnect); the warn beside it has existed since at
+    /// least 2026-07-06 with no counter, so the only way to know the rate was
+    /// grepping the journal — which is never a denominator. Counter added
+    /// 2026-09-06 so the accept-but-warn policy is observable on /metrics.
+    pub ingest_old_records_accepted_total: AtomicU64,
     pub identity_pk_fetch_attempts_total: AtomicU64,
     /// Identity Partitioning Phase D: cumulative count of on-miss
     /// peer fetches that returned a PK (cached locally in USER tier
@@ -4458,6 +4466,7 @@ impl NodeState {
             identity_user_evicted_total: AtomicU64::new(0),
             identity_promotion_user_to_witness_total: AtomicU64::new(0),
             identity_witness_purged_total: AtomicU64::new(0),
+            ingest_old_records_accepted_total: AtomicU64::new(0),
             identity_pk_fetch_attempts_total: AtomicU64::new(0),
             identity_pk_fetch_hits_total: AtomicU64::new(0),
             identity_pk_fetch_misses_total: AtomicU64::new(0),

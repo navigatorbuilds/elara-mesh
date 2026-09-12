@@ -37,7 +37,7 @@ use crate::network::LockRecover; // .lock_recover() on the consensus mutex
 #[cfg(feature = "node-core")]
 use std::sync::Arc;
 #[cfg(feature = "node-core")]
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 // ─── Allocation Fractions ──────────────────────────────────────────────────
 
@@ -420,16 +420,34 @@ pub async fn auto_genesis_mint(state: &Arc<NodeState>, config: &NodeConfig) -> R
             let genesis = config.genesis_authority.clone();
             let gv_clone = config.genesis_validators.clone();
             let net_clone = config.network_id.clone();
-            if let Ok(Ok((mut new_ledger, _))) = tokio::task::spawn_blocking(move || {
+            // GB-01 (audit R2/genesis-bootstrap, 2026-09-07): this was an
+            // `if let Ok(Ok(..))` with NO else arm, so a rebuild failure — or a
+            // spawn_blocking JoinError — skipped the whole block in silence and
+            // fell through to `return Ok(0)` ("no new mint created"), leaving the
+            // caller unable to tell "already minted, ledger rebuilt" from
+            // "already minted, ledger NEVER rebuilt". Control flow is unchanged;
+            // the failure is merely no longer invisible.
+            match tokio::task::spawn_blocking(move || {
                 rocks_ref.rebuild_ledger_streaming(&genesis, &gv_clone, &net_clone)
             }).await {
-                state.rocks.bulk_mark_applied(&new_ledger.applied_record_ids);
-                new_ledger.applied_record_ids.clear();
-                state.consensus.lock_recover().register_stakes_from_ledger(&new_ledger);
-                *state.ledger.write().await = new_ledger;
-                // Wholesale ledger replace on genesis-restart → invalidate the
-                // staked-anchor view (contract: state.rs:invalidate_anchor_view).
-                state.invalidate_anchor_view();
+                Ok(Ok((mut new_ledger, _))) => {
+                    state.rocks.bulk_mark_applied(&new_ledger.applied_record_ids);
+                    new_ledger.applied_record_ids.clear();
+                    state.consensus.lock_recover().register_stakes_from_ledger(&new_ledger);
+                    *state.ledger.write().await = new_ledger;
+                    // Wholesale ledger replace on genesis-restart → invalidate the
+                    // staked-anchor view (contract: state.rs:invalidate_anchor_view).
+                    state.invalidate_anchor_view();
+                }
+                Ok(Err(e)) => error!(
+                    "GB-01: genesis-restart ledger rebuild FAILED ({e}) — continuing on the \
+                     pre-rebuild in-memory ledger, which may be stale or empty. Balances and \
+                     stake weights are not re-derived from the mint record."
+                ),
+                Err(e) => error!(
+                    "GB-01: genesis-restart ledger rebuild task did not run to completion ({e}) \
+                     — continuing on the pre-rebuild in-memory ledger, which may be stale or empty."
+                ),
             }
             // Return 0 to signal "no new mint created" — caller skips pool_fund + genesis state init
             return Ok(0);
@@ -478,18 +496,35 @@ pub async fn auto_genesis_mint(state: &Arc<NodeState>, config: &NodeConfig) -> R
         let genesis = config.genesis_authority.clone();
         let gv_clone = config.genesis_validators.clone();
         let net_clone = config.network_id.clone();
-        if let Ok(Ok((mut new_ledger, _))) = tokio::task::spawn_blocking(move || {
+        // GB-01: same silent-swallow as the found-path above, and worse here —
+        // the mint record HAS been written, so a skipped rebuild returns
+        // `Ok(total_minted)` and reports success while the in-memory ledger was
+        // never re-derived from that mint. Half-applied genesis, reported clean.
+        // Control flow unchanged; the failure is now observable.
+        match tokio::task::spawn_blocking(move || {
             rocks_ref.rebuild_ledger_streaming(&genesis, &gv_clone, &net_clone)
         })
         .await
         {
-            state.rocks.bulk_mark_applied(&new_ledger.applied_record_ids);
-            new_ledger.applied_record_ids.clear();
-            state.consensus.lock_recover().register_stakes_from_ledger(&new_ledger);
-            *state.ledger.write().await = new_ledger;
-            // Wholesale ledger re-derive after genesis mints → invalidate the
-            // staked-anchor view (contract: state.rs:invalidate_anchor_view).
-            state.invalidate_anchor_view();
+            Ok(Ok((mut new_ledger, _))) => {
+                state.rocks.bulk_mark_applied(&new_ledger.applied_record_ids);
+                new_ledger.applied_record_ids.clear();
+                state.consensus.lock_recover().register_stakes_from_ledger(&new_ledger);
+                *state.ledger.write().await = new_ledger;
+                // Wholesale ledger re-derive after genesis mints → invalidate the
+                // staked-anchor view (contract: state.rs:invalidate_anchor_view).
+                state.invalidate_anchor_view();
+            }
+            Ok(Err(e)) => error!(
+                "GB-01: post-mint ledger rebuild FAILED ({e}) — the genesis mint record was \
+                 written but the in-memory ledger was NOT re-derived from it. This call still \
+                 reports success; treat the node's balances and stake weights as unreliable \
+                 until it is restarted and the rebuild succeeds."
+            ),
+            Err(e) => error!(
+                "GB-01: post-mint ledger rebuild task did not run to completion ({e}) — the \
+                 genesis mint record was written but the in-memory ledger was NOT re-derived."
+            ),
         }
     }
 

@@ -265,6 +265,19 @@ fn compute_checksum(snapshot: &NodeSnapshot) -> String {
         );
         data.push_str(&format!("|bootstrap_state_root={h}"));
     }
+    // SNAP-1 (2026-09-07): bind the snapshot's own timestamp. The bootstrap
+    // path installs it into both in-memory and DURABLE state (see sync.rs:
+    // pull_catchup_cursor, full_pull_cursor, and the monotone acts-coverage
+    // floor), so leaving it unbound let any relaying peer rewrite it under an
+    // intact Dilithium3 signature. Conditional, like the roots above: a
+    // snapshot carrying `None` — which is every file `save_snapshot_full`
+    // writes — reproduces its existing checksum byte for byte, so this binding
+    // costs no migration. `to_bits()` mirrors `compute_state_delta_checksum`
+    // and is safe here only because `create_signed_snapshot` quantizes to whole
+    // milliseconds before signing (see the comment there).
+    if let Some(ts) = snapshot.snapshot_timestamp {
+        data.push_str(&format!("|snapshot_timestamp_bits={}", ts.to_bits()));
+    }
     // T63: bind the signing-domain selector — conditional (only when set) so
     // every existing / pre-flag-day snapshot reproduces the identical checksum,
     // and a MITM can neither strip nor flip the selector under a valid
@@ -578,7 +591,19 @@ pub fn create_signed_snapshot(
         emergency,
         fold_sunset_entries: inputs_fold_sunset_entries,
     } = inputs;
-    let now = crate::record::now_timestamp();
+    // SNAP-1 (2026-09-07): quantize to whole milliseconds BEFORE this value is
+    // signed, mirroring the `now` binding in `create_signed_state_delta`.
+    // `compute_checksum` binds this field via `to_bits()`, and a raw
+    // `now_timestamp()` carries sub-ulp mantissa noise that serde_json's parse
+    // can shift by 1 ulp unless the `float_roundtrip` feature is enabled (root
+    // Cargo.toml). Resting the binding on an externally-owned Cargo feature is
+    // not acceptable here because the failure is DESTRUCTIVE: `load_snapshot`
+    // renames a mismatching file to `.json.corrupt`. Measured over 200k
+    // unix-second-shaped values with the feature OFF: raw + `to_bits()` flips
+    // 22.29% of checksums, ms-quantized + `to_bits()` flips 0. Quantizing also
+    // leaves exactly one f64 per millisecond, so a relaying peer keeps no
+    // sub-millisecond freedom under a valid signature.
+    let now = (crate::record::now_timestamp() * 1000.0).round() / 1000.0;
 
     let mut ledger_for_snap = ledger.clone();
     // Gap 7 (2026-04-21): Clone() skips applied_record_ids; restore for wire.
@@ -1183,8 +1208,18 @@ pub struct StateDelta {
 /// the same root cause behind the v3→v4 `compute_checksum` migration:
 /// `serde_json::Value::F64(x).to_string()` is not always inverse to
 /// `f64::from_str(s)`, so a round-trip through JSON can produce a
-/// different `Display` repr by 1 ulp. `to_bits()` is bit-exact regardless
-/// of what a deserializer does in the middle.
+/// different `Display` repr by 1 ulp. `to_bits()` removes that FORMATTING
+/// instability.
+///
+/// Correction (2026-09-07): the previous wording here claimed `to_bits()` is
+/// "bit-exact regardless of what a deserializer does in the middle". That
+/// overstates it — `to_bits()` says nothing about whether the parser rebuilds
+/// the bits the serializer emitted. What actually makes this path safe is that
+/// `create_signed_state_delta` QUANTIZES `snapshot_timestamp` to whole
+/// milliseconds at the source, which collapses the mantissa into the
+/// round-trip-stable space; `float_roundtrip` (root Cargo.toml) is the
+/// belt-and-braces second layer. Anything binding a RAW f64 via `to_bits()`
+/// depends on that Cargo feature alone. See `create_signed_snapshot`.
 fn compute_state_delta_checksum(delta: &StateDelta) -> String {
     let mut removed_sorted = delta.removed_accounts.clone();
     removed_sorted.sort();
@@ -2360,6 +2395,55 @@ mod tests {
             "checksum must be identical after save→load→save→load roundtrip");
     }
 
+    /// SNAP-1 coupling guard, half 1 of 2 (half 2 =
+    /// `sync.rs::snap1_bootstrap_installs_only_checksum_bound_epoch_fields`).
+    ///
+    /// This test asserts a WEAKNESS on purpose. `compute_checksum` binds only
+    /// part of the epoch substruct — `latest_epoch` / `latest_seal_id` /
+    /// `latest_seal_hash` / `latest_vrf_output` / `latest_sealed_account`. The
+    /// other four fields ride inside the same signed snapshot UNAUTHENTICATED:
+    /// rewriting them leaves the checksum, and therefore the Dilithium3
+    /// signature, intact. Each exclusion is deliberate and documented at its
+    /// field (f64 ulp drift for `zone_activity_rate`, legacy/v2 representation
+    /// freedom for the VRF rings), and each is safe for exactly one reason —
+    /// no consumer installs them from a wire snapshot.
+    ///
+    /// A failure here because a field was BOUND is an improvement, not a
+    /// regression: drop it from the list below, and `apply_bootstrap_snapshot_full`
+    /// becomes free to install it.
+    #[test]
+    fn snap1_checksum_omits_four_epoch_substruct_fields() {
+        let z0 = ZoneId::from_legacy(0);
+        let clean = NodeSnapshot::new(make_ledger(), HashSet::new(), make_epoch());
+        let baseline = compute_checksum(&clean);
+
+        let mut a = clean.clone();
+        a.epoch.as_mut().unwrap().zone_activity_rate.insert(z0.clone(), 999.0);
+        assert_eq!(compute_checksum(&a), baseline,
+            "zone_activity_rate is NOT bound into the checksum (v4 f64 fix)");
+
+        let mut b = clean.clone();
+        b.epoch.as_mut().unwrap().vrf_history
+            .insert(z0.clone(), vec![(1.0, 4999, "aa".repeat(32))]);
+        assert_eq!(compute_checksum(&b), baseline,
+            "legacy vrf_history is NOT bound into the checksum");
+
+        let mut c = clean.clone();
+        c.epoch.as_mut().unwrap().vrf_history_v2
+            .insert(z0.clone(), vec![(1.0, 4999, "aa".repeat(32), "bb".repeat(32))]);
+        assert_eq!(compute_checksum(&c), baseline,
+            "vrf_history_v2 is NOT bound into the checksum");
+
+        let mut d = clean.clone();
+        d.epoch.as_mut().unwrap().latest_super_seal.insert(
+            z0.clone(),
+            (4999, "poison-ss".to_string(), "cc".repeat(32), "dd".repeat(32)),
+        );
+        assert_eq!(compute_checksum(&d), baseline,
+            "latest_super_seal is NOT bound into the checksum — it drives the GC \
+             seal-pruning floor, so nothing may install it from a wire snapshot");
+    }
+
     /// v4 regression test (2026-04-28): the v3 checksum included f64 fields
     /// (zone_activity_rate) via serde_json. ryu-formatted f64 strings do not
     /// always parse back to the same f64 bits in serde_json — see writer
@@ -2381,9 +2465,13 @@ mod tests {
             finalized.insert(format!("rec-{i:04}"));
         }
         let mut epoch = make_epoch();
-        // The exact f64 from production snapshots that triggered
-        // the v3 round-trip bug. Both values are in the "ulp drift" zone of
-        // serde_json's f64 round-trip.
+        // The exact f64 from production snapshots that triggered the v3
+        // round-trip bug. NOTE (2026-09-07, measured): only the FIRST value
+        // actually drifts — with `float_roundtrip` off it parses back 1 ulp
+        // low (...4a7 -> ...4a6). The second is stable in both worlds, so it
+        // is a poor canary despite this comment previously claiming both were
+        // "in the ulp drift zone". Keep both (they are the historical
+        // production values) but rely on the first for drift coverage.
         epoch.zone_activity_rate.insert(ZoneId::from_legacy(0), 0.11168954035834365_f64);
         epoch.zone_activity_rate.insert(ZoneId::from_legacy(1), 0.10555818615216817_f64);
 
@@ -2400,6 +2488,159 @@ mod tests {
 
         assert_eq!(checksum1, checksum2,
             "v4: checksum must be stable across JSON round-trip even with f64 values that don't ulp-roundtrip in serde_json");
+    }
+
+    /// SNAP-1 forward-forgery guard (2026-09-07). Sign a snapshot, rewrite ONLY
+    /// `snapshot_timestamp`, and require `verify_signed_snapshot` to reject it.
+    ///
+    /// Written against the code before the fix, this test FAILED: the mutated
+    /// snapshot verified clean, because the checksum the Dilithium3 signature
+    /// covers never read the field. That mattered because the bootstrap path
+    /// installs the value into in-memory AND durable state (`sync.rs`:
+    /// `pull_catchup_cursor`, `full_pull_cursor`, and the monotone
+    /// acts-coverage floor — the last of which has no shipped repair path;
+    /// `force_acts_coverage_floor_genesis` is rustdoc'd as unwired).
+    ///
+    /// Two traps this test is deliberately written to avoid:
+    ///   1. It builds from `create_signed_snapshot`, NOT `NodeSnapshot::new` —
+    ///      the latter sets `snapshot_timestamp: None`, so the mutation would
+    ///      silently test nothing.
+    ///   2. It asserts the pre-mutation value is `Some(_)`. Without that, a
+    ///      future change making the producer emit `None` would gut this test
+    ///      while leaving it green — the exact way
+    ///      `test_checksum_stable_with_zone_activity_rate_f64_round_trip`
+    ///      above is vacuous w.r.t. its stated subject, which survives in
+    ///      `compute_checksum` only as a comment.
+    #[test]
+    fn snap1_snapshot_timestamp_forward_forgery_is_rejected() {
+        let (snap, _identity) = sign_test_snapshot(crate::identity::CryptoProfile::ProfileB);
+
+        // Trap 2: the field must actually be populated upstream.
+        let original = snap
+            .snapshot_timestamp
+            .expect("create_signed_snapshot must populate snapshot_timestamp");
+        assert!(original > 0.0, "producer timestamp must be a real clock value");
+
+        verify_signed_snapshot(&snap).expect("pristine signed snapshot must verify");
+
+        // The forgery: advance ~10 years. On the bootstrap path this seeds both
+        // cursors far into the future and ratchets the DURABLE acts-coverage
+        // floor past real history.
+        let mut forged = snap.clone();
+        forged.snapshot_timestamp = Some(original + 315_360_000.0);
+
+        let err = verify_signed_snapshot(&forged).unwrap_err().to_string();
+        assert!(
+            err.contains("snapshot checksum mismatch"),
+            "a rewritten snapshot_timestamp must break the checksum, got: {err}"
+        );
+    }
+
+    /// SNAP-1 companion: the producer must emit a millisecond-quantized
+    /// timestamp. This is what lets `compute_checksum` bind the field via
+    /// `to_bits()` without the binding's correctness resting on the
+    /// `float_roundtrip` Cargo feature — measured, a RAW `now_timestamp()`
+    /// bound by `to_bits()` flips 22.29% of checksums with that feature off,
+    /// and the failure is destructive (`.json.corrupt`). If someone reverts the
+    /// quantization at the source, this goes red before the drift ever reaches
+    /// a node.
+    #[test]
+    fn snap1_producer_timestamp_is_millisecond_quantized() {
+        let (snap, _identity) = sign_test_snapshot(crate::identity::CryptoProfile::ProfileB);
+        let ts = snap
+            .snapshot_timestamp
+            .expect("create_signed_snapshot must populate snapshot_timestamp");
+
+        let ms = ts * 1000.0;
+        assert!(
+            (ms - ms.round()).abs() < 1e-6,
+            "producer snapshot_timestamp must be whole-millisecond quantized, got {ts:.9} \
+             ({ms:.6} ms) — see the quantization comment in create_signed_snapshot"
+        );
+    }
+
+    /// SNAP-1 CLASS guard (2026-09-07) — closes the scope gap that let the
+    /// `snapshot_timestamp` defect through undetected.
+    ///
+    /// `snap1_checksum_omits_four_epoch_substruct_fields` enumerates only the
+    /// EPOCH SUBSTRUCT. Nothing enumerated the TOP-LEVEL `NodeSnapshot` fields,
+    /// so an unbound-but-installed field could sit here indefinitely without
+    /// tripping any guard — and one did. This test pins, field by field, which
+    /// top-level fields `compute_checksum` binds.
+    ///
+    /// The rule enforced is the repo's own, from
+    /// `sync.rs::snap1_bootstrap_installs_only_checksum_bound_epoch_fields`:
+    /// "bind the field in `compute_checksum` FIRST, or do not copy it."
+    ///
+    /// Moving a field from UNBOUND to BOUND is an improvement — move it here.
+    /// Moving one the other way is a REGRESSION: it means something installed
+    /// from a wire snapshot became forgeable under a valid signature.
+    #[test]
+    fn snap1_top_level_field_binding_is_pinned() {
+        let (snap, _identity) = sign_test_snapshot(crate::identity::CryptoProfile::ProfileB);
+
+        // Normalize the way verify_signed_snapshot does before comparing.
+        let norm = |s: &NodeSnapshot| {
+            let mut c = s.clone();
+            c.checksum = None;
+            c.signature = None;
+            c.sphincs_signature = None;
+            compute_checksum(&c)
+        };
+        let baseline = norm(&snap);
+
+        // Every field below must be producer-populated, or its mutation is a
+        // no-op and the assertion is vacuous.
+        let ts = snap.snapshot_timestamp.expect("producer must set snapshot_timestamp");
+        assert!(snap.merkle_root.is_some(), "producer must set merkle_root");
+        assert!(snap.record_count.is_some(), "producer must set record_count");
+        assert!(snap.protocol_version.is_some(), "producer must set protocol_version");
+
+        // ── BOUND ────────────────────────────────────────────────────────
+        let mut a = snap.clone();
+        a.snapshot_timestamp = Some(ts + 1.0);
+        assert_ne!(
+            norm(&a), baseline,
+            "snapshot_timestamp MUST be checksum-bound — the bootstrap path \
+             installs it into durable state (acts-coverage floor is monotone \
+             with no shipped repair)"
+        );
+
+        // ── UNBOUND, each for a stated reason ────────────────────────────
+        // merkle_root / record_count: the only consumer reads them from the
+        // UNSIGNED /snapshot/latest metadata route, never from the verified
+        // snapshot struct, so binding them here would constrain nothing.
+        // Authenticating that route is a separate item (bootstrap-source
+        // steering), not a checksum change.
+        let mut b = snap.clone();
+        b.merkle_root = Some("ff".repeat(32));
+        assert_eq!(
+            norm(&b), baseline,
+            "merkle_root is NOT bound — its consumer reads the unsigned \
+             metadata route, so binding it here would be theatre"
+        );
+
+        let mut c = snap.clone();
+        c.record_count = Some(999_999);
+        assert_eq!(
+            norm(&c), baseline,
+            "record_count is NOT bound — same unsigned-metadata path as merkle_root"
+        );
+
+        // protocol_version: gates enforce_snapshot_protocol_version, which
+        // short-circuits while min_protocol_version == 0 (the fleet default).
+        // Binding it is the ONLY change here that would force a fleet-wide
+        // one-time checksum re-derive, because save_snapshot_full writes it
+        // Some(..) to every node's local file. Bind it in the commit that
+        // raises min_protocol_version above 0 — one migration, when it buys
+        // something.
+        let mut d = snap.clone();
+        d.protocol_version = Some(9_999);
+        assert_eq!(
+            norm(&d), baseline,
+            "protocol_version is NOT bound yet — bind it together with raising \
+             min_protocol_version above 0, so the migration buys something"
+        );
     }
 
     // ── PQ-R2: verify_signed_snapshot must actually verify ──────────────

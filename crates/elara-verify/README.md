@@ -47,8 +47,11 @@ match verify_seal_record_against_anchor(seal_wire, expected_record_hash, &truste
 its `record_hash()` matched `expected_record_hash`, and the seal carried a valid
 Dilithium3 signature from one of `trusted_anchor_pubkeys`. For the full offline
 chain (drand BLS + OpenTimestamps→Bitcoin receipt grading, account-SMT
-inclusion/absence, the agent-mandate verdict) see the `elara-verify` CLI and the
-worked examples in [`examples/verify/`](https://github.com/navigatorbuilds/elara-mesh/tree/master/examples/verify).
+inclusion/absence) see the `elara-verify` CLI and the worked examples in
+[`examples/verify/`](https://github.com/navigatorbuilds/elara-mesh/tree/master/examples/verify).
+The agent-mandate verdict has no CLI mode: call
+`elara_verify::mandate_bundle::evaluate_mandate_bundle` from Rust, or run it in
+your browser at <https://navigatorbuilds.github.io/elara-mesh/verify/>.
 
 ## Features
 

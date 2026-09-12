@@ -351,7 +351,11 @@ pub fn vrf_prove(sk: &VrfSecretKey, alpha: &[u8]) -> Result<(VrfOutput, VrfProof
 /// signature over that output. Returns the output if verification succeeds.
 pub fn vrf_verify(pk: &VrfPublicKey, alpha: &[u8], proof: &VrfProof) -> Result<VrfOutput> {
     if proof.algorithm == ALG_ECVRF_ED25519 {
-        // Legacy EC-VRF proof — delegate to legacy module.
+        // Legacy EC-VRF proof — REJECTED, not delegated. `vrf_verify_legacy`
+        // below is a reject-only stub: the EC-VRF verifier was removed, and
+        // its own docstring says so. (Corrected 2026-09-07, audit
+        // R2/crypto-sig/CS-2 — this line read "delegate to legacy module",
+        // which describes a module that no longer exists.)
         // After the 2026-03-31 genesis wipe, no legacy proofs should appear on
         // mainnet. Count and warn once so operators know migration is needed.
         LEGACY_VRF_PROOF_TOTAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

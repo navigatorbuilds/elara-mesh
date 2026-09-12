@@ -354,6 +354,73 @@ mod refinement_map {
         out
     }
 
+    /// CamelCase type-ish identifiers on a line (`ParsedEpochSeal`, `AdmissionMsg`).
+    ///
+    /// Deliberately NOT folded into `code_tokens`. That function's `contains('_')`
+    /// rule is what stops ordinary English ("the", "code", "network") vouching for
+    /// a citation, and relaxing it would let prose verify itself. These tokens are
+    /// admitted in exactly one place — the note branch of `check_spec_text` — and
+    /// only when the cited file DECLARES them (`declares_type`), so they can
+    /// upgrade an unverifiable line but can never make one fail.
+    pub fn type_tokens(line: &str) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for run in line.split(|c: char| !c.is_ascii_alphanumeric()) {
+            let ok = run.len() >= 4
+                && run.starts_with(|c: char| c.is_ascii_uppercase())
+                && run.bytes().filter(|c| c.is_ascii_uppercase()).count() >= 2
+                && run.bytes().any(|c| c.is_ascii_lowercase());
+            if ok && !out.iter().any(|t| t == run) {
+                out.push(run.to_string());
+            }
+        }
+        out
+    }
+
+    /// 1-based line where `refs` DECLARES `tok` as a type, else `None`.
+    ///
+    /// A bare occurrence is deliberately not enough. The measurement that
+    /// motivated this (2026-09-07, over every guarded surface) found `ChaCha20`
+    /// "matching" a transport file because the cipher is named in its prose — an
+    /// occurrence rule would have verified that citation for the wrong reason.
+    /// Requiring a declaration keeps it an honest NOTE.
+    pub fn declares_type(refs: &[&str], tok: &str) -> Option<usize> {
+        for (i, line) in refs.iter().enumerate() {
+            let mut s = line.trim_start();
+            if let Some(rest) = s.strip_prefix("pub") {
+                let rest = match rest.strip_prefix('(') {
+                    // `pub(crate)` / `pub(super)` / `pub(in path)`
+                    Some(vis) => match vis.find(')') {
+                        Some(k) => &vis[k + 1..],
+                        None => rest,
+                    },
+                    None => rest,
+                };
+                if rest.starts_with(char::is_whitespace) {
+                    s = rest.trim_start();
+                }
+            }
+            for kw in ["struct", "enum", "trait", "type", "union"] {
+                let Some(rest) = s.strip_prefix(kw) else {
+                    continue;
+                };
+                if !rest.starts_with(char::is_whitespace) {
+                    continue;
+                }
+                let Some(after) = rest.trim_start().strip_prefix(tok) else {
+                    continue;
+                };
+                let bounded = after
+                    .chars()
+                    .next()
+                    .is_none_or(|c| !(c.is_ascii_alphanumeric() || c == '_'));
+                if bounded {
+                    return Some(i + 1);
+                }
+            }
+        }
+        None
+    }
+
     /// Whole-word occurrence of `word` in `text`.
     pub fn has_word(text: &str, word: &str) -> bool {
         let b = text.as_bytes();
@@ -812,6 +879,25 @@ mod refinement_map {
                     continue;
                 }
                 if tokens.is_empty() {
+                    // D11 (2026-09-07): `code_tokens` requires an underscore, so
+                    // every CamelCase type was invisible to the guard and a whole
+                    // legitimate class of citation could only ever be NOTED. Before
+                    // recording "unverifiable", try the type names — but ONLY as
+                    // positive evidence, and only where the cited file DECLARES the
+                    // type. This branch can upgrade a note to verified and can never
+                    // emit a failure, so no line that passes today can start failing:
+                    // that monotonicity is what made this safe to ship without the
+                    // whole-corpus re-fix D11 anticipated. Measured over every
+                    // guarded surface before building: 39 notes, of which 4 carry a
+                    // declared type (upgraded), 1 carries only a prose name
+                    // (`ChaCha20`, correctly still a note), 34 have no CamelCase at all.
+                    if type_tokens(&scrubbed)
+                        .iter()
+                        .any(|t| declares_type(&refs, t).is_some())
+                    {
+                        rep.verified += 1;
+                        continue;
+                    }
                     rep.notes.push(format!(
                         "{module}:{n}: {rel} — no identifier on the line, unverifiable"
                     ));
@@ -904,6 +990,61 @@ mod refinement_map {
                 .expect("token appears in a comment");
             assert_eq!(l2, 1);
             assert!(!was_code2, "comment-only must be flagged, not silently reported");
+        }
+
+        #[test]
+        fn d11_type_tokens_and_declaration_rule() {
+            // Admitted: CamelCase with >=2 capitals and a lowercase.
+            assert_eq!(
+                type_tokens("the ProcessedPublication path and AdmissionMsg frames"),
+                vec!["ProcessedPublication".to_string(), "AdmissionMsg".to_string()]
+            );
+            // Refused, and each for its own reason — this is the half that keeps
+            // prose from vouching for a citation.
+            assert!(type_tokens("The quick network code path").is_empty(), "sentence-initial words");
+            assert!(type_tokens("MUST NOT TLA BFT").is_empty(), "all-caps acronyms");
+            assert!(type_tokens("Msg Seal Zone").is_empty(), "single-capital words are too weak");
+            assert!(type_tokens("seal_record_hash").is_empty(), "snake_case is code_tokens' job");
+
+            // A declaration counts; a mere occurrence does not.
+            let refs = [
+                "// ChaCha20 is the AEAD used by the transport",
+                "pub struct ParsedEpochSeal {",
+                "pub(crate) enum AdmissionMsg {",
+                "type RealmMembershipCert = Vec<u8>;",
+                "let x = SomethingElse::new();",
+            ];
+            let refs: Vec<&str> = refs.to_vec();
+            assert_eq!(declares_type(&refs, "ParsedEpochSeal"), Some(2));
+            assert_eq!(declares_type(&refs, "AdmissionMsg"), Some(3));
+            assert_eq!(declares_type(&refs, "RealmMembershipCert"), Some(4));
+            // THE POINT OF THE RULE: named in prose, declared nowhere.
+            assert_eq!(declares_type(&refs, "ChaCha20"), None);
+            // And a use-site is not a declaration either.
+            assert_eq!(declares_type(&refs, "SomethingElse"), None);
+            // Prefix collisions must not count as declarations.
+            let near = vec!["pub struct ParsedEpochSealed {", "typedef ParsedEpochSeal x"];
+            assert_eq!(declares_type(&near, "ParsedEpochSeal"), None);
+        }
+
+        #[test]
+        fn d11_declared_type_upgrades_a_note_but_absence_never_fails() {
+            let root = root();
+            let index = src_index(&root);
+            let mut src = Sources::new(&root);
+
+            // No snake_case token on either line, so both were NOTES before D11.
+            // First cites a file that declares the type; second names a cipher
+            // that the file only mentions in prose (the ChaCha20 shape).
+            let text = "a ParsedEpochSeal is applied (src/network/epoch.rs)\n\
+                        b ChaCha20 seals the frame (crates/elara-pq-transport/src/crypto.rs)\n";
+            let rep = check_spec_text("internal design notes", text, &index, &mut src);
+            assert_eq!(rep.verified, 1, "declared type should verify: {rep:?}");
+            assert_eq!(rep.notes.len(), 1, "prose-only type stays a note: {rep:?}");
+            assert!(
+                rep.failures.is_empty(),
+                "the D11 branch must never produce a failure: {rep:?}"
+            );
         }
 
         #[test]

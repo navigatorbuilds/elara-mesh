@@ -109,6 +109,36 @@
       "expected": "4f1752605c5bd5585bce352f1a16d4d98060f6ab74fe6e0cc96e43e1d3b82aba"
     },
     {
+      "name": "smt-exclusion/dave-absent-from-abc",
+      "primitive": "smt-exclusion",
+      "spec_ref": "§6.5 / Appendix A",
+      "note": "Fold a compressed account-SMT EXCLUSION (non-membership) proof to                its root. Identical to `smt-proof` in every respect except the                starting value: there is NO leaf and NO state_hash — the fold                starts at EMPTY_HASH (= SHA3-256(\"\")) at the key's leaf                position. path = SHA3-256(account_id); fold parent_depth 255 → 0                taking the next unconsumed `siblings` entry when present-bit[depth]                is set, else EMPTY_HASH; (left, right) = (sibling, current) if                bit(path, depth) else (current, sibling); parent = SHA3-256(0x01 ||                left || right) UNLESS both children are EMPTY_HASH, in which case                parent = EMPTY_HASH. That empty-collapse branch is UNREACHABLE on                an inclusion path and reachable here — implement it or this vector                will not fold. All bits MSB-first. Every sibling must be consumed                and the result must equal `expected`, the same root the inclusion                vectors fold to. `dave` is absent from the alice/bob/carol tree; a                verifier that folds this to the sealed root has proven a key is                NOT in the tree without trusting the responder.",
+      "input": {
+        "account_id": "b0c32ba18ae392ec1978360105bc39567227bde5a0e81c4fa6ceb9b2ba4adb6c",
+        "present": "c000000000000000000000000000000000000000000000000000000000000000",
+        "siblings": [
+          "fd1a562b951334b4ef5df137bdeb54d1e8331352e7f70c1a9409bf9849278456",
+          "7fe38077899483d603b9edb18a673fd50c176e7525b6a228bf5c6cc4cc5079ca"
+        ]
+      },
+      "expected": "4f1752605c5bd5585bce352f1a16d4d98060f6ab74fe6e0cc96e43e1d3b82aba"
+    },
+    {
+      "name": "smt-exclusion-reject/bob-is-present",
+      "primitive": "smt-exclusion-reject",
+      "spec_ref": "§6.5 / Appendix A",
+      "note": "MUST-REJECT twin of `smt-exclusion/dave-absent-from-abc`. Fold it                EXACTLY as `smt-exclusion` — no leaf, start at EMPTY_HASH in the                key's slot — but the key is `bob`, who IS in the alice/bob/carol                tree, carrying bob's own real `present` bitmap and siblings. The                fold does NOT reconstruct the sealed root, because bob's slot holds                `leaf = SHA3-256(0x00 || account_id || state_hash)` and not                EMPTY_HASH, so a sound verifier REJECTS (`expected` is the sealed                root and the fold must DIFFER from it). An implementation that                accepts this has issued a cryptographic proof that present data is                absent — the withholding break §6.5 exists to prevent, and the one                an always-answer-absent verifier passes every positive vector                without ever revealing. `expected` is the sealed root, as in                `smt-proof-reject`: compare and require inequality.",
+      "input": {
+        "account_id": "b5d577dc9ce59725e29886632e69ecdf3b6ca49c0a14f4315a2404fc1508672d",
+        "present": "a000000000000000000000000000000000000000000000000000000000000000",
+        "siblings": [
+          "e5504d8351b61846fa3306f024cf269dbe79b968643170353cb63ca923e7e74d",
+          "ed57f874eab47b6d7d5f1cfdd610babdde518865c2e9a1cbc3e2fb45fecedfce"
+        ]
+      },
+      "expected": "4f1752605c5bd5585bce352f1a16d4d98060f6ab74fe6e0cc96e43e1d3b82aba"
+    },
+    {
       "name": "identity-derivation",
       "primitive": "identity-derivation",
       "spec_ref": "§3.1 / Appendix A.5",

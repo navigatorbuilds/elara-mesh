@@ -287,6 +287,7 @@ followed by that many bytes; all multi-byte integers are **big-endian**.
 | **v2+** | | | present in every decodable record (floor = 4) |
 | 11 | `itc_stamp` | `u16-len` + bytes | |
 | 12 | `zone_refs` | `u16` count, then per ref: **24 raw bytes** | zone `u64` ‖ sequence `u64` ‖ epoch `u64`, each BE |
+| **bytes only** | | | 13–15 carry **no version test** — the decoder reads them whenever bytes remain |
 | 13 | `creator_sphincs_pk` | `u16-len` + bytes | 48 bytes for Profile A |
 | 14 | `sig_algorithm` | `u8` | §2.4 |
 | 15 | `sphincs_algorithm` | `u8` | `0` when absent |
@@ -297,6 +298,15 @@ followed by that many bytes; all multi-byte integers are **big-endian**.
 | 18 | `nonce` | `u64` BE (8 bytes) | slot mutual exclusion |
 | **v6+** | | | |
 | 19 | `network_id` | `u16-len` + ASCII | ≤64 bytes; the same value the §4.4 preimage commits to |
+
+**Where the version gates actually sit.** Fields 11–12 are gated on `version >= 2`
+*and* remaining bytes; fields 16–17 on `version >= 3`, 18 on `>= 5`, 19 on `>= 6`,
+each likewise with a remaining-bytes test. Fields **13–15 are gated on remaining
+bytes alone** — there is no version test on them in the reference decoder. With
+the floor at 4 the two readings coincide (a `version >= 2` test is always true),
+so this cannot produce a divergence today; it is stated because §4.3.3's rule
+about version-gated blocks does not describe these three, and an implementation
+should not infer a gate the codec does not have.
 
 **Absent vs empty.** Every optional byte-string field above writes a zero length
 prefix when absent, so a zero-length field and an absent field are the *same
@@ -557,6 +567,17 @@ verifier folds `EMPTY_HASH` at the leaf position instead of a leaf hash and
 requires the result to equal `R` (`verify_exclusion_proof` in `crates/elara-smt`;
 the fold, including the empty-collapse rule of §6.4 step 3, is bit-for-bit the
 same routine as inclusion).
+
+Vectors `smt-exclusion/dave-absent-from-abc` and its must-reject twin
+`smt-exclusion-reject/bob-is-present` in
+`examples/verify/conformance-vectors.json` pin the accept and the reject, as
+§6.4 does for inclusion. The reject twin is the load-bearing one here: it claims
+absence for a key that **is** in the tree, so an implementation that always
+answers "absent" — which passes every positive vector — folds it to something
+other than `R` and MUST reject. Note also that the empty-collapse rule of §6.4
+step 3 is *unreachable* on an inclusion path (the running value starts as a leaf
+hash, so "both children EMPTY" never occurs) and reachable here, which is why an
+implementation can reproduce the inclusion vectors and still not have it.
 
 This is a **cryptographic** non-membership proof, not a trust-the-server
 assertion: the path is the full 256-bit `SHA3-256(K)`, so an absent key's slot is

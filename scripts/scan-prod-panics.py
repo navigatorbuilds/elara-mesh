@@ -447,6 +447,33 @@ def selftest():
         sys.exit(2)
 
 
+# POSITIVE CONTROL (2026-09-06). BASELINE_CLEAN is one-directional: it asserts that
+# files known to be clean STAY clean, which catches a matcher that starts over-firing.
+# It cannot catch the opposite, and the opposite is the dangerous one here — this gate's
+# green is what CLAUDE.md cites as Lane 2's closure evidence ("0 non-lock unwrap/expect,
+# 0 panic!"). Probed, not assumed: with HIT regressed to a never-matching pattern, BOTH
+# existing controls pass (clean files are still clean; selftest() exercises the lexer,
+# never HIT) and `--check` prints "OK: zero production explicit-panic points", exit 0,
+# over a scan that examined nothing. Same disease as 404dacfe / 6d86ee2d / the
+# check-doc-citations matcher, all found the same day.
+#
+# The control is INLINE, deliberately. Pointing it at a real file containing a real
+# unwrap would rot the moment someone fixes that unwrap — and fixing them is the entire
+# point of the lane, so the control would be designed to die.
+HIT_MUST_FIND = [
+    ("let v = x.unwrap();", "plain unwrap"),
+    ('let v = x.expect("boom");', "expect"),
+    ("let e = r.unwrap_err();", "unwrap_err"),
+    ('let e = r.expect_err("boom");', "expect_err"),
+]
+HIT_MUST_NOT_COUNT = [
+    ("let g = state.read().unwrap();", "lock read-unwrap is LOCK, not a prod panic"),
+    ("let g = state.write().expect(\"poisoned\");", "lock write-expect is LOCK"),
+    ("let v = x.unwrap_or_default();", "unwrap_or_default is not a panic point"),
+    ("let n = 5;", "ordinary code"),
+]
+
+
 def validate():
     bad = []
     for f in BASELINE_CLEAN:
@@ -457,6 +484,22 @@ def validate():
         print("PARSER REGRESSION — baseline-clean files report hits:", file=sys.stderr)
         for f, (ln, txt) in bad:
             print(f"  {f}:{ln}: {txt}", file=sys.stderr)
+        sys.exit(2)
+
+    # The other direction: the matcher must still FIND what it exists to find.
+    blind = [(s, why) for s, why in HIT_MUST_FIND
+             if not (HIT.search(s) and not LOCK.search(s))]
+    noisy = [(s, why) for s, why in HIT_MUST_NOT_COUNT
+             if HIT.search(s) and not LOCK.search(s)]
+    if blind or noisy:
+        print("MATCHER REGRESSION — the panic discriminator no longer discriminates:",
+              file=sys.stderr)
+        for s, why in blind:
+            print(f"  MISSED  {s!r}  ({why})", file=sys.stderr)
+        for s, why in noisy:
+            print(f"  FALSE+  {s!r}  ({why})", file=sys.stderr)
+        print("  A blind matcher reports 'zero production explicit-panic points' and "
+              "exits 0 over a scan that examined nothing.", file=sys.stderr)
         sys.exit(2)
 
 

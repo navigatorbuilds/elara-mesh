@@ -7,8 +7,11 @@
 //! - Fixed 9-byte header. No negotiation, no extensions, no cipher-suite
 //!   selection — there is nothing to downgrade.
 //! - Length field is 3 bytes big-endian → max payload = 16 MiB. Handshake
-//!   messages cap well under that; data frames respect the session rekey
-//!   threshold (2^30 bytes total) which is far above any single frame.
+//!   messages cap well under that, and `MAX_PAYLOAD` bounds every data
+//!   frame. (Corrected 2026-09-07 — this clause used to justify the cap by
+//!   "the session rekey threshold (2^30 bytes total)". No such threshold
+//!   exists: `Rekey` below is a reserved discriminant with no
+//!   implementation. See `crypto`'s module docs — audit R2/pq-transport/PQT-02.)
 //! - Anything that fails to parse as a valid frame immediately drops the
 //!   connection. We never attempt to recognise TLS ClientHello or HTTP
 //!   requests from a probing adversary.
@@ -57,7 +60,11 @@ pub enum FrameType {
     Auth = 3,
     /// Post-handshake application payload, AEAD-protected.
     Data = 4,
-    /// Explicit session key rotation (rekey with fresh HKDF info label).
+    /// RESERVED — not implemented. The discriminant is fixed so the wire
+    /// format stays stable if rotation is ever added, but nothing in this
+    /// crate sends one, and the stream layer treats a received `Rekey` as
+    /// an error. Do not read this variant as evidence that sessions rotate
+    /// keys; they do not (audit R2/pq-transport/PQT-02).
     Rekey = 5,
     /// Graceful shutdown.
     Close = 6,

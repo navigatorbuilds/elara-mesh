@@ -11,9 +11,19 @@ pub mod zk;
 
 // ─── Algorithm Identifiers (Protocol §4.4 — Algorithm Agility) ─────────────
 //
-// Every signature specifies its algorithm ID so the protocol can migrate
-// to new algorithms without structural changes. Old records remain valid
-// under their original algorithms; new records use updated ones.
+// Every signature carries an algorithm ID, so a future migration would not
+// need a wire-format change. That is the whole of it today: the IDs are
+// RESERVED, not dispatched on. The decoder hard-rejects any primary
+// `sig_algorithm` other than `ALG_DILITHIUM3` (`elara-record`'s
+// `record.rs`, "only 0x.. Dilithium3 is currently accepted"), and every
+// verify path calls `dilithium3_verify` directly — there is no
+// `match sig_algorithm` anywhere in non-test code.
+//
+// Corrected 2026-09-07 (audit R2/crypto-sig/CS-1): this comment used to say
+// "old records remain valid under their original algorithms". That is NOT a
+// property this code has — a record signed under a retired algorithm is
+// rejected at decode, not grandfathered. Agility here is a wire affordance
+// for a migration that has not been built.
 
 /// Signature algorithm IDs — canonical in `elara_record::pqc` (record wire
 /// bytes carry them): Dilithium3 / ML-DSA-65 (FIPS 204) primary,

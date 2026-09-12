@@ -890,7 +890,10 @@ const TIMING_CLUSTER_THRESHOLD_SECS: f64 = 0.5;
 /// Layered consensus model (Steps 3+4, internal design notes):
 /// - Pending: Layer 1 validated (sig, format, balance, entropy), not yet in epoch seal
 /// - Sealed: Included in anchor-proposed epoch seal
-/// - Finalized: Epoch seal has >67% stake-weighted diverse attestations
+/// - Finalized: Epoch seal has >=2/3 stake-weighted diverse attestations
+///   (INCLUSIVE two-thirds = 66.67%, not >67% — `attesting * 3 >= eligible * 2`.
+///   Corrected 2026-09-07, audit R2/consensus-finality/CF-03: exactly 2/3 IS
+///   finalized, so the old wording described a stricter rule than ships.)
 /// - Anchored: Finalized + no open challenges after challenge window (24h)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[repr(u8)]
@@ -899,7 +902,8 @@ pub enum ConfirmationLevel {
     Pending = 0,
     /// Included in anchor's proposed epoch seal. (Was: Attested)
     Sealed = 1,
-    /// Epoch seal has >67% stake-weighted diverse attestations. (Was: Confirmed)
+    /// Epoch seal has >=2/3 (inclusive) stake-weighted diverse attestations.
+    /// (Was: Confirmed.) See `ConfirmationLevel`'s type docs on the 67% correction.
     Finalized = 2,
     /// Finalized + no open challenges after challenge window. (Was: Anchored)
     Anchored = 3,
@@ -3946,7 +3950,7 @@ pub struct CommitteeSizeSummary {
 ///
 /// In layered consensus, witnesses attest to epoch seals rather than individual
 /// records. This is the fundamental shift from per-record to per-epoch consensus.
-/// An epoch seal with >67% diverse-weighted attestation is Finalized, and all
+/// An epoch seal with >=2/3 (inclusive) diverse-weighted attestation is Finalized, and all
 /// records it contains inherit that status.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SealAttestation {
@@ -4122,24 +4126,37 @@ impl AWCConsensus {
     /// Edge-guarded seal-member promotion (shared by the fast-track in
     /// `add_seal_attestation`, the R1 settle-check in
     /// `register_seal_records`, and the R2 late-member resolution).
-    /// Promotes each rid to Finalized and fires the commit callback ONLY on
-    /// the pre-finality → Finalized edge — a seal that re-lands its own
-    /// records (already at Finalized/Anchored via recompute or force) must
-    /// not double-fire; that would double-commit the pending delta.
-    /// Returns exactly the rids whose edge fired this call.
+    /// Promotes each **pre-finality** rid to Finalized and fires the commit
+    /// callback ONLY on the pre-finality → Finalized edge — a seal that
+    /// re-lands its own records (already at Finalized/Anchored via recompute
+    /// or force) must not double-fire; that would double-commit the pending
+    /// delta. A rid already at Finalized or Anchored is left untouched:
+    /// confirmation level is monotonic and this path must never downgrade
+    /// (CF-01). Returns exactly the rids whose edge fired this call.
     fn promote_seal_members(&mut self, record_ids: &[String]) -> Vec<String> {
         let mut newly_finalized = Vec::new();
         for rid in record_ids {
             let old = self.confirmation_levels.get(rid).copied();
-            self.confirmation_levels
-                .insert(rid.clone(), ConfirmationLevel::Finalized);
-            if !matches!(
+            // CF-01 (audit R2/consensus-finality, fixed 2026-09-07): the write
+            // used to run UNCONDITIONALLY and `old` gated only the callback
+            // edge below — so a seal re-landing its own records (the case this
+            // function's doc anticipates) clobbered a member that had since
+            // reached Anchored (3) back down to Finalized (2). Confirmation
+            // level is monotonic: this type already enforces that in
+            // `force_finalized`, and `promote_anchored`'s doc states the
+            // add_seal_attestation edge guard treats Anchored as terminal.
+            // Skipping early keeps the edge semantics byte-identical (a
+            // member at Finalized re-inserted Finalized and fired nothing).
+            if matches!(
                 old,
                 Some(ConfirmationLevel::Finalized) | Some(ConfirmationLevel::Anchored)
             ) {
-                self.enqueue_finalized(rid);
-                newly_finalized.push(rid.clone());
+                continue;
             }
+            self.confirmation_levels
+                .insert(rid.clone(), ConfirmationLevel::Finalized);
+            self.enqueue_finalized(rid);
+            newly_finalized.push(rid.clone());
         }
         newly_finalized
     }
@@ -4424,7 +4441,8 @@ impl AWCConsensus {
         (eligible_records, eligible_seals, entries)
     }
 
-    /// Check if an epoch seal has reached settlement (>67% diverse-weighted stake).
+    /// Check if an epoch seal has reached settlement (>=2/3 inclusive
+    /// diverse-weighted stake — `3 * eff_q >= 2 * eligible * Q`).
     ///
     /// For Stage 3c.1 global quorum seals, the denominator is sum of
     /// zone_stakes over all zones ≠ stuck_zone (the stuck zone cannot
@@ -12000,6 +12018,45 @@ mod tests {
             awc.confirmation_levels.get(rid).copied(),
             Some(ConfirmationLevel::Anchored),
             "force_finalized must NOT downgrade Anchored to Finalized"
+        );
+    }
+
+    /// R2/consensus-finality/CF-01. The seal-settled promotion path read the
+    /// member's old level but wrote `Finalized` UNCONDITIONALLY, using `old`
+    /// only to gate the commit callback. So a seal that re-lands its own
+    /// records — a case `promote_seal_members`' own doc anticipates — clobbered
+    /// a member that had since reached `Anchored` (3) back down to `Finalized`
+    /// (2). This type already holds and tests that invariant for
+    /// `force_finalized`, and `promote_anchored`'s doc states the
+    /// `add_seal_attestation` edge guard "treats Anchored as terminal" — true
+    /// of the callback, not of the write. This pins the rule on the seal path.
+    #[test]
+    fn cf01_promote_seal_members_must_not_downgrade_anchored() {
+        let mut awc = AWCConsensus::new();
+
+        let anchored = "rec-already-anchored";
+        let sealed = "rec-still-sealed";
+        awc.confirmation_levels
+            .insert(anchored.to_string(), ConfirmationLevel::Anchored);
+        awc.confirmation_levels
+            .insert(sealed.to_string(), ConfirmationLevel::Sealed);
+
+        let newly = awc.promote_seal_members(&[anchored.to_string(), sealed.to_string()]);
+
+        assert_eq!(
+            awc.confirmation_levels.get(anchored).copied(),
+            Some(ConfirmationLevel::Anchored),
+            "a re-landed seal must NOT downgrade an Anchored member to Finalized"
+        );
+        assert_eq!(
+            awc.confirmation_levels.get(sealed).copied(),
+            Some(ConfirmationLevel::Finalized),
+            "a pre-finality member must still be promoted to Finalized"
+        );
+        assert_eq!(
+            newly,
+            vec![sealed.to_string()],
+            "only the pre-finality member fires the newly-finalized edge"
         );
     }
 

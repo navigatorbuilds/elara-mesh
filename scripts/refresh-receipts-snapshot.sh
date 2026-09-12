@@ -670,12 +670,25 @@ echo "receipts: wrote $OUT"
 #     exactly as the hand-commit workflow would find it. This stage never fails
 #     the snapshot: the feed is written either way.
 # ---------------------------------------------------------------------------
+# The stage below reports every skip reason it has — and under cron
+# (`>/dev/null 2>&1`) every one of them was unreachable. Measured 2026-09-07: the
+# 00:00 run wrote its files and did NOT commit, and WHY is now permanently
+# unknowable because both streams were discarded. 93 lines of careful failure
+# reporting are worth nothing if the only caller throws them away, so the stage
+# also appends to a log, the way elara-mail-watch.sh and
+# elara-feed-staleness-watch.sh already do. stdout is kept as-is for manual runs.
+RCLOG="$REPO_DIR/logs/receipts-refresh.log"
+rlog() { printf '%s %s\n' "$(date -u +%FT%TZ)" "$*" >> "$RCLOG" 2>/dev/null || true; }
+
 receipts_commit_own_output() {
     local paths=() abs rel gd subject pairs acts branch
 
-    cd "$REPO_DIR" || { echo "receipts: commit skipped — cannot cd $REPO_DIR" >&2; return 0; }
+    cd "$REPO_DIR" || {
+        echo "receipts: commit skipped — cannot cd $REPO_DIR" >&2
+        rlog "receipts: commit skipped — cannot cd $REPO_DIR"; return 0; }
     timeout 15 git rev-parse --git-dir >/dev/null 2>&1 || {
-        echo "receipts: commit skipped — $REPO_DIR is not a git repo" >&2; return 0; }
+        echo "receipts: commit skipped — $REPO_DIR is not a git repo" >&2
+        rlog "receipts: commit skipped — $REPO_DIR is not a git repo"; return 0; }
 
     for abs in "$OUT" "$VERIFY_DIR"; do
         rel="$(realpath -m --relative-to="$REPO_DIR" "$abs")"
@@ -687,27 +700,32 @@ receipts_commit_own_output() {
 
     if [ -z "$(timeout 30 git status --porcelain -- "${paths[@]}" 2>/dev/null)" ]; then
         echo "receipts: nothing to commit (${paths[*]} already clean)"
+        rlog "receipts: nothing to commit (${paths[*]} already clean)"
         return 0
     fi
 
     gd="$(timeout 15 git rev-parse --git-dir 2>/dev/null)"
     if [ -e "$gd/index.lock" ]; then
         echo "receipts: commit skipped — another git process holds the index lock" >&2
+        rlog "receipts: commit skipped — another git process holds the index lock"
         return 0
     fi
     if [ -d "$gd/rebase-merge" ] || [ -d "$gd/rebase-apply" ] || [ -e "$gd/MERGE_HEAD" ]; then
         echo "receipts: commit skipped — merge/rebase in progress" >&2
+        rlog "receipts: commit skipped — merge/rebase in progress"
         return 0
     fi
     branch="$(timeout 15 git symbolic-ref -q --short HEAD 2>/dev/null)" || branch=""
     if [ -z "$branch" ]; then
         echo "receipts: commit skipped — detached HEAD" >&2
+        rlog "receipts: commit skipped — detached HEAD"
         return 0
     fi
 
     # -N so freshly minted, still-untracked pair files land in the pathspec commit.
     timeout 60 git add -N -- "${paths[@]}" >/dev/null 2>&1 || {
-        echo "receipts: commit skipped — git add -N failed" >&2; return 0; }
+        echo "receipts: commit skipped — git add -N failed" >&2
+        rlog "receipts: commit skipped — git add -N failed"; return 0; }
 
     pairs="$(timeout 30 git status --porcelain -- "${paths[1]}" 2>/dev/null \
              | grep -c '\.receipt\.json$' || true)"
@@ -718,16 +736,41 @@ PY
 )"
     subject="chore(site): receipts snapshot churn ($(date +%H:%M) refresh — ${pairs} envelope pair(s), ${acts} acts)"
 
-    if timeout 120 git commit -q -m "$subject" -m "Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+    # RETRY (2026-09-07): this commit's pre-commit hook opens with
+    # `cargo test --lib --no-run`, so it BLOCKS whenever anything else holds the
+    # cargo target-dir lock — an agent's gate, a manual build — and then the 120s
+    # timeout fires. Measured live at 04:00:54Z that day: a concurrent
+    # clippy+lib gate stranded 17 site/ files dirty, which is exactly the
+    # deploy-blocking state D13 was closed to prevent. The failure is fail-safe
+    # (nothing lands half-done), so the fix is patience, not force — wait the
+    # lock out. Three attempts spans ~4 min against a 6-hourly cadence, and a
+    # permanent failure still ends in the same honest dirty-tree warning below.
+    local _commit_ok=1 _attempt
+    for _attempt in 1 2 3; do
+        if timeout 120 git commit -q -m "$subject" -m "Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_0145dWMAa8b5TAZrE2mrUfbV" -- "${paths[@]}"; then
-        echo "receipts: committed $(timeout 15 git rev-parse --short HEAD) — $subject"
+            _commit_ok=0
+            break
+        fi
+        if (( _attempt < 3 )); then
+            rlog "receipts: commit attempt ${_attempt}/3 failed (cargo target-dir lock is the usual cause) — retrying in 120s"
+            sleep 120
+        fi
+    done
+    if (( _commit_ok == 0 )); then
+        local sha; sha="$(timeout 15 git rev-parse --short HEAD 2>/dev/null)"
+        echo "receipts: committed $sha — $subject"
+        rlog "receipts: committed $sha — $subject"
         if timeout 180 git push -q origin "$branch" 2>/dev/null; then
             echo "receipts: pushed"
+            rlog "receipts: pushed"
         else
             echo "receipts: WARNING — commit landed but push failed; it will ride the next push" >&2
+            rlog "receipts: WARNING — commit landed but push failed; it will ride the next push"
         fi
     else
         echo "receipts: WARNING — commit failed; tree left dirty for a hand commit" >&2
+        rlog "receipts: WARNING — commit failed; tree left dirty for a hand commit"
     fi
     return 0
 }

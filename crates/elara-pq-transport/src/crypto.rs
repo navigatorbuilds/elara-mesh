@@ -24,9 +24,19 @@
 //! # AEAD
 //!
 //! ChaCha20-Poly1305 with a 96-bit monotonic counter nonce, one counter
-//! per direction. No nonce reuse within a rekey window (2^30 bytes or
-//! 5 minutes). Nonce values do not collide across directions because
-//! `k_send ≠ k_recv`.
+//! per direction. The counter is strictly monotonic and never rewinds, so
+//! no nonce repeats for the life of a session; nonce values do not collide
+//! across directions because `k_send ≠ k_recv`.
+//!
+//! **Session keys are NOT rotated.** `FrameType::Rekey` is a reserved wire
+//! discriminant with no implementation — there is no byte-count threshold
+//! and no timer in this crate, and nothing here ever sends one. (The stream
+//! layer that consumes this crate lives outside it and rejects a received
+//! `Rekey` outright.) Key rotation happens only by tearing down the session
+//! and running a fresh handshake. (Corrected 2026-09-07: this section
+//! previously described a "rekey window (2^30 bytes or 5 minutes)", which
+//! read as an implemented rotation policy and was never one — audit finding
+//! R2/pq-transport/PQT-02.)
 
 use chacha20poly1305::{
     aead::{Aead, KeyInit},
@@ -94,9 +104,12 @@ impl TranscriptHash {
 
 /// A symmetric AEAD key with its monotonic nonce counter.
 ///
-/// The caller is responsible for rekeying before the counter wraps
-/// (2^96 messages — practically unreachable before the byte-count rekey
-/// threshold fires).
+/// The counter is 64-bit, big-endian, in the trailing 8 bytes of the
+/// 12-byte nonce (the leading 4 stay zero). `encrypt` fails closed at the
+/// wrap point — `checked_add(1)` → [`CryptoError::NonceExhausted`] — so a
+/// nonce is never reused. Nothing rotates the key underneath it: see the
+/// module docs, there is no byte-count or time rekey threshold in this
+/// crate, so an exhausted session must be torn down, not rekeyed.
 pub struct AeadKey {
     key: [u8; AEAD_KEY_LEN],
     counter: u64,

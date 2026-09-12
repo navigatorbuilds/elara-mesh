@@ -76,7 +76,7 @@
 # Verified against ProVerif 2.05.
 set -uo pipefail
 
-cd "$(dirname "$0")"
+cd "$(dirname "$0")" || exit 1
 CORE="elara_handshake_core.pvi"
 RECORD_CORE="elara_record_core.pvi"
 COMPOSED_CORE="elara_composed_core.pvi"

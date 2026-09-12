@@ -14,7 +14,7 @@
 # Env:   TLA_TOOLS_JAR=/path/to/tla2tools.jar  to use a pre-fetched jar.
 set -uo pipefail
 
-cd "$(dirname "$0")"
+cd "$(dirname "$0")" || exit 1
 JAR="${TLA_TOOLS_JAR:-$HOME/.local/share/tlaplus/tla2tools.jar}"
 TLA_URL="https://github.com/tlaplus/tlaplus/releases/latest/download/tla2tools.jar"
 

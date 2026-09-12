@@ -1,7 +1,17 @@
 """Smoke tests for the elara SDK against an in-process HTTP stub.
 
-Run with: ``python -m unittest -v tests/test_agent.py``
-(or via pytest if you'd rather: ``pytest tests/``).
+Run from ``sdks/python`` with:
+
+    python3 -m unittest discover -s tests -p 'test_agent.py'   # stdlib, 13 tests
+    python3 -m pytest tests/test_agent.py -q                   # same, if you have pytest
+
+The command this docstring carried until 2026-09-07 —
+``python -m unittest -v tests/test_agent.py`` — does not work: ``tests/`` has no
+``__init__.py``, so unittest cannot import it as a dotted module and exits
+``ModuleNotFoundError: No module named 'tests.test_agent'``. Nothing noticed
+because no gate ran the suite; it had been dormant since 2026-06-16. Prefer the
+``discover`` form in gates: it needs no third-party package, so a runner without
+pytest still executes it.
 """
 
 from __future__ import annotations

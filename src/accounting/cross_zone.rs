@@ -1147,9 +1147,25 @@ impl CrossZoneState {
         before - self.pending.len()
     }
 
-    /// Count of currently locked (in-flight) transfers.
+    /// Count of currently locked (in-flight) transfers. **O(1)** — served from
+    /// the incrementally-maintained `locked_count` field, not a scan.
+    ///
+    /// XZ-2 (audit R2/cross-zone, fixed 2026-09-07): this used to be
+    /// `pending.values().filter(...).count()`, an O(pending) scan, and
+    /// `/metrics` calls it on every scrape **under the ledger read lock** —
+    /// the exact pattern the O(1) per-status counters were introduced to
+    /// avoid. The explorer surface already read the field directly, so one
+    /// node answered the same question two different ways.
+    ///
+    /// Safe because the field is correct by construction, checked at every
+    /// mutation site rather than assumed: `+= 1` on lock creation, and a
+    /// `saturating_sub` paired with **every** transition out of `Locked`
+    /// (Claimed / Refunded ×4 / Aborted / the batch arm). `prune_completed`
+    /// cannot desynchronise it — its retain predicate keeps `Locked`
+    /// unconditionally, so no Locked entry is ever dropped. Pinned by
+    /// `xz2_locked_count_field_matches_scan_across_lifecycle`.
     pub fn locked_count(&self) -> usize {
-        self.pending.values().filter(|t| t.status == TransferStatus::Locked).count()
+        self.locked_count as usize
     }
 
     /// Age of the oldest still-Locked transfer, in seconds. Returns 0 if no
@@ -2327,6 +2343,60 @@ mod tests {
             s.state_digest(),
             "source_seal_signers must be EXCLUDED from the digest"
         );
+    }
+
+    /// XZ-2: `locked_count()` is now O(1), served from the incrementally
+    /// maintained field instead of an O(pending) scan — `/metrics` calls it on
+    /// every scrape under the ledger read lock. That is only safe while the
+    /// field cannot drift from the truth, so pin the two against each other
+    /// across a lifecycle: lock, cancel (sender-side), reject
+    /// (recipient-side), passive expiry, and a prune. If a future transition
+    /// out of `Locked` forgets its decrement, the scan and the field part ways
+    /// here rather than on a production gauge.
+    #[test]
+    fn xz2_locked_count_field_matches_scan_across_lifecycle() {
+        let scan = |s: &CrossZoneState| {
+            s.pending
+                .values()
+                .filter(|t| t.status == TransferStatus::Locked)
+                .count()
+        };
+        let mut state = CrossZoneState::new();
+        let src = ZoneId::new("finance/us");
+        let dst = ZoneId::new("finance/eu");
+
+        for (i, id) in ["tx-a", "tx-b", "tx-c", "tx-d"].iter().enumerate() {
+            let (leaf, _p, _r) = make_test_proof(id.as_bytes());
+            state
+                .lock_transfer(
+                    (*id).into(),
+                    "alice".into(),
+                    "bob".into(),
+                    1_000 * (i as u64 + 1),
+                    src.clone(),
+                    dst.clone(),
+                    1000.0,
+                    leaf,
+                )
+                .expect("lock");
+        }
+        assert_eq!(state.locked_count(), scan(&state), "after locks");
+        assert_eq!(state.locked_count(), 4);
+
+        state.cancel_transfer("tx-a", "alice").expect("cancel");
+        assert_eq!(state.locked_count(), scan(&state), "after sender cancel");
+
+        state.reject_transfer("tx-b", "bob").expect("reject");
+        assert_eq!(state.locked_count(), scan(&state), "after recipient reject");
+
+        // Passive expiry: well past CLAIM_TIMEOUT_SECS for the remaining locks.
+        let _ = state.process_expired(1000.0 + CLAIM_TIMEOUT_SECS + 1.0);
+        assert_eq!(state.locked_count(), scan(&state), "after passive expiry");
+
+        // Pruning drops terminal entries; it must never touch the Locked set,
+        // which is what keeps the O(1) field authoritative.
+        state.prune_completed(f64::MAX);
+        assert_eq!(state.locked_count(), scan(&state), "after prune");
     }
 
     #[test]

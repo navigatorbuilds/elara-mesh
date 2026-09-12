@@ -1784,8 +1784,31 @@ impl EpochState {
 
         // Gap 1: Track globally-latest sealed account SMT root. Only
         // updates if the seal carries account_smt_root (pre-Gap 1 seals
-        // leave this as None) AND this seal is newer than the stored
-        // binding (compare by epoch then zone to break ties).
+        // leave this as None) AND this seal is newer than the stored binding.
+        //
+        // ⚠ EPOCH-01 (audit R2/epoch-sealing; confirmed at HEAD 2026-09-07,
+        // NOT fixed here). This comment used to promise "compare by epoch then
+        // zone to break ties". The comparison below is epoch-ONLY, so on an
+        // equal-epoch collision across zones the FIRST-ARRIVED seal wins and two
+        // honest nodes that saw the pair in opposite orders keep different
+        // bindings. The rule is left documented-as-intended rather than reworded
+        // to match the code, because the documented rule is the correct one —
+        // describing the epoch-only compare would enshrine the defect in prose.
+        //
+        // The recovery path uses a DIFFERENT rule: `fallback_latest_sealed_account`
+        // runs a REVERSE range scan over the DISC-5 index and takes the first
+        // entry carrying a root, i.e. highest `(epoch, zone, record_id)` —
+        // deterministic, but lex-MAX on zone. So live and post-restart can
+        // disagree with no seal having changed: the same live≠boot divergence
+        // shape as R1-X1-CS.
+        //
+        // INERT while a node tracks one zone (live check 2026-09-07:
+        // `elara_zone_activity_zones_tracked` = 1); it arms when the auto-scaler
+        // splits, which is automatic, not an operator action. Fixing it means
+        // choosing ONE canonical tiebreak and applying it in BOTH places — a fix
+        // to the live side alone recreates the divergence the CS verifier
+        // flagged. No test constructs an equal-epoch cross-zone collision today.
+        // Consensus-adjacent ⇒ AUDIT-FIRST, own cycle.
         if let Some(root) = seal.account_smt_root {
             let is_newer = match &self.latest_sealed_account {
                 None => true,

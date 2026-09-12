@@ -48,7 +48,7 @@ pub struct ConformanceVector {
     /// Stable identifier, e.g. `sha3-256/abc`.
     pub name: String,
     /// Primitive under test: `sha3-256` | `smt-empty` | `smt-leaf` |
-    /// `smt-interior` | `smt-proof` | `smt-proof-reject` | `identity-derivation`
+    /// `smt-interior` | `smt-proof` | `smt-proof-reject` | `smt-exclusion` | `identity-derivation`
     /// | `record-hash` | `merkle-inclusion` | `merkle-inclusion-reject` |
     /// `mldsa65-sig` | `mldsa65-sig-reject` | `account-binding` |
     /// `account-binding-reject` | `seal-anchor-sig` | `seal-anchor-sig-reject`.
@@ -329,6 +329,73 @@ pub fn generate_vector_set(
             "state_hash": hex::encode(bob_proof.state_hash),
             "present": hex::encode(bob_proof.present),
             "siblings": tampered.iter().map(hex::encode).collect::<Vec<_>>(),
+        }),
+        expected: hex::encode(bob_proof.root),
+    });
+
+    // ── Account-SMT EXCLUSION proof (§6.5 / Appendix A) ──────────────────────
+    // The only shape in §6 an outside implementation cannot reach by accident:
+    // on an INCLUSION path the empty-collapse rule is unreachable (the running
+    // value starts as a leaf hash and every parent is an interior hash, so "both
+    // children EMPTY" never occurs). It fires only when the fold STARTS at
+    // EMPTY_HASH — i.e. here. An independent reader of the 25 published vectors
+    // reached 21/25 without ever meeting it, and said so.
+    //
+    // Same tree, same bitmap and sibling semantics, same consumption rule as
+    // `smt-proof`; the single difference is the starting value. That is exactly
+    // what makes it worth pinning in a language-agnostic vector: it certifies
+    // that a second implementation can prove ABSENCE, which is the property a
+    // light client needs to detect withholding without trusting the responder.
+    let acc_dave = sha3_256(b"dave");
+    let dave_excl = smt
+        .exclusion_proof(&acc_dave)
+        .map_err(|e| format!("conformance smt exclusion_proof(dave) failed: {e}"))?
+        .ok_or_else(|| {
+            "conformance: dave must be ABSENT from the alice/bob/carol tree".to_string()
+        })?;
+    vectors.push(ConformanceVector {
+        name: "smt-exclusion/dave-absent-from-abc".into(),
+        primitive: "smt-exclusion".into(),
+        spec_ref: "§6.5 / Appendix A".into(),
+        note: "Fold a compressed account-SMT EXCLUSION (non-membership) proof to                its root. Identical to `smt-proof` in every respect except the                starting value: there is NO leaf and NO state_hash — the fold                starts at EMPTY_HASH (= SHA3-256(\"\")) at the key's leaf                position. path = SHA3-256(account_id); fold parent_depth 255 → 0                taking the next unconsumed `siblings` entry when present-bit[depth]                is set, else EMPTY_HASH; (left, right) = (sibling, current) if                bit(path, depth) else (current, sibling); parent = SHA3-256(0x01 ||                left || right) UNLESS both children are EMPTY_HASH, in which case                parent = EMPTY_HASH. That empty-collapse branch is UNREACHABLE on                an inclusion path and reachable here — implement it or this vector                will not fold. All bits MSB-first. Every sibling must be consumed                and the result must equal `expected`, the same root the inclusion                vectors fold to. `dave` is absent from the alice/bob/carol tree; a                verifier that folds this to the sealed root has proven a key is                NOT in the tree without trusting the responder."
+            .into(),
+        input: serde_json::json!({
+            "account_id": hex::encode(dave_excl.account_id),
+            "present": hex::encode(dave_excl.present),
+            "siblings": dave_excl
+                .siblings
+                .iter()
+                .map(hex::encode)
+                .collect::<Vec<_>>(),
+        }),
+        expected: hex::encode(dave_excl.root),
+    });
+
+    // ── Account-SMT EXCLUSION REJECTION (§6.5 / Appendix A) ──────────────────
+    // The fail-CLOSED twin the set's own convention requires: every proof-shaped
+    // primitive here carries one, because a positive vector alone cannot catch an
+    // implementation that always answers "absent". The adversarial case is not a
+    // tampered sibling — it is claiming absence for a key that is PRESENT, which
+    // is exactly how a responder denies that a record exists. So: take BOB, who is
+    // in the tree, and his real sibling set, and fold from EMPTY_HASH as though no
+    // leaf occupied his slot. A sound verifier folds it, does NOT reach the sealed
+    // root (bob's slot holds a leaf hash, not EMPTY), and REJECTS. One that accepts
+    // has granted a proof of absence for present data — the withholding break, and
+    // the mirror image of the fail-OPEN that `smt-proof-reject` guards.
+    vectors.push(ConformanceVector {
+        name: "smt-exclusion-reject/bob-is-present".into(),
+        primitive: "smt-exclusion-reject".into(),
+        spec_ref: "§6.5 / Appendix A".into(),
+        note: "MUST-REJECT twin of `smt-exclusion/dave-absent-from-abc`. Fold it                EXACTLY as `smt-exclusion` — no leaf, start at EMPTY_HASH in the                key's slot — but the key is `bob`, who IS in the alice/bob/carol                tree, carrying bob's own real `present` bitmap and siblings. The                fold does NOT reconstruct the sealed root, because bob's slot holds                `leaf = SHA3-256(0x00 || account_id || state_hash)` and not                EMPTY_HASH, so a sound verifier REJECTS (`expected` is the sealed                root and the fold must DIFFER from it). An implementation that                accepts this has issued a cryptographic proof that present data is                absent — the withholding break §6.5 exists to prevent, and the one                an always-answer-absent verifier passes every positive vector                without ever revealing. `expected` is the sealed root, as in                `smt-proof-reject`: compare and require inequality."
+            .into(),
+        input: serde_json::json!({
+            "account_id": hex::encode(bob_proof.account_id),
+            "present": hex::encode(bob_proof.present),
+            "siblings": bob_proof
+                .siblings
+                .iter()
+                .map(hex::encode)
+                .collect::<Vec<_>>(),
         }),
         expected: hex::encode(bob_proof.root),
     });
@@ -1710,6 +1777,10 @@ mod tests {
             "smt-interior",
             "smt-proof",
             "smt-proof-reject",
+            // §6.5 non-membership — the one §6 shape unreachable on an inclusion
+            // path, so an implementation can be 21-of-25 correct without it.
+            "smt-exclusion",
+            "smt-exclusion-reject",
             "identity-derivation",
             "record-hash",
             "merkle-inclusion",

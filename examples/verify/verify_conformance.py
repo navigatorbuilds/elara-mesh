@@ -26,6 +26,8 @@ Primitives reproduced here (the self-contained deterministic set):
   smt-interior         SHA3-256(0x01 || left || right)  (domain tag 0x01, §6.2)
   smt-proof            fold compressed inclusion proof → root  (256-level, §6.2)
   smt-proof-reject     tampered proof MUST NOT fold to the claimed root (fail-closed)
+  smt-exclusion        fold a NON-MEMBERSHIP proof → the same root  (256-level, §6.5)
+  smt-exclusion-reject absence claimed for a PRESENT key MUST NOT fold to the root
   identity-derivation  SHA3-256(creator_public_key)     (§3.1)
   merkle-inclusion     fold record-membership proof → root  (NO tags: SHA3(left||right), §11.22.1)
   merkle-inclusion-reject  tampered proof MUST NOT fold to the claimed root (fail-closed)
@@ -78,7 +80,7 @@ def tag_byte(tag: str) -> bytes:
 
 
 def smt_fold_to_root(
-    account_id: bytes, state_hash: bytes, present: bytes, siblings: list
+    account_id: bytes, state_hash, present: bytes, siblings: list
 ) -> str:
     """Fold a compressed account-SMT inclusion proof to its root, from scratch.
 
@@ -100,7 +102,14 @@ def smt_fold_to_root(
         # MSB-first: bit 0 is the most-significant bit of byte 0.
         return (b[i // 8] >> (7 - (i % 8))) & 1
 
-    current = hashlib.sha3_256(b"\x00" + account_id + state_hash).digest()  # leaf
+    # state_hash None => EXCLUSION proof: there is no leaf, the fold starts at
+    # EMPTY_HASH in the key's slot (§6.5). Everything below is bit-for-bit the
+    # same routine — which is the property the exclusion vector exists to pin,
+    # and the only path on which the empty-collapse branch below is reachable.
+    if state_hash is None:
+        current = empty
+    else:
+        current = hashlib.sha3_256(b"\x00" + account_id + state_hash).digest()  # leaf
     path = hashlib.sha3_256(account_id).digest()  # 256-bit path
     idx = 0
     parent_depth = 256
@@ -116,7 +125,7 @@ def smt_fold_to_root(
         else:  # we are the left child
             left, right = current, sib
         if left == empty and right == empty:
-            current = empty  # empty-subtree collapse (inert for inclusion)
+            current = empty  # empty-subtree collapse (inert for inclusion, LIVE for exclusion)
         else:
             current = hashlib.sha3_256(b"\x01" + left + right).digest()
     if idx != len(siblings):
@@ -235,6 +244,23 @@ def reproduce(vec: dict) -> str:
         return smt_fold_to_root(
             unhex(inp["account_id"]),
             unhex(inp["state_hash"]),
+            unhex(inp["present"]),
+            [unhex(s) for s in inp["siblings"]],
+        )
+
+    if prim in ("smt-exclusion", "smt-exclusion-reject"):
+        # Non-membership (§6.5): same fold, no leaf. Passing state_hash=None makes
+        # the routine start at EMPTY_HASH — the ONE difference from `smt-proof`,
+        # and the reason this vector exists: on an inclusion path the empty-collapse
+        # branch is unreachable, so an implementation can be 21-of-25 correct and
+        # still not have it. Folds to the SAME root as `smt-proof/bob-in-abc`.
+        # The `-reject` twin claims absence for a key that is PRESENT (bob), so the
+        # same fold must NOT reach the sealed root; main() inverts the comparison
+        # generically for any `*-reject` whose expected is a hash. Without it, a
+        # verifier that always answers "absent" passes every positive vector.
+        return smt_fold_to_root(
+            unhex(inp["account_id"]),
+            None,
             unhex(inp["present"]),
             [unhex(s) for s in inp["siblings"]],
         )

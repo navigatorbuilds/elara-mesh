@@ -1197,6 +1197,15 @@ impl PqNodeClient {
         Self::json_body(&body, "snapshot_full")
     }
 
+    /// NO IN-TREE CALLER, AND THAT IS DELIBERATE — do not "clean this up".
+    ///
+    /// This and `get_snapshot_fast_chunk` are the client half of `/snapshot/fast`,
+    /// an endpoint we serve and document in internal design notes; its consumers are
+    /// external. The two `sync.rs` wrappers that used to call them were removed
+    /// 2026-09-07 with the unreachable `snapshot_sync` driver (audit SS-2) — see
+    /// the `network::sync` module header. Deleting a served endpoint's client
+    /// surface because the *node* does not dial its own endpoint is how that
+    /// orphan chain formed in the first place.
     pub async fn get_snapshot_fast_meta(
         &self,
         peer_addr: &str,

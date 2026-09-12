@@ -1,11 +1,23 @@
-//! Delta sync + snapshot fast sync — Merkle tree + Bloom filter for efficient
-//! state synchronization, with a snapshot fast path for nodes that have been
-//! offline for extended periods.
+//! Delta sync + snapshot bootstrap — Merkle tree + Bloom filter for efficient
+//! state synchronization.
 //!
-//! When delta sync would need >1000 records, the sync loop automatically
-//! switches to snapshot fast sync: download records in 500-record chunks,
-//! verify the Merkle root against the peer's latest epoch seal, and import
-//! in bulk. Supports resume after connection drops via cursor.
+//! The catch-up path for a node that has been offline is
+//! `initial_sync_from` → `snapshot_bootstrap` → `apply_bootstrap_snapshot_full`.
+//!
+//! This header used to describe an automatic switch to a client-side "snapshot
+//! fast sync" above a 1000-record gap. **No such switch ever ran** — the
+//! 2026-07-03 audit filed it as SS-2, and the client half (`snapshot_sync`,
+//! `should_use_fast_sync`, the two `pq_snapshot_fast_*` wrappers and
+//! `SNAPSHOT_SYNC_THRESHOLD`) was unreachable: `39881b00` deleted its only
+//! caller, and the rest was removed 2026-09-07. The audit also measured why
+//! reviving it would be wrong as written — it accumulated every served record
+//! into two full Vecs, i.e. O(all_records)×2 memory, against the SCALE RULE.
+//!
+//! The SERVER half stays and is live, documented API: `/snapshot/fast`
+//! (`routes::sync::serve_snapshot_fast` → `build_snapshot_chunk`, and the PQ
+//! twin in `pq_transport::router`). Its client-side callers are external, so
+//! `PqClient::get_snapshot_fast_{meta,chunk}` are deliberately kept with no
+//! in-tree caller — they are the client surface of an endpoint we serve.
 
 //!
 //! Spec references:
@@ -1140,25 +1152,6 @@ async fn pq_snapshot(
 ) -> Result<super::snapshot::NodeSnapshot> {
     let pq_addr = derive_pq_addr(state, base_url)?;
     state.pq_client.get_snapshot(&pq_addr).await
-}
-
-async fn pq_snapshot_fast_meta(
-    state: &Arc<NodeState>,
-    base_url: &str,
-    since_epoch: Option<u64>,
-) -> Result<SnapshotFastMeta> {
-    let pq_addr = derive_pq_addr(state, base_url)?;
-    state.pq_client.get_snapshot_fast_meta(&pq_addr, since_epoch).await
-}
-
-async fn pq_snapshot_fast_chunk(
-    state: &Arc<NodeState>,
-    base_url: &str,
-    cursor: Option<&str>,
-    since_epoch: Option<u64>,
-) -> Result<SnapshotChunk> {
-    let pq_addr = derive_pq_addr(state, base_url)?;
-    state.pq_client.get_snapshot_fast_chunk(&pq_addr, cursor, since_epoch).await
 }
 
 /// Run initial sync — tries snapshot bootstrap first, falls back to delta sync.
@@ -2446,10 +2439,6 @@ async fn apply_bootstrap_snapshot_full(
 
 // ─── Snapshot Fast Sync ─────────────────────────────────────────────────────
 
-/// Threshold: if delta sync would need more than this many records,
-/// switch to snapshot fast sync instead.
-pub const SNAPSHOT_SYNC_THRESHOLD: usize = 1000;
-
 /// Number of records per chunk in snapshot fast sync.
 pub const SNAPSHOT_CHUNK_SIZE: usize = 500;
 
@@ -2533,208 +2522,6 @@ pub fn build_snapshot_chunk(
         merkle_root,
         epoch_number,
     })
-}
-
-/// Client-side: perform snapshot fast sync from the best peer.
-///
-/// Downloads records in chunks of 500, tracks progress via cursor,
-/// verifies the Merkle root at the end, and imports into local storage.
-/// Falls back to delta sync if verification fails.
-///
-/// Returns Ok(records_imported) on success, Err on failure.
-pub async fn snapshot_sync(
-    state: &Arc<NodeState>,
-    base_url: &str,
-    since_epoch: Option<u64>,
-) -> Result<u64> {
-    info!("snapshot fast sync: starting from {base_url}");
-
-    // Step 1: Get metadata to know what we're dealing with
-    let meta = pq_snapshot_fast_meta(state, base_url, since_epoch).await?;
-    info!(
-        "snapshot fast sync: peer has {} records, merkle_root={}..., epoch={}",
-        meta.total_records,
-        &meta.merkle_root[..meta.merkle_root.len().min(16)],
-        meta.epoch_number,
-    );
-
-    if meta.total_records == 0 {
-        info!("snapshot fast sync: peer has no records");
-        return Ok(0);
-    }
-
-    // Step 2: Download chunks, collecting all wire bytes
-    let mut all_wire_bytes: Vec<Vec<u8>> = Vec::new();
-    let mut cursor: Option<String> = None;
-    let mut chunks_downloaded = 0u32;
-    let expected_merkle_root = meta.merkle_root.clone();
-
-    loop {
-        let chunk = pq_snapshot_fast_chunk(
-            state,
-            base_url,
-            cursor.as_deref(),
-            since_epoch,
-        )
-        .await?;
-
-        chunks_downloaded += 1;
-
-        // Decode records from hex
-        for hex_str in &chunk.records {
-            let wire = hex::decode(hex_str)
-                .map_err(|e| ElaraError::Wire(format!("bad hex in snapshot chunk: {e}")))?;
-            all_wire_bytes.push(wire);
-        }
-
-        debug!(
-            "snapshot fast sync: chunk {} — {}/{} records",
-            chunks_downloaded, chunk.served_so_far, chunk.total_records,
-        );
-
-        // Check if done
-        match chunk.next_cursor {
-            Some(c) => cursor = Some(c),
-            None => break,
-        }
-    }
-
-    info!(
-        "snapshot fast sync: downloaded {} records in {} chunks",
-        all_wire_bytes.len(),
-        chunks_downloaded,
-    );
-
-    // Step 3: Parse all records
-    let mut records: Vec<ValidationRecord> = all_wire_bytes
-        .iter()
-        .filter_map(|wire| ValidationRecord::from_bytes(wire).ok())
-        .collect();
-
-    if records.len() != all_wire_bytes.len() {
-        warn!(
-            "snapshot fast sync: {} of {} records failed to parse",
-            all_wire_bytes.len() - records.len(),
-            all_wire_bytes.len(),
-        );
-    }
-
-    // Step 4: Merkle verification happens AFTER import (post-import).
-    // Each record imported via insert_record_synced triggers SparseMerkleTree::insert,
-    // so after import our local tree will reflect the received records. We compare
-    // our global_merkle_root() with the peer's reported root.
-    // Pre-import verification would require O(all_records) memory — the old bug.
-    // Individual records are already signature-verified during ingest.
-
-    // Step 5: Sort by timestamp and import via multi-pass insertion
-    records.sort_by(|a, b| a.timestamp.total_cmp(&b.timestamp));
-
-    let total = records.len();
-    let mut remaining = records;
-    let mut total_inserted = 0u64;
-
-    for pass in 0..3 {
-        if remaining.is_empty() {
-            break;
-        }
-
-        let mut failed = Vec::new();
-        let mut pass_inserted = 0u64;
-
-        for record in remaining {
-            let is_new = state.seen.lock_recover().insert(record.id.clone());
-            if is_new {
-                match gossip::insert_record_synced(state, record.clone()).await {
-                    Ok(_) => {
-                        pass_inserted += 1;
-                    }
-                    Err(e) => {
-                        debug!(
-                            "snapshot fast sync: record {} failed pass {}: {}",
-                            &record.id[..record.id.len().min(16)],
-                            pass + 1,
-                            e,
-                        );
-                        state.seen.lock_recover().insert(record.id.clone());
-                        failed.push(record);
-                    }
-                }
-            }
-        }
-
-        total_inserted += pass_inserted;
-        info!(
-            "snapshot fast sync pass {}: {} inserted, {} failed",
-            pass + 1,
-            pass_inserted,
-            failed.len(),
-        );
-
-        if failed.is_empty() || pass_inserted == 0 {
-            break;
-        }
-
-        // No ledger rebuild between passes — insert_record_synced already
-        // applies each record to the live ledger. Rebuilding from RocksDB
-        // would double-count records (applied live + replayed from storage).
-
-        remaining = failed;
-    }
-
-    info!(
-        "snapshot fast sync complete: {total_inserted}/{total} records imported from {base_url}",
-    );
-
-    // Step 7: Post-import Merkle verification — O(zone_count) reads, not O(all_records)
-    if since_epoch.is_none() && total_inserted > 0 {
-        let our_root = hex::encode(crate::network::merkle::global_merkle_root(&state.rocks));
-        if our_root != expected_merkle_root {
-            warn!(
-                "snapshot fast sync: post-import Merkle root mismatch! ours={}, expected={}",
-                &our_root[..our_root.len().min(16)],
-                &expected_merkle_root[..expected_merkle_root.len().min(16)],
-            );
-            // Don't error — records are individually verified. Mismatch may be due to
-            // records we already had, timing differences, or zone count mismatch.
-            // Log and continue — delta sync will reconcile remaining differences.
-        } else {
-            info!("snapshot fast sync: post-import Merkle root verified");
-        }
-    }
-
-    Ok(total_inserted)
-}
-
-/// Decide whether to use snapshot fast sync based on the gap size.
-///
-/// Compares our record count to the peer's to estimate the gap.
-/// If the gap exceeds SNAPSHOT_SYNC_THRESHOLD, returns true.
-pub async fn should_use_fast_sync(
-    state: &Arc<NodeState>,
-    base_url: &str,
-) -> bool {
-    let our_count = state.record_count().unwrap_or(0) as u64;
-
-    match pq_snapshot_metadata(state, base_url).await {
-        Ok(meta) => {
-            let peer_count = meta.get("record_count").and_then(|v| v.as_u64()).unwrap_or(0);
-            if peer_count > our_count {
-                let gap = peer_count - our_count;
-                if gap as usize > SNAPSHOT_SYNC_THRESHOLD {
-                    info!(
-                        "fast sync recommended: gap={} (ours={}, theirs={})",
-                        gap, our_count, peer_count,
-                    );
-                    return true;
-                }
-            }
-            false
-        }
-        Err(e) => {
-            debug!("could not get peer metadata for fast sync decision: {e}");
-            false
-        }
-    }
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
@@ -3709,8 +3496,10 @@ mod tests {
     // ── Threshold / decision logic tests ──────────────────────────────────
 
     #[test]
-    fn test_snapshot_sync_threshold_constant() {
-        assert_eq!(SNAPSHOT_SYNC_THRESHOLD, 1000);
+    fn test_snapshot_chunk_size_constant() {
+        // SNAPSHOT_SYNC_THRESHOLD dropped with `should_use_fast_sync` (SS-2).
+        // SNAPSHOT_CHUNK_SIZE stays — the SERVER uses it (routes/sync.rs,
+        // pq_transport/router.rs).
         assert_eq!(SNAPSHOT_CHUNK_SIZE, 500);
     }
 
@@ -4223,6 +4012,87 @@ mod tests {
         assert_eq!(
             restored.latest_seal_hash.get(&z0).copied(), Some([0xAB; 32]),
             "bootstrap must adopt the signed latest_seal_hash"
+        );
+    }
+
+    #[tokio::test]
+    async fn snap1_bootstrap_installs_only_checksum_bound_epoch_fields() {
+        // SNAP-1 coupling guard, half 2 of 2 (half 1 =
+        // `snapshot.rs::snap1_checksum_omits_four_epoch_substruct_fields`).
+        //
+        // `compute_checksum` leaves `zone_activity_rate`, `vrf_history`,
+        // `vrf_history_v2` and `latest_super_seal` OUT of the signed body, so a
+        // snapshot server — or anyone holding the file — can rewrite them and
+        // the Dilithium3 signature still verifies. What makes that harmless is
+        // the copy list in `apply_bootstrap_snapshot_full`, which installs the
+        // bound fields and nothing else, even though `from_snapshot` has already
+        // decoded the rest into `snap_epoch` one line earlier.
+        //
+        // The hazard pinned here is a future edit, not today's code: an
+        // unauthenticated `latest_super_seal` sitting in scope is exactly what a
+        // "restore the joiner's GC seal-pruning floor immediately" change would
+        // reach for, and installing it would hand a snapshot server the victim's
+        // seal-retention floor under a valid signature. On failure: bind the
+        // field in `compute_checksum` FIRST, or do not copy it.
+        use crate::network::epoch::EpochState;
+        use crate::network::snapshot::NodeSnapshot;
+        use crate::accounting::ledger::LedgerState;
+        use std::collections::HashSet;
+
+        let state = test_state_for_bootstrap();
+        let z0 = crate::ZoneId::from_legacy(0);
+
+        let mut ep = EpochState::new();
+        ep.latest_epoch.insert(z0.clone(), 5000);
+        ep.latest_seal_hash.insert(z0.clone(), [0xAB; 32]);
+        ep.latest_seal_id.insert(z0.clone(), "seal-5000".to_string());
+        // Unauthenticated payload. `end_epoch` is deliberately BELOW the tip so
+        // the R1-X1 Layer-C drop in `from_snapshot` keeps it — what is under
+        // test is the install ignoring it, not Layer C catching it.
+        ep.latest_super_seal
+            .insert(z0.clone(), (4999, "poison-ss".to_string(), [0xCD; 32], [0xEF; 32]));
+        ep.zone_activity_rate.insert(z0.clone(), 999.0);
+        let mut ring = std::collections::VecDeque::new();
+        ring.push_back((1.0_f64, 4999_u64, [0x11_u8; 32], [0x22_u8; 32]));
+        ep.vrf_history.insert(z0.clone(), ring);
+
+        let snapshot = NodeSnapshot::new(LedgerState::new(), HashSet::new(), ep);
+
+        // The payload must survive decode, or this test would pass for the
+        // wrong reason.
+        let decoded =
+            EpochState::from_snapshot(snapshot.epoch.as_ref().expect("epoch substruct present"));
+        assert!(
+            decoded.latest_super_seal.contains_key(&z0),
+            "fixture invalid: Layer C dropped the pointer, so the install is not what is under test"
+        );
+        assert!(
+            decoded.vrf_history.contains_key(&z0),
+            "fixture invalid: the VRF ring did not survive decode"
+        );
+
+        apply_bootstrap_snapshot_full(&state, &snapshot, false)
+            .await
+            .expect("bootstrap apply must pass the rollback guard in this test");
+
+        let live = state.epoch.read().unwrap();
+        assert_eq!(
+            live.latest_epoch.get(&z0).copied(),
+            Some(5000),
+            "the checksum-BOUND tip must still be adopted"
+        );
+        assert!(
+            !live.latest_super_seal.contains_key(&z0),
+            "unauthenticated latest_super_seal must never be installed from a wire snapshot \
+             — it drives the GC seal-pruning floor"
+        );
+        assert!(
+            !live.vrf_history.contains_key(&z0),
+            "unauthenticated vrf_history must never be installed — it seeds Fisherman juries"
+        );
+        assert!(
+            !live.zone_activity_rate.contains_key(&z0),
+            "unauthenticated zone_activity_rate must never be installed — it feeds the auto-scaler"
         );
     }
 

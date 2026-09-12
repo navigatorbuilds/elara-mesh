@@ -165,7 +165,7 @@ git clone https://github.com/navigatorbuilds/elara-mesh &amp;&amp; cd elara-mesh
 git show &lt;mirror_commit&gt;:site/receipts.json        # acts[].record_id …
 git show &lt;prev_mirror_commit&gt;:site/receipts.json   # … minus these = the window
 # then fold the window ids through elara-smt as above: root == acts_root,
-# count == acts_count. `cargo install elara-verify` prints all of an act’s
+# count == acts_count. `cargo install elara-verify --features cli` prints all of an act’s
 # keys verbatim; the verdict covers the signature — the recomputation above
 # is what makes the CLAIMS checkable.</pre>
   <p class="rc-note">Honesty notes: the act’s signature proves <em>who</em> attested this publish

@@ -802,6 +802,45 @@ mod tests {
         assert_eq!(r.read_header().unwrap(), (WIRE_VERSION, 0x01));
     }
 
+    /// WIRE-03 (audit R2/wire-decode) — REPRODUCER for an OPEN defect, hence
+    /// `#[ignore]`. Un-ignore it in the commit that fixes WIRE-03; it should
+    /// pass unchanged.
+    ///
+    /// A JSON integer in `(i64::MAX, u64::MAX]` returns `None` from
+    /// `as_i64()`, so `encode_metadata_binary` falls through to the `as_f64()`
+    /// branch and writes a lossy `META_FLOAT`. Measured 2026-09-07:
+    /// `9223372036854788152` in, `9.223372036854788e+18` out.
+    ///
+    /// Why that matters beyond the lost digits: `signable_bytes` serialises the
+    /// **in-memory** metadata map (`serde_json::to_string(&self.metadata)`),
+    /// not the wire bytes, so the sender signs the exact integer while the wire
+    /// carries the float. A receiver re-derives the preimage from the decoded
+    /// value and gets a different one — the record fails verification and is
+    /// indistinguishable from a forgery, with no error raised at encode time.
+    ///
+    /// Fail-closed, so nothing is admitted that should not be; the cost is a
+    /// silently unusable value class and an undiagnosable rejection. Two
+    /// remedies, and they are not equivalent: a `META_UINT` tag preserves the
+    /// value but is a **wire-format change (flag-day class)**; rejecting
+    /// non-`i64` integers at encode with a typed error is **non-forking** —
+    /// every record it would newly reject is one that cannot verify today.
+    #[test]
+    #[ignore = "WIRE-03 reproducer: documents an open defect; un-ignore when fixed"]
+    fn wire03_large_u64_metadata_must_roundtrip_losslessly() {
+        use serde_json::{json, Value};
+        use std::collections::BTreeMap;
+        let big: u64 = (i64::MAX as u64) + 12345;
+        let mut meta: BTreeMap<String, Value> = BTreeMap::new();
+        meta.insert("big".to_string(), json!(big));
+
+        let mut buf = Vec::new();
+        encode_metadata_binary(&mut buf, &meta).expect("encode");
+        let mut r = WireReader::new(&buf);
+        let out = decode_metadata_binary(&mut r).expect("decode");
+
+        assert_eq!(out.get("big"), meta.get("big"), "u64 above i64::MAX must round-trip losslessly");
+    }
+
     #[test]
     fn batch_b_metadata_roundtrip_seven_variants_plus_decode_guards() {
         use serde_json::{json, Value};

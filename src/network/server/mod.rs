@@ -115,15 +115,20 @@ const ADMIN_LOCKOUT_WINDOW_SECS: u64 = 300;
 /// dropped for non-loopback callers (P1 ceiling). git_sha is the PRIVATE-repo
 /// HEAD — kept off the public plane to match the /version + /status build-
 /// identity gates. Operator use (loopback; `?tier=debug` on a P0/P1 node):
-/// compare `git_sha` across nodes to confirm uniform fleet version; flag
-/// `git_dirty="1"` in prod; date a regression via `build_ts`.
+/// compare `git_sha` across nodes to confirm uniform fleet version; treat
+/// `git_dirty="1"` as a prompt to look at WHAT is dirty (the check behind it
+/// is deliberately unscoped and counts tracked files no binary compiles — see
+/// build.rs), not as proof of a dev-binary; date a regression via `build_ts`.
 const BUILD_INFO_METRIC: &str = concat!(
     "# HELP elara_build_info Build-identity gauge (always = 1). Labels: \
-git_sha (full HEAD sha at build time), git_ref (branch/tag), \
-git_dirty (0|1 — uncommitted changes in worktree at build time), \
-build_ts (unix-seconds UTC of the cargo build). Operator use: confirm \
-two nodes ran the same binary by comparing git_sha; flag a dev-binary \
-in production via git_dirty=\"1\"; date a regression via build_ts.\n",
+git_sha (full HEAD sha at build time), git_ref (exact tag, else branch, \
+else detached-SHORTSHA), git_dirty (0|1 — ANY uncommitted change in the \
+worktree at build time, including tracked files that no binary compiles, \
+so 1 alone does not prove the binary differs from HEAD), build_ts \
+(unix-seconds UTC of the cargo build). Operator use: confirm two nodes \
+ran the same binary by comparing git_sha; read git_dirty=\"1\" as a prompt \
+to check WHAT is dirty, not as proof of a dev-binary; date a regression \
+via build_ts.\n",
     "# TYPE elara_build_info gauge\n",
     "elara_build_info{git_sha=\"", env!("BUILD_GIT_SHA"),
     "\",git_ref=\"", env!("BUILD_GIT_REF"),
@@ -4934,6 +4939,9 @@ pub(crate) async fn metrics_body_tiered(
     let idp_witness_purged = state
         .identity_witness_purged_total
         .load(std::sync::atomic::Ordering::Relaxed);
+    let ingest_old_records = state
+        .ingest_old_records_accepted_total
+        .load(std::sync::atomic::Ordering::Relaxed);
     let idp_pk_fetch_attempts = state
         .identity_pk_fetch_attempts_total
         .load(std::sync::atomic::Ordering::Relaxed);
@@ -5477,6 +5485,9 @@ pub(crate) async fn metrics_body_tiered(
          # HELP elara_identity_witness_purged_total Cumulative count of witness-tier PKs dropped from CF_IDENTITIES_WITNESS because the unsubscribed zone was their last claim. Climbs when an operator unsubscribes a zone whose witness set was disjoint from every other zone they serve. Anchor-tier PKs are never touched.\n\
          # TYPE elara_identity_witness_purged_total counter\n\
          elara_identity_witness_purged_total {idp_witness_purged}\n\
+         # HELP elara_ingest_old_records_accepted_total Records ACCEPTED at ingest whose timestamp was older than the `max_record_age_secs` threshold (default 7 days). Acceptance is deliberate, not a leak: an offline-first node reconnecting submits records it created days earlier, and replay is bounded elsewhere by storage dedup on duplicate IDs and by ledger validation rejecting stale ops. WIRED 2026-09-06 — this path had emitted a per-record WARN since at least 2026-07-06 with no counter, so its rate was only ever visible by grepping the journal; a value of 0 on a node booted before that date means not-measured. Read it as a RATE, not a total: a steady trickle is a peer draining a backlog, while a step change means a bulk replay arrived.\n\
+         # TYPE elara_ingest_old_records_accepted_total counter\n\
+         elara_ingest_old_records_accepted_total {ingest_old_records}\n\
          # HELP elara_identity_pk_fetch_attempts_total Cumulative count of on-miss peer-fetch attempts (`GET /identity/pk/{{hash}}` over PQ) initiated when a local PK lookup missed. Hits + misses must sum to attempts. A clean fleet on testnet sits at 0 because every PK is captured at ingest; mainnet under heavy onboarding ticks as new nodes verify records signed by previously-unobserved identities.\n\
          # TYPE elara_identity_pk_fetch_attempts_total counter\n\
          elara_identity_pk_fetch_attempts_total {idp_pk_fetch_attempts}\n\
@@ -10726,7 +10737,7 @@ pub(crate) async fn metrics_body_tiered(
         "# HELP elara_adaptive_interval_zones_tracked Number of zones currently producing live adaptive_interval values (zones with at least one observed activity rate).\n\
          # TYPE elara_adaptive_interval_zones_tracked gauge\n\
          elara_adaptive_interval_zones_tracked {zones_tracked}\n\
-         # HELP elara_adaptive_interval_min_active_seconds Minimum live adaptive_interval observed across all tracked zones. ADVISORY telemetry — the adaptive interval does not currently gate seal cadence (sealing ticks at the fixed epoch_seal_interval_secs); wiring is a design-stage item.\n\
+         # HELP elara_adaptive_interval_min_active_seconds Minimum live adaptive_interval observed across all tracked zones. ADVISORY telemetry. CORRECTED 2026-09-06: this used to end \"wiring is a design-stage item\", which stopped being true when the gate shipped 2026-09-01. The gate IS wired in production — `epoch_seal_loop` calls `gate_adaptive_seal` via `zone_adaptive_seal_due`, yielding `NoneReason::AdaptiveIntervalPending` — but it is behind `use_adaptive_seal_gate`, whose default is false, so sealing does still tick at the fixed `epoch_seal_interval_secs` today. What remains queued is the flag FLIP, not the wiring. Verify the live answer from `elara_seal_loop_proposals_none_adaptive_pending_total`, which can only move once the flag is on.\n\
          # TYPE elara_adaptive_interval_min_active_seconds gauge\n\
          elara_adaptive_interval_min_active_seconds {min_secs:.3}\n\
          # HELP elara_adaptive_interval_max_active_seconds Maximum live adaptive_interval observed across all tracked zones. Approaches elara_adaptive_interval_ceil_seconds when zones are idle.\n\
@@ -10735,7 +10746,7 @@ pub(crate) async fn metrics_body_tiered(
          # HELP elara_adaptive_interval_mean_seconds Arithmetic mean of live adaptive_interval values across all tracked zones.\n\
          # TYPE elara_adaptive_interval_mean_seconds gauge\n\
          elara_adaptive_interval_mean_seconds {mean_secs:.3}\n\
-         # HELP elara_adaptive_interval_floor_pinned_zones Count of zones whose adaptive_interval == MIN_ADAPTIVE_EPOCH_SECS. ADVISORY: the adaptive interval does not currently gate sealing (the seal loop ticks at the fixed epoch_seal_interval_secs); a sustained non-zero value marks where a future wired adaptive gate would bind, not a live finality constraint today.\n\
+         # HELP elara_adaptive_interval_floor_pinned_zones Count of zones whose adaptive_interval == MIN_ADAPTIVE_EPOCH_SECS. ADVISORY: sealing ticks at the fixed `epoch_seal_interval_secs` today because `use_adaptive_seal_gate` defaults to false — NOT because the gate is unbuilt; it is wired in `epoch_seal_loop` as of 2026-09-01. A sustained non-zero value marks where a flipped adaptive gate would bind, not a live finality constraint today.\n\
          # TYPE elara_adaptive_interval_floor_pinned_zones gauge\n\
          elara_adaptive_interval_floor_pinned_zones {floor_pinned}\n\
          # HELP elara_adaptive_interval_floor_seconds Configured MIN_ADAPTIVE_EPOCH_SECS — lower bound applied to every per-zone adaptive interval.\n\
