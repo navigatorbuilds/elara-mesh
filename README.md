@@ -657,7 +657,7 @@ Copy `elara-node.toml.example` and customize. Every field has an `ELARA_*` env v
 
 | Document | Description |
 |----------|-------------|
-| [Protocol Whitepaper](docs/whitepaper/ELARA-PROTOCOL-WHITEPAPER.pdf) | The Elara Protocol — post-quantum universal validation layer (v0.7.35) |
+| [Protocol Whitepaper](docs/whitepaper/ELARA-PROTOCOL-WHITEPAPER.pdf) | The Elara Protocol — post-quantum universal validation layer (v0.7.36) |
 | [MESH-BFT Paper](docs/whitepaper/MESH-BFT-PAPER.pdf) | Consensus: diversity-weighted Byzantine fault tolerance |
 | [Protocol Economics](docs/PROTOCOL-ECONOMICS.md) | Validation-beat mechanics as implemented — fixed supply, conservation invariant, staking, slashing; with a "rejected alternatives" appendix |
 | [Design Specification](docs/spec/) | Full protocol / architecture / hardware design corpus |
