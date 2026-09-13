@@ -517,6 +517,24 @@ impl ValidationRecord {
     /// preimage; a domain-separation change lands here or it lands nowhere
     /// (the 2026-08-18 T63 audit's blocking finding).
     pub fn signable_bytes(&self) -> Vec<u8> {
+        self.signable_bytes_under(self.version)
+    }
+
+    /// The same preimage, built under an EXPLICIT construction version, with
+    /// every field value (including the signed `version` field itself) left
+    /// untouched. `signable_bytes()` is exactly `signable_bytes_under(self.version)`.
+    ///
+    /// Why this exists (2026-09-13, out of x402-foundation/wg-identity #21): the
+    /// preimage is version-branched, so an emitter that computes it under the
+    /// wrong branch produces a signature that fails to verify and is
+    /// indistinguishable from a forgery (the ARCH-4 re-emission class, already
+    /// paid for once). A verifier can re-try the other constructions on a FAILED
+    /// verify and, when one of them verifies, name the disagreement instead of
+    /// reporting forgery: nobody without the key can produce a signature valid
+    /// under any construction. It must never upgrade a verdict.
+    ///
+    /// Only three constructions are distinct: `< 5`, `== 5`, and `>= 6`.
+    pub fn signable_bytes_under(&self, construction_version: u16) -> Vec<u8> {
         let mut buf = Vec::with_capacity(512);
 
         // v6+: domain-separation prefix LEADS the preimage — constant tag, then
@@ -526,7 +544,7 @@ impl ValidationRecord {
         // every byte after it is creator-influenced. v≤5 preimages are
         // byte-identical to before (nothing prepended) — pinned by the frozen
         // KATs in `tests/kat_frozen_preimages.rs`.
-        if self.version >= 6 {
+        if construction_version >= 6 {
             buf.extend_from_slice(DOMAIN_TAG_RECORD_V1);
             debug_assert!(
                 self.network_id.len() <= crate::wire::MAX_NETWORK_ID_LEN,
@@ -544,7 +562,7 @@ impl ValidationRecord {
 
         // v5+: slot nonce is signed. Placed right after version so v4 signatures
         // are byte-identical to before (v4 stops here and moves on to content_hash).
-        if self.version >= 5 {
+        if construction_version >= 5 {
             buf.extend_from_slice(&self.nonce.to_be_bytes());
         }
 
@@ -1265,6 +1283,32 @@ mod tests {
             !unbound.metadata.contains_key("network_id"),
             "empty network id is a no-op, never an empty-string binding"
         );
+    }
+
+    /// Exactly three preimage constructions are distinct (`< 5`, `== 5`, `>= 6`),
+    /// which is what bounds the verifier's disagreement probe to two extra
+    /// signature checks. If a future wire version branches `signable_bytes`
+    /// again, this test fails and the probe's construction set must grow with it.
+    #[test]
+    fn signable_bytes_under_has_exactly_three_distinct_constructions() {
+        let rec = ValidationRecord::create(
+            b"construction-classes",
+            dummy_pk(),
+            vec![],
+            Classification::Public,
+            None,
+        );
+        let v4 = rec.signable_bytes_under(4);
+        let v5 = rec.signable_bytes_under(5);
+        let v6 = rec.signable_bytes_under(6);
+        assert_ne!(v4, v5, "the v5 branch signs the slot nonce");
+        assert_ne!(v5, v6, "the v6 branch prepends the domain tag");
+        assert_ne!(v4, v6);
+        // Same class, same bytes, on both sides of the branch points.
+        assert_eq!(v4, rec.signable_bytes_under(0));
+        assert_eq!(v6, rec.signable_bytes_under(crate::wire::WIRE_VERSION));
+        // The field value is signed as carried and never follows the construction.
+        assert!(v4.windows(2).any(|w| w == rec.version.to_be_bytes()));
     }
 
     #[test]

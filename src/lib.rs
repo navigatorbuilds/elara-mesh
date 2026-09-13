@@ -35,6 +35,8 @@ pub use elara_verify::mandate;
 pub use elara_verify::mandate_bundle;
 #[cfg(test)]
 mod mandate_bundle_tests;
+#[cfg(test)]
+mod verify_construction_tests;
 // Query/read-side SDK for the mandate accountability layer. Offline bundle-verify
 // + typed verdicts are always-on (wasm/default-safe, like `mandate_bundle`); the
 // HTTP query client is `node-core`-gated (reqwest). Read-only — no issue/revoke.

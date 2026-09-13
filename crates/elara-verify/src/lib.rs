@@ -686,6 +686,46 @@ fn sanitize_field(s: &str, max_chars: usize) -> String {
     }
 }
 
+/// On a FAILED record signature, ask whether the signer built the preimage under
+/// a different construction than the record's own `version` field declares.
+///
+/// `signable_bytes()` is version-branched (`>= 5` signs the slot nonce, `>= 6`
+/// prepends the domain tag and network binding), so an emitter running code from
+/// the other side of a wire-version bump signs a preimage this verifier never
+/// rebuilds, and the result is byte-for-byte indistinguishable from a forged
+/// signature. Re-trying the other two constructions separates them: producing a
+/// signature valid under ANY construction requires the key, so a hit is a
+/// canonicalisation disagreement and not a forgery. We have paid for this class
+/// once already (the ARCH-4 re-emission bug, where a peer decoder recomputed the
+/// preimage under the wrong version and it presented as a signature mismatch).
+///
+/// FAIL-CLOSED: this returns a REASON, never a verdict. The check stays
+/// `Status::Fail` on a hit, because the record still does not verify as it
+/// declares itself; only the detail string changes. Raised by @meloliva14 in
+/// x402-foundation/wg-identity #21 (2026-09-13), whose own checker refuses to
+/// publish `signature-invalid` on a failed verify alone.
+fn construction_disagreement(record: &ValidationRecord, sig: &[u8]) -> Option<u16> {
+    // Only three constructions are distinct; skip the record's own class.
+    let own = if record.version >= 6 {
+        6
+    } else if record.version == 5 {
+        5
+    } else {
+        4
+    };
+    [4u16, 5, 6]
+        .into_iter()
+        .filter(|cv| *cv != own)
+        .find(|cv| {
+            dilithium3_verify(
+                &record.signable_bytes_under(*cv),
+                sig,
+                &record.creator_public_key,
+            )
+            .unwrap_or(false)
+        })
+}
+
 pub fn verify_record(
     record: &ValidationRecord,
     content: Option<&[u8]>,
@@ -776,7 +816,24 @@ pub fn verify_record(
                 detail: if pass {
                     "ML-DSA-65 (FIPS 204, \"Dilithium3\") valid over canonical record bytes".into()
                 } else {
-                    "ML-DSA-65 signature DOES NOT VERIFY over the record's canonical bytes".into()
+                    // Name the cause when we can prove it: a signature that verifies
+                    // under another construction was made with the key, so it is a
+                    // canonicalisation disagreement rather than a forgery. The status
+                    // stays Fail either way.
+                    match construction_disagreement(record, sig) {
+                        Some(cv) => format!(
+                            "ML-DSA-65 signature DOES NOT VERIFY over the record's canonical bytes \
+                             as the record declares itself (version {}), but DOES verify under the \
+                             v{} preimage construction: a canonicalisation disagreement with the \
+                             signer, not a forged signature. Still FAILED, because the record does \
+                             not verify as declared.",
+                            record.version, cv,
+                        ),
+                        None => {
+                            "ML-DSA-65 signature DOES NOT VERIFY over the record's canonical bytes"
+                                .into()
+                        }
+                    }
                 },
             });
         }
