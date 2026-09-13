@@ -3,8 +3,11 @@
 [![CI](https://github.com/navigatorbuilds/elara-mesh/actions/workflows/ci.yml/badge.svg)](https://github.com/navigatorbuilds/elara-mesh/actions/workflows/ci.yml)
 
 **Provable AI agents** — post-quantum, offline-verifiable proof of *who
-(or what) did what, on whose authority, and when*. Don't trust us: check it
-yourself — one command, no server, no network, and it never fakes a green.
+(or what) did what, and when*. Don't trust us: check it yourself — one
+command, no server, no network, and it never fakes a green. The *on whose
+authority* leg (agent mandates) is verified offline by a library call or in
+the browser, not yet by that command (see
+[`crates/elara-verify`](crates/elara-verify/README.md)).
 
 Young, and honest about it: the live network today is a 3-machine testnet (first
 external-machine join July 2026). Every claim in this README separates
