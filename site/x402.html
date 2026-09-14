@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Verification by the call - Elara</title>
+<meta name="description" content="Elara's post-quantum verifier runs as a paid HTTP endpoint on the x402 rail. This page reads the live discovery catalog in your browser and shows the listing an agent would find, with the call to make against it.">
+<meta property="og:title" content="Verification by the call - Elara">
+<meta property="og:description" content="A paid HTTP endpoint on the x402 rail: post a record, get a verdict plus an attestation bound to your own payment. The listing below is read live from the public catalog.">
+<meta property="og:type" content="website">
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='38' fill='none' stroke='%2336e2c4' stroke-width='9'/><circle cx='50' cy='50' r='10' fill='%2336e2c4'/></svg>">
+<script src="reveal.js" defer></script>
+<style>
+  .x4-card { border: 1px solid rgba(255,255,255,0.10); border-radius: 10px; padding: 1rem 1.15rem; margin: 1.4rem 0 0.6rem; }
+  .x4-row { display: flex; flex-wrap: wrap; gap: 0.2rem 1rem; padding: 0.42rem 0; border-bottom: 1px dashed rgba(255,255,255,0.08); }
+  .x4-row:last-of-type { border-bottom: none; }
+  .x4-k { flex: 0 0 13rem; opacity: 0.62; font-size: 0.86em; }
+  .x4-v { flex: 1 1 18rem; word-break: break-all; }
+  .x4-mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.86em; }
+  .x4-raw { margin-top: 0.9rem; }
+  .x4-raw summary { cursor: pointer; font-size: 0.86em; opacity: 0.7; }
+  .x4-raw pre, .x4-call pre { overflow-x: auto; padding: 0.7rem 0.9rem; border-radius: 8px; background: rgba(0,0,0,0.25); font-size: 0.8em; line-height: 1.5; }
+  .x4-empty { border: 1px dashed rgba(255,255,255,0.18); border-radius: 10px; padding: 1.2rem 1.15rem; }
+  .x4-note { font-size: 0.88em; opacity: 0.72; }
+  .x4-call { margin: 1.2rem 0; }
+</style>
+</head>
+<body>
+
+<header class="nav">
+  <a class="nav-brand" href="index.html">ELARA</a>
+  <nav class="nav-links">
+    <a href="how.html">How it works</a>
+    <a href="usecases.html">Use cases</a>
+    <a href="verify/">Verify</a>
+    <a href="receipts.html">Proof log</a>
+    <a href="writing.html">Writing</a>
+    <a class="nav-gh" href="https://github.com/navigatorbuilds/elara-mesh" rel="noopener">GitHub &rarr;</a>
+  </nav>
+</header>
+
+<main id="top">
+
+<section class="section">
+  <h1>Verification by the call</h1>
+  <p>Elara's post-quantum verifier also runs as a paid HTTP endpoint on the
+  <a href="https://x402.org" rel="noopener">x402</a> rail. An agent posts a record; the first
+  answer is a <span class="x4-mono">402</span> carrying the price in a machine readable header;
+  the agent's wallet pays it and repeats the request; the second answer carries the verdict and an
+  Ed25519 attestation signed over the input hash, the verdict, and the transaction id of that very
+  payment. No account, no key exchange, no invoice, no human in the loop.</p>
+
+  <h2>Free first</h2>
+  <p>The verdict itself is free and always will be. <span class="x4-mono">cargo install
+  elara-verify</span> gives you the same Rust verifier, offline, with no payment and no network
+  call. What money buys is the attestation and the <span class="x4-mono">existed_by</span> time:
+  evidence a third party can check later, bound to a payment only you could have made. It is not a
+  different or better verdict. If that binding is not what you need, do not buy it.</p>
+
+  <h2>The listing, read live</h2>
+  <p>This page does not contain the endpoint's address. It reads it, in your browser, from the same
+  public discovery catalog an agent would use to find it, and prints whatever that catalog says at
+  the moment you load the page. If the listing lapsed or changed, you would see that here instead of
+  a confident copy of something that used to be true.</p>
+
+  <div id="x4-live"><p class="x4-note">Reading the catalog...</p></div>
+  <noscript><p class="x4-note">That box reads the catalog in your browser, so it needs JavaScript.
+  Without it, the query named below is the same thing done by hand.</p></noscript>
+
+  <div class="x4-call" id="x4-call"></div>
+
+  <h2>What a declined call costs</h2>
+  <p>Nothing. Any response of 400 or above cancels settlement before it clears, so a body this tier
+  declines costs you zero: over the size cap, too many carriers, or a SPHINCS+ dual signature record
+  it will not pretend to check. That is enforced by a test in the endpoint's own suite, and the
+  suite is in the repository, so the claim is checkable rather than promised.</p>
+
+  <h2>Honest status</h2>
+  <p>The settle count above is the facilitator's own number for this route, not ours, and it is
+  small: the endpoint is new, and the first paid call against it was our own, made to prove the
+  path end to end. A second route on the same service checks mandate bundle authority at a higher
+  price and is deliberately absent from the catalog: getting a route listed there takes a settled
+  payment, and paying ourselves again to advertise ourselves is not a number worth having.</p>
+</section>
+
+</main>
+
+<footer class="footer">
+  <div class="footer-links">
+    <a href="index.html">Home</a>
+    <a href="how.html">How it works</a>
+    <a href="verify/">Verify</a>
+    <a href="https://github.com/navigatorbuilds/elara-mesh" rel="noopener">Source</a>
+  </div>
+</footer>
+
+<script>
+(function () {
+  var API = 'https://facilitator.goplausible.xyz/discovery/resources';
+  var PAGE = 100;
+  var FIXTURE = 'https://raw.githubusercontent.com/navigatorbuilds/elara-mesh/master/examples/verify/sample-record-profile-b.json';
+  var live = document.getElementById('x4-live');
+  var callBox = document.getElementById('x4-call');
+
+  function esc(s) {
+    return String(s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+  function money(a) {
+    var n = Number(a);
+    if (!isFinite(n)) { return String(a); }
+    return (n / 1e6).toFixed(6).replace(/0+$/, '').replace(/\.$/, '');
+  }
+  function when(s) { return s ? String(s).replace('T', ' ').slice(0, 19) + ' UTC' : 'unknown'; }
+  function row(k, v, mono) {
+    return '<div class="x4-row"><span class="x4-k">' + esc(k) + '</span>' +
+           '<span class="x4-v' + (mono ? ' x4-mono' : '') + '">' + v + '</span></div>';
+  }
+  function mine(e) {
+    var u = (e && e.resourceUrl) ? String(e.resourceUrl) : '';
+    var d = (e && e.description) ? String(e.description) : '';
+    var a = (e && e.accepts && e.accepts[0]) || {};
+    return u.slice(-14) === '/verify/record' && d.indexOf('Elara') !== -1 && String(a.asset) === '31566704';
+  }
+
+  function pull(offset, acc, done, fail) {
+    fetch(API + '?limit=' + PAGE + '&offset=' + offset, { headers: { accept: 'application/json' } })
+      .then(function (r) { if (!r.ok) { throw new Error('HTTP ' + r.status); } return r.json(); })
+      .then(function (d) {
+        var page = (d && d.items) || [];
+        var total = (d && d.pagination && d.pagination.total) || 0;
+        var all = acc.concat(page);
+        if (page.length && all.length < total && all.length < 5000) { pull(all.length, all, done, fail); }
+        else { done(all); }
+      })
+      .catch(fail);
+  }
+
+  function render(e, scanned) {
+    var a = (e.accepts && e.accepts[0]) || {};
+    var url = String(e.resourceUrl || '');
+    live.innerHTML =
+      '<div class="x4-card">' +
+      row('Address', esc(e.method || 'POST') + ' ' + esc(url), true) +
+      row('Price', esc(money(a.amount)) + ' USDC per call', false) +
+      row('Chain', esc(String(a.network || 'unknown')), true) +
+      row('Asset', esc(String(a.asset || 'unknown')) + ' (USDC)', true) +
+      row('Paid to', esc(String(a.payTo || 'unknown')), true) +
+      row('Settles seen by the catalog', esc(e.settleCount == null ? 'unknown' : String(e.settleCount)), false) +
+      row('First listed', esc(when(e.firstSeen)), false) +
+      row('Last seen', esc(when(e.lastSeen)), false) +
+      '<details class="x4-raw"><summary>the whole catalog row, verbatim</summary><pre>' +
+      esc(JSON.stringify(e, null, 2)) + '</pre></details>' +
+      '</div>' +
+      '<p class="x4-note">Read from ' + esc(API) + ' just now: ' + scanned +
+      ' resources listed, one of them this one. Open that query yourself and the row above is in it.</p>';
+
+    callBox.innerHTML =
+      '<h2>Call it</h2>' +
+      '<pre># a real Elara ValidationRecord to post, published in the repo\n' +
+      'curl -sSL -o record.json ' + esc(FIXTURE) + '\n\n' +
+      '# the call. The first answer is 402 and carries the price in a machine readable\n' +
+      '# header; an x402 client (@x402/fetch with @x402/avm) pays it and repeats the\n' +
+      '# request for you. By hand, this shows you the terms without spending anything.\n' +
+      'curl -sS -X POST ' + esc(url) + ' \\\n' +
+      '  -H \'content-type: application/json\' --data @record.json</pre>' +
+      '<p class="x4-note">The bare JSON record is the whole request body. There is no envelope ' +
+      'around it, and the endpoint tells you the same thing in the body of its own 402.</p>';
+  }
+
+  function nothing(scanned) {
+    live.innerHTML = '<div class="x4-empty"><p><strong>The catalog answered, and this endpoint ' +
+      'was not in it.</strong> ' + scanned + ' resources were listed and none matched. That is the ' +
+      'true status at the moment you loaded this page, not a fault at your end. The query is ' +
+      '<span class="x4-mono">' + esc(API) + '?limit=100&amp;offset=0</span>.</p></div>';
+    callBox.innerHTML = '';
+  }
+  function broken(err) {
+    var msg = (err && err.message) ? err.message : String(err);
+    live.innerHTML = '<div class="x4-empty"><p><strong>The catalog did not answer your browser ' +
+      'just now</strong> (' + esc(msg) + '). Nothing about the listing is cached on this page, so ' +
+      'there is nothing to show in its place. The query is <span class="x4-mono">' + esc(API) +
+      '?limit=100&amp;offset=0</span> if you want to try it yourself.</p></div>';
+    callBox.innerHTML = '';
+  }
+
+  pull(0, [], function (items) {
+    var hits = items.filter(mine);
+    if (!hits.length) { nothing(items.length); return; }
+    render(hits[0], items.length);
+  }, broken);
+})();
+</script>
+
+</body>
+</html>
