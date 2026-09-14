@@ -211,6 +211,11 @@ Usage, stated plainly: the endpoint went live in early September 2026, and the
 only payments settled so far are our own end-to-end tests. It is listed in the
 x402 Bazaar catalog and entered in the Algorand Foundation's x402 Global Challenge.
 
+Its listing is public, so you do not have to take that paragraph on trust: the page at
+<https://navigatorbuilds.github.io/elara-mesh/x402.html> reads our entry straight out of the
+x402 discovery catalog in your own browser and shows the price, the payout address, how many
+payments the catalog has seen and the exact call, or says plainly when the listing is not there.
+
 ## Why now — the verification gap
 
 Intelligence is becoming abundant; verification is not. As fluent AI output
