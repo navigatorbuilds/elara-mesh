@@ -17,6 +17,17 @@ proprietary fork from enclosing the protocol while keeping its improvements
 private. Running the **unmodified** node imposes no source-publication
 obligation — only modifications that are served over a network do.
 
+## Commercial licensing
+
+If the AGPL's network-service obligation does not fit your deployment, a
+commercial license for the node is available. It lifts the §13 source-publication
+requirement for your own modifications; nothing else about the node changes.
+Terms are set per deployment, so there is no price list here.
+
+Write to nenadvasic@protonmail.com with a short description of how you intend to
+run it. This changes nothing about the open license: the node stays available
+under AGPL-3.0 to everyone, on the same terms, for as long as it exists.
+
 ## The client SDKs — MIT OR Apache-2.0
 
 The client SDKs under [`sdks/`](sdks/) — Python, TypeScript, the GitHub Action,

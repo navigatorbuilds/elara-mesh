@@ -696,6 +696,9 @@ the client SDKs. See [LICENSING.md](LICENSING.md) for the full breakdown.
   **MIT OR Apache-2.0** ([LICENSE-MIT](LICENSE-MIT) / [LICENSE-APACHE](LICENSE-APACHE)),
   at your option. Permissive on purpose: frictionless integration grows the
   network the node operates.
+- **Commercial license** for the node, for deployments that cannot take the
+  AGPL's §13 obligation. Terms are set per deployment; write to
+  nenadvasic@protonmail.com. The AGPL grant is unaffected and permanent.
 
 ### Contribution
 
