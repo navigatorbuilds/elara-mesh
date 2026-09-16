@@ -2,6 +2,10 @@
 
 [![CI](https://github.com/navigatorbuilds/elara-mesh/actions/workflows/ci.yml/badge.svg)](https://github.com/navigatorbuilds/elara-mesh/actions/workflows/ci.yml)
 
+**License:** the node is AGPL-3.0-only; every published crate and client SDK is
+**MIT OR Apache-2.0**. See [LICENSING.md](LICENSING.md). GitHub's repo card shows
+the node's license only.
+
 **Provable AI agents** — post-quantum, offline-verifiable proof of *who
 (or what) did what, and when*. Don't trust us: check it yourself — one
 command, no server, no network, and it never fakes a green. The *on whose
