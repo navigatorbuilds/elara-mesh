@@ -20,7 +20,7 @@
   .rc-verify pre { overflow-x: auto; padding: 0.6rem 0.8rem; border-radius: 8px; background: rgba(0,0,0,0.25); font-size: 0.8em; }
   .rc-empty { border: 1px dashed rgba(255,255,255,0.18); border-radius: 10px; padding: 1.4rem; opacity: 0.85; }
   .rc-note { font-size: 0.9em; opacity: 0.75; }
-  .rc-badge { font-size: 0.72em; padding: 0.1rem 0.5rem; border-radius: 999px; border: 1px solid rgba(54,226,196,0.5); }
+  .rc-badge { font-size: 0.72em; padding: 0.1rem 0.5rem; border-radius: 999px; border: 1px solid rgba(210,162,76,0.5); }
 </style>
 </head>
 <body>
@@ -50,7 +50,7 @@
   to believe any of that: each row below is checkable against any mesh node, or fully offline.</p>
 </header>
 
-<section class="reveal" style="border:1px solid rgba(54,226,196,0.35);border-radius:12px;padding:1.1rem 1.3rem;">
+<section class="reveal rc-callout">
   <h2 style="margin-top:0">Check one yourself — under a minute, in your browser</h2>
   <p><strong>« 1 »</strong> Pick a proof below that carries a
   <span class="rc-badge">verify in your browser</span> link — it's a real act by the AI
@@ -233,7 +233,7 @@ git show &lt;prev_mirror_commit&gt;:site/receipts.json   # … minus these = the
         '<span class="rc-act">' + esc(a.action || a.tool || 'act') + '</span>' +
         (a.tool ? '<span class="rc-dim">' + esc(a.tool) + '</span>' : '') +
         (when ? '<span class="rc-dim">' + esc(when) + '</span>' : '') +
-        (status ? '<span class="rc-badge"' + (ok ? '' : ' style="border-color:rgba(255,180,84,0.6)"') + '>' + esc(status) + '</span>' : '') +
+        (status ? '<span class="rc-badge"' + (ok ? '' : ' style="border-color:rgba(255,93,108,0.6)"') + '>' + esc(status) + '</span>' : '') +
         (a.archived ? '<span class="rc-dim">archived</span>' : '') +
         vlink +
         '<span class="rc-mono rc-dim">' + esc(shortHex(a.record_id)) + '</span>' +

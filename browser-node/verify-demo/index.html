@@ -6,9 +6,9 @@
 <title>Elara — verify it yourself</title>
 <style>
   :root {
-    --bg: #0d1117; --panel: #161b22; --border: #30363d; --fg: #e6edf3;
-    --muted: #8b949e; --pass: #3fb950; --partial: #d29922; --fail: #f85149;
-    --accent: #58a6ff;
+    --bg: #0a0b0d; --panel: #101114; --border: #2b2e33; --fg: #e9eaeb;
+    --muted: #a1a4a9; --pass: #3fb950; --partial: #d29922; --fail: #ff5d6c;
+    --accent: #7aa7d9;
   }
   * { box-sizing: border-box; }
   body {
@@ -28,7 +28,7 @@
   }
   .row { display: flex; gap: .6rem; margin: .8rem 0 0; flex-wrap: wrap; }
   button {
-    background: var(--accent); color: #0d1117; border: 0; border-radius: 6px;
+    background: var(--accent); color: #0a0b0d; border: 0; border-radius: 6px;
     padding: .55rem 1.1rem; font: inherit; font-weight: 600; cursor: pointer;
   }
   button.ghost { background: transparent; color: var(--accent); border: 1px solid var(--border); }
@@ -76,7 +76,7 @@
   /* whole-page drop target: overlay is visible only while a file is over the page */
   #drop-overlay {
     display: none; position: fixed; inset: 0; z-index: 50;
-    background: rgba(10,14,18,.88); border: 3px dashed var(--accent);
+    background: rgba(10,11,13,.9); border: 3px dashed var(--accent);
     align-items: center; justify-content: center; text-align: center;
     font-size: 1.15rem; color: var(--fg); pointer-events: none; padding: 2rem;
   }

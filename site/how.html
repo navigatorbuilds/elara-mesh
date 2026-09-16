@@ -7,7 +7,6 @@
 <meta name="description" content="From a signature on a device to sealed, verifiable history: the Elara pipeline — record, gossip, witness, seal, verify — animated.">
 <link rel="stylesheet" href="style.css">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='38' fill='none' stroke='%2336e2c4' stroke-width='9'/><circle cx='50' cy='50' r='10' fill='%2336e2c4'/></svg>">
-<script src="anim.js" defer></script>
 <script src="reveal.js" defer></script>
 </head>
 <body>
@@ -28,7 +27,6 @@
 <main class="page">
 
 <header class="page-head">
-  <canvas id="mesh" class="page-mesh" aria-hidden="true"></canvas>
   <p class="hero-kicker">How it works</p>
   <h1>From a signature to sealed history.</h1>
   <p class="hero-sub">One record's journey through the mesh — five stages, seconds to an
@@ -39,15 +37,15 @@
 <section class="uc-anim pipeline-wrap">
   <svg viewBox="0 0 1000 360" role="img" aria-label="Animation: a record is signed on a device, gossips across the mesh, is attested by a witness committee, sealed into an epoch, and verified by a phone">
     <style>
-      .p-lbl { font: 600 12px/1 Inter, system-ui, sans-serif; letter-spacing: .14em; fill: #93a1b0; }
-      .p-cap { font: 700 13px/1 Inter, system-ui, sans-serif; letter-spacing: .1em; fill: #5d6b7a; }
-      .p-mono { font: 700 11px/1 ui-monospace, Menlo, monospace; fill: #9ff5e4; }
+      .p-lbl { font: 600 12px/1 Inter, system-ui, sans-serif; letter-spacing: .14em; fill: #a1a4a9; }
+      .p-cap { font: 700 13px/1 Inter, system-ui, sans-serif; letter-spacing: .1em; fill: #6b6f76; }
+      .p-mono { font: 700 11px/1 ui-monospace, Menlo, monospace; fill: #e0b263; }
 
       .p-stage { animation: p-stage 14s infinite; }
       .p-c2 { animation-delay: 2.8s; } .p-c3 { animation-delay: 5.6s; }
       .p-c4 { animation-delay: 8.4s; } .p-c5 { animation-delay: 11.2s; }
       @keyframes p-stage {
-        0% { fill: #5d6b7a; } 2% { fill: #36e2c4; } 20% { fill: #36e2c4; } 24%, 100% { fill: #5d6b7a; }
+        0% { fill: #6b6f76; } 2% { fill: #d2a24c; } 20% { fill: #d2a24c; } 24%, 100% { fill: #6b6f76; }
       }
 
       .p-rec { opacity: 0; animation: p-rec 14s infinite; }
@@ -87,7 +85,7 @@
       }
       .p-seal { animation: p-seal 14s infinite; }
       @keyframes p-seal {
-        0%, 60% { stroke: #1a2330; } 66%, 92% { stroke: #36e2c4; } 98%, 100% { stroke: #1a2330; }
+        0%, 60% { stroke: #22262b; } 66%, 92% { stroke: #d2a24c; } 98%, 100% { stroke: #22262b; }
       }
       .p-root { opacity: 0; animation: p-root 14s infinite; }
       @keyframes p-root { 0%, 62% { opacity: 0; } 68%, 92% { opacity: 1; } 98%, 100% { opacity: 0; } }
@@ -103,10 +101,10 @@
     </style>
     <defs>
       <linearGradient id="gP" x1="0" y1="0" x2="1" y2="1">
-        <stop offset="0" stop-color="#36e2c4"/><stop offset="1" stop-color="#57c8ff"/>
+        <stop offset="0" stop-color="#3d4148"/><stop offset="1" stop-color="#2b2f34"/>
       </linearGradient>
       <filter id="fP" x="-80%" y="-80%" width="260%" height="260%">
-        <feGaussianBlur stdDeviation="2.4" result="b"/>
+        <feGaussianBlur stdDeviation="1.2" result="b"/>
         <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
       </filter>
     </defs>
@@ -119,55 +117,55 @@
     <text class="p-cap p-stage p-c5" x="860" y="344">5 · VERIFY</text>
 
     <!-- 1 device -->
-    <rect class="p-dev" x="30" y="130" width="90" height="58" rx="8" fill="rgba(232,237,242,.03)"/>
-    <circle cx="56" cy="159" r="8" fill="none" stroke="#36e2c4" stroke-width="1.5"/>
-    <circle cx="56" cy="159" r="2.6" fill="#36e2c4"/>
+    <rect class="p-dev" x="30" y="130" width="90" height="58" rx="8" fill="rgba(233,234,235,.03)"/>
+    <circle cx="56" cy="159" r="8" fill="none" stroke="#d2a24c" stroke-width="1.5"/>
+    <circle cx="56" cy="159" r="2.6" fill="#d2a24c"/>
     <text class="p-lbl" x="32" y="120">ANY DEVICE</text>
     <text class="p-mono" x="74" y="163">sign()</text>
 
     <!-- the record -->
     <g class="p-rec">
-      <rect x="138" y="148" width="64" height="22" rx="11" fill="rgba(54,226,196,.14)" stroke="#36e2c4" stroke-width="1.2"/>
+      <rect x="138" y="148" width="64" height="22" rx="11" fill="rgba(210,162,76,.14)" stroke="#d2a24c" stroke-width="1.2"/>
       <text class="p-mono" x="151" y="163">record</text>
     </g>
 
     <!-- 2 gossip hops -->
-    <circle class="p-hop p-h1" cx="266" cy="118" r="7" fill="#93a1b0"/>
-    <circle class="p-hop p-h2" cx="348" cy="176" r="7" fill="#93a1b0"/>
-    <circle class="p-hop p-h3" cx="432" cy="126" r="7" fill="#93a1b0"/>
-    <line x1="138" y1="158" x2="266" y2="120" stroke="#1a2330" stroke-width="1.2"/>
-    <line x1="266" y1="118" x2="348" y2="176" stroke="#1a2330" stroke-width="1.2"/>
-    <line x1="348" y1="176" x2="432" y2="126" stroke="#1a2330" stroke-width="1.2"/>
-    <line x1="432" y1="126" x2="524" y2="158" stroke="#1a2330" stroke-width="1.2"/>
+    <circle class="p-hop p-h1" cx="266" cy="118" r="7" fill="#a1a4a9"/>
+    <circle class="p-hop p-h2" cx="348" cy="176" r="7" fill="#a1a4a9"/>
+    <circle class="p-hop p-h3" cx="432" cy="126" r="7" fill="#a1a4a9"/>
+    <line x1="138" y1="158" x2="266" y2="120" stroke="#22262b" stroke-width="1.2"/>
+    <line x1="266" y1="118" x2="348" y2="176" stroke="#22262b" stroke-width="1.2"/>
+    <line x1="348" y1="176" x2="432" y2="126" stroke="#22262b" stroke-width="1.2"/>
+    <line x1="432" y1="126" x2="524" y2="158" stroke="#22262b" stroke-width="1.2"/>
 
     <!-- 3 witness zone -->
-    <circle cx="524" cy="158" r="56" fill="none" stroke="#1a2330" stroke-width="1.4" stroke-dasharray="4 5"/>
+    <circle cx="524" cy="158" r="56" fill="none" stroke="#22262b" stroke-width="1.4" stroke-dasharray="4 5"/>
     <text class="p-lbl" x="478" y="84">ZONE COMMITTEE</text>
-    <g class="p-wit"><circle cx="492" cy="120" r="9" fill="none" stroke="#36e2c4" stroke-width="1.5"/><path d="M488 120l3 3 5-6" fill="none" stroke="#36e2c4" stroke-width="1.4"/></g>
-    <g class="p-wit p-w2"><circle cx="556" cy="120" r="9" fill="none" stroke="#36e2c4" stroke-width="1.5"/><path d="M552 120l3 3 5-6" fill="none" stroke="#36e2c4" stroke-width="1.4"/></g>
-    <g class="p-wit p-w3"><circle cx="472" cy="172" r="9" fill="none" stroke="#36e2c4" stroke-width="1.5"/><path d="M468 172l3 3 5-6" fill="none" stroke="#36e2c4" stroke-width="1.4"/></g>
-    <g class="p-wit p-w4"><circle cx="576" cy="172" r="9" fill="none" stroke="#36e2c4" stroke-width="1.5"/><path d="M572 172l3 3 5-6" fill="none" stroke="#36e2c4" stroke-width="1.4"/></g>
-    <g class="p-wit p-w5"><circle cx="524" cy="206" r="9" fill="none" stroke="#36e2c4" stroke-width="1.5"/><path d="M520 206l3 3 5-6" fill="none" stroke="#36e2c4" stroke-width="1.4"/></g>
+    <g class="p-wit"><circle cx="492" cy="120" r="9" fill="none" stroke="#d2a24c" stroke-width="1.5"/><path d="M488 120l3 3 5-6" fill="none" stroke="#d2a24c" stroke-width="1.4"/></g>
+    <g class="p-wit p-w2"><circle cx="556" cy="120" r="9" fill="none" stroke="#d2a24c" stroke-width="1.5"/><path d="M552 120l3 3 5-6" fill="none" stroke="#d2a24c" stroke-width="1.4"/></g>
+    <g class="p-wit p-w3"><circle cx="472" cy="172" r="9" fill="none" stroke="#d2a24c" stroke-width="1.5"/><path d="M468 172l3 3 5-6" fill="none" stroke="#d2a24c" stroke-width="1.4"/></g>
+    <g class="p-wit p-w4"><circle cx="576" cy="172" r="9" fill="none" stroke="#d2a24c" stroke-width="1.5"/><path d="M572 172l3 3 5-6" fill="none" stroke="#d2a24c" stroke-width="1.4"/></g>
+    <g class="p-wit p-w5"><circle cx="524" cy="206" r="9" fill="none" stroke="#d2a24c" stroke-width="1.5"/><path d="M520 206l3 3 5-6" fill="none" stroke="#d2a24c" stroke-width="1.4"/></g>
     <!-- stake meter -->
-    <rect x="476" y="238" width="96" height="8" rx="4" fill="rgba(232,237,242,.06)"/>
-    <rect class="p-meter" x="476" y="238" height="8" rx="4" fill="#36e2c4"/>
-    <text class="p-lbl" x="478" y="262" fill="#5d6b7a">⅔ INDEPENDENT STAKE</text>
+    <rect x="476" y="238" width="96" height="8" rx="4" fill="rgba(233,234,235,.06)"/>
+    <rect class="p-meter" x="476" y="238" height="8" rx="4" fill="#d2a24c"/>
+    <text class="p-lbl" x="478" y="262" fill="#6b6f76">⅔ INDEPENDENT STAKE</text>
 
     <!-- 4 epoch seal -->
-    <rect class="p-seal" x="650" y="112" width="130" height="92" rx="8" fill="rgba(232,237,242,.02)" stroke-width="1.6"/>
+    <rect class="p-seal" x="650" y="112" width="130" height="92" rx="8" fill="rgba(233,234,235,.02)" stroke-width="1.6"/>
     <path class="p-seal" d="M702 152v-9a13 13 0 0 1 26 0v9" fill="none" stroke-width="1.6"/>
     <rect class="p-seal" x="696" y="152" width="38" height="28" rx="5" fill="none" stroke-width="1.6"/>
     <text class="p-lbl" x="652" y="100">EPOCH SEAL</text>
     <text class="p-root p-mono" x="652" y="226">merkle: 0x4ad1…</text>
 
     <!-- 5 verify -->
-    <rect class="p-dev" x="876" y="116" width="52" height="92" rx="10" fill="rgba(232,237,242,.03)"/>
-    <line x1="894" y1="198" x2="910" y2="198" stroke="#36e2c4" stroke-width="1.5"/>
+    <rect class="p-dev" x="876" y="116" width="52" height="92" rx="10" fill="rgba(233,234,235,.03)"/>
+    <line x1="894" y1="198" x2="910" y2="198" stroke="#d2a24c" stroke-width="1.5"/>
     <text class="p-lbl" x="858" y="104">LIGHT CLIENT</text>
-    <path class="p-proof" d="M782 158 C 820 158, 836 162, 874 162" fill="none" stroke="#36e2c4" stroke-width="1.5"/>
+    <path class="p-proof" d="M782 158 C 820 158, 836 162, 874 162" fill="none" stroke="#d2a24c" stroke-width="1.5"/>
     <g class="p-ok">
-      <circle cx="902" cy="156" r="14" fill="none" stroke="#36e2c4" stroke-width="2"/>
-      <path d="M895 156l5 5 9-11" fill="none" stroke="#36e2c4" stroke-width="2"/>
+      <circle cx="902" cy="156" r="14" fill="none" stroke="#d2a24c" stroke-width="2"/>
+      <path d="M895 156l5 5 9-11" fill="none" stroke="#d2a24c" stroke-width="2"/>
     </g>
   </svg>
   <div class="fig-cap"><span>FIG. 01</span> RECORD LIFECYCLE — SIGN / GOSSIP / ATTEST / SEAL / PROVE</div>
@@ -234,7 +232,7 @@
     <div class="col uc-anim">
     <svg viewBox="0 0 480 240" role="img" aria-label="Animation: a correlated committee of clones is blocked while a diverse committee settles">
       <style>
-        .d-lbl { font: 600 11px/1 Inter, system-ui, sans-serif; letter-spacing: .12em; fill: #93a1b0; }
+        .d-lbl { font: 600 11px/1 Inter, system-ui, sans-serif; letter-spacing: .12em; fill: #a1a4a9; }
         .d-no { animation: d-no 6s infinite; opacity: 0; transform-origin: center; transform-box: fill-box; }
         @keyframes d-no { 0%, 40% { opacity: 0; transform: scale(.5);} 48%, 88% { opacity: 1; transform: scale(1);} 96%, 100% { opacity: 0; } }
         .d-yes { animation: d-yes 6s infinite; opacity: 0; transform-origin: center; transform-box: fill-box; }
@@ -245,7 +243,7 @@
       </style>
       <defs>
         <filter id="fD" x="-80%" y="-80%" width="260%" height="260%">
-          <feGaussianBlur stdDeviation="2.2" result="b"/>
+          <feGaussianBlur stdDeviation="1.1" result="b"/>
           <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
         </filter>
       </defs>
@@ -256,20 +254,20 @@
       <g class="d-pulse"><circle cx="140" cy="70" r="11" fill="rgba(255,93,108,.12)" stroke="#ff5d6c"/></g>
       <line x1="60" y1="70" x2="100" y2="70" stroke="#ff5d6c" stroke-width="1" opacity=".5"/>
       <line x1="100" y1="70" x2="140" y2="70" stroke="#ff5d6c" stroke-width="1" opacity=".5"/>
-      <text class="d-lbl" x="42" y="118" fill="#5d6b7a">raw stake 300 → effective ~115</text>
+      <text class="d-lbl" x="42" y="118" fill="#6b6f76">raw stake 300 → effective ~115</text>
       <g class="d-no">
         <rect x="40" y="136" width="130" height="30" rx="6" fill="rgba(255,93,108,.08)" stroke="#ff5d6c"/>
         <text x="58" y="156" font-family="Inter,system-ui,sans-serif" font-size="12" font-weight="800" letter-spacing=".1em" fill="#ff5d6c">BLOCKED</text>
       </g>
       <!-- diverse -->
       <text class="d-lbl" x="290" y="30">THREE INDEPENDENT ORGS</text>
-      <g class="d-pulse"><circle cx="320" cy="70" r="11" fill="rgba(54,226,196,.12)" stroke="#36e2c4"/></g>
-      <g class="d-pulse"><circle cx="372" cy="56" r="11" fill="rgba(54,226,196,.12)" stroke="#36e2c4"/></g>
-      <g class="d-pulse"><circle cx="424" cy="74" r="11" fill="rgba(54,226,196,.12)" stroke="#36e2c4"/></g>
-      <text class="d-lbl" x="300" y="118" fill="#5d6b7a">raw stake 300 → effective 300</text>
+      <g class="d-pulse"><circle cx="320" cy="70" r="11" fill="rgba(210,162,76,.12)" stroke="#d2a24c"/></g>
+      <g class="d-pulse"><circle cx="372" cy="56" r="11" fill="rgba(210,162,76,.12)" stroke="#d2a24c"/></g>
+      <g class="d-pulse"><circle cx="424" cy="74" r="11" fill="rgba(210,162,76,.12)" stroke="#d2a24c"/></g>
+      <text class="d-lbl" x="300" y="118" fill="#6b6f76">raw stake 300 → effective 300</text>
       <g class="d-yes">
-        <rect x="300" y="136" width="130" height="30" rx="6" fill="rgba(54,226,196,.08)" stroke="#36e2c4"/>
-        <text x="318" y="156" font-family="Inter,system-ui,sans-serif" font-size="12" font-weight="800" letter-spacing=".1em" fill="#36e2c4">SETTLED ✓</text>
+        <rect x="300" y="136" width="130" height="30" rx="6" fill="rgba(210,162,76,.08)" stroke="#d2a24c"/>
+        <text x="318" y="156" font-family="Inter,system-ui,sans-serif" font-size="12" font-weight="800" letter-spacing=".1em" fill="#d2a24c">SETTLED ✓</text>
       </g>
     </svg>
     <div class="fig-cap"><span>FIG. 02</span> MESH-BFT THEOREM 1 — CORRELATION-PENALIZED STAKE</div>
