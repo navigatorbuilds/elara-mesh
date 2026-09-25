@@ -12,9 +12,10 @@ provable*.
 ## The config (60 seconds, assuming the 15-minute issuer quickstart is done)
 
 Prerequisites: a running Elara node + an issued mandate — see
-[`docs/QUICKSTART-ISSUER.md`](../../docs/QUICKSTART-ISSUER.md) — plus `elara-mcp` built
-from this repo (`cargo build --release -p elara-mcp --features node` — it is not on
-crates.io) and `pip install strands-agents`.
+[`docs/QUICKSTART-ISSUER.md`](../../docs/QUICKSTART-ISSUER.md), which also builds
+`elara-cli` at `target/release/elara-cli` in your clone — plus `elara-mcp`
+(`cargo install elara-mcp`, or `cargo build --release -p elara-mcp` in the clone) and
+`pip install strands-agents`.
 
 Point a Strands `MCPClient` at the `elara-mcp` binary over stdio:
 
@@ -26,10 +27,11 @@ from strands.tools.mcp import MCPClient
 elara = MCPClient(lambda: stdio_client(StdioServerParameters(
     command="/path/to/elara-mcp",
     env={
-        "ELARA_MCP_NODE_URL": "http://127.0.0.1:9474",
+        "ELARA_MCP_NODE_URL": "http://127.0.0.1:19474",
         "ELARA_NETWORK_ID":   "my-agent-chain",
         "ELARA_MCP_IDENTITY": "/path/to/agent-identity.json",
         "ELARA_MCP_MANDATE_ID": "<mandate id from elara-cli mandate-issue>",
+        "ELARA_MCP_CLI":      "/path/to/elara-mesh/target/release/elara-cli",
     },
 )))
 
@@ -77,13 +79,16 @@ such a mandate, proofs public: <https://navigatorbuilds.github.io/elara-mesh/rec
   (`testnet`): **2/2 — all four tools registered under the bare names above, and
   `mandate_my_mandate` returned a live mandate (revoked=false) through Strands' own
   `call_tool_sync` dispatch.** Reproduce it with that script.
-- What is NOT yet exercised: (a) a full model-driven Strands `Agent(...)` composition —
+- The `mandate_act_emit` write leg (`EMIT=1`) was first run on 2026-09-25, on a scratch
+  chain from the issuer quickstart, with `strands-agents` 1.57.0 and `mcp` 2.1.1: **3/3**,
+  record `01a0d9c4-7f81-7192-aa1e-ed46a6afb52a`. That run found the leg had been broken
+  since it was written: it sent argument names the server never had (`content`, `op`)
+  and was refused with `missing field 'tool'`, and the script dropped `ELARA_MCP_CLI`.
+  This note used to call the leg "one flag away"; it was not. Both are fixed.
+- What is NOT yet exercised: a full model-driven Strands `Agent(...)` composition —
   that needs a live model provider (Bedrock or another) and is the layer *above* the
-  tool surface tested here; (b) the `mandate_act_emit` write leg, which the script runs
-  only under `EMIT=1` — left off in the recorded pass so it does not spend the shared
-  maintainer build-agent's daily emission budget while that identity is in active use.
-  Both are one flag / one model-key away; if you run either, we'd genuinely like to hear
-  what broke or didn't — open an issue.
+  tool surface tested here. If you run it, we'd genuinely like to hear what broke or
+  didn't — open an issue.
 - Fail-closed by design: wrong network, revoked mandate, missing identity file, or a
   spent daily budget refuse loudly at startup or call time — never a silent wrong-chain
   proof. Mandate scope strings are recorded and signed but not yet enforced

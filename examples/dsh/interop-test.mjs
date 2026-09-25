@@ -7,9 +7,9 @@
 //
 // Setup (see README.md + docs/QUICKSTART-ISSUER.md):
 //   npm install @deepseek-ai/dsh-mcp-client        # peers auto-install
-//   export ELARA_MCP_BIN=/path/to/elara-mcp        # cargo build --release -p elara-mcp --features node
-//   export ELARA_MCP_CLI=/path/to/elara-cli
-//   export ELARA_MCP_NODE_URL=http://127.0.0.1:9474
+//   export ELARA_MCP_BIN=/path/to/elara-mcp        # cargo install elara-mcp
+//   export ELARA_MCP_CLI=/path/to/elara-cli        # the quickstart builds it
+//   export ELARA_MCP_NODE_URL=http://127.0.0.1:19474
 //   export ELARA_NETWORK_ID=<your network id>
 //   export ELARA_MCP_IDENTITY=/path/to/agent-identity.json
 //   export ELARA_MCP_MANDATE_ID=<mandate id from elara-cli mandate-issue>

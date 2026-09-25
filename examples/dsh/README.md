@@ -11,9 +11,9 @@ and post-revocation provable*.
 ## The config (60 seconds, assuming the 15-minute issuer quickstart is done)
 
 Prerequisites: a running Elara node + an issued mandate — see
-[`docs/QUICKSTART-ISSUER.md`](../../docs/QUICKSTART-ISSUER.md) — and `elara-mcp` +
-`elara-cli` built from this repo (`cargo build --release -p elara-mcp --features node`;
-neither is published on crates.io).
+[`docs/QUICKSTART-ISSUER.md`](../../docs/QUICKSTART-ISSUER.md), which also builds
+`elara-cli` at `target/release/elara-cli` in your clone — and `elara-mcp`
+(`cargo install elara-mcp`, or `cargo build --release -p elara-mcp` in the clone).
 
 Add one plugin instance to your dsh `cordis.yml`:
 
@@ -29,6 +29,7 @@ Add one plugin instance to your dsh `cordis.yml`:
       ELARA_NETWORK_ID: my-agent-chain
       ELARA_MCP_IDENTITY: /path/to/agent-identity.json
       ELARA_MCP_MANDATE_ID: <mandate id from elara-cli mandate-issue>
+      ELARA_MCP_CLI: /path/to/elara-mesh/target/release/elara-cli
 ```
 
 Your model now sees four tools (verified live against `dsh-mcp-client` 0.0.1-rc.1 —
@@ -70,6 +71,8 @@ such a mandate, proofs public: <https://navigatorbuilds.github.io/elara-mesh/rec
   act was emitted *through dsh's own dispatch path* (record
   `01a0201b-23cc-7100-99d4-590da36f9be5`, args hashed server-side, status
   `authorized`/`valid`). Reproduce it with [`interop-test.mjs`](interop-test.mjs).
+  Re-run on 2026-09-25 as a newcomer would, on a scratch chain from the issuer quickstart
+  with `elara-mcp` 0.1.0 from crates.io: 4/4, record `01a0d9c4-bb90-7b13-8687-86543baa3002`.
   What is NOT yet exercised: a full model-driven dsh composition (that needs a DeepSeek
   runtime; the plugin↔server surface below the model is the part tested here). If you
   run the full harness, we'd genuinely like to hear what broke or didn't: open an issue.

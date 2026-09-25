@@ -14,16 +14,24 @@ else the tools to check it.
         "ELARA_MCP_NODE_URL": "http://127.0.0.1:19474",
         "ELARA_NETWORK_ID": "my-agent-chain",
         "ELARA_MCP_IDENTITY": "/path/to/agent.json",
-        "ELARA_MCP_MANDATE_ID": "<mandate id from mandate-issue>"
+        "ELARA_MCP_MANDATE_ID": "<mandate id from mandate-issue>",
+        "ELARA_MCP_CLI": "/path/to/elara-mesh/target/release/elara-cli"
       }
     }
   }
 }
 ```
 
+Install: `cargo install elara-mcp` (builds from source; 82 s on a clean
+machine in our test), or `cargo build --release -p elara-mcp` in a clone of
+this repo, which leaves the binary at `target/release/elara-mcp`.
+
 Prerequisite: a running Elara node and an issued mandate — fifteen minutes via
-[`docs/QUICKSTART-ISSUER.md`](../../docs/QUICKSTART-ISSUER.md). `elara-cli`
-must be on `PATH` (or set `ELARA_MCP_CLI`); the act-emission subprocess uses it.
+[`docs/QUICKSTART-ISSUER.md`](../../docs/QUICKSTART-ISSUER.md). The quickstart
+also builds `elara-cli` at `target/release/elara-cli` in your clone; it is not
+a separate crate. Point `ELARA_MCP_CLI` at it, as above, or put it on `PATH`:
+the act-emission subprocess runs it. Without it the read tools still work and
+the first `mandate_act_emit` returns `could not run elara-cli`.
 
 ## Tools
 

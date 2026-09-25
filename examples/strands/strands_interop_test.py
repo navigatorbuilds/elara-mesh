@@ -9,8 +9,9 @@
 #
 # Setup (see README.md + ../../docs/QUICKSTART-ISSUER.md):
 #   pip install strands-agents
-#   export ELARA_MCP_BIN=/path/to/elara-mcp     # cargo build --release -p elara-mcp --features node
-#   export ELARA_MCP_NODE_URL=http://127.0.0.1:9474
+#   export ELARA_MCP_BIN=/path/to/elara-mcp     # cargo install elara-mcp
+#   export ELARA_MCP_CLI=/path/to/elara-cli     # the quickstart builds it; EMIT=1 needs it
+#   export ELARA_MCP_NODE_URL=http://127.0.0.1:19474
 #   export ELARA_NETWORK_ID=<your network id>
 #   export ELARA_MCP_IDENTITY=/path/to/agent-identity.json
 #   export ELARA_MCP_MANDATE_ID=<mandate id from elara-cli mandate-issue>
@@ -38,6 +39,9 @@ passthru = ["ELARA_MCP_NODE_URL", "ELARA_NETWORK_ID", "ELARA_MCP_IDENTITY",
             "ELARA_MCP_MANDATE_ID"]
 env = {k: need(k) for k in passthru}
 env["ELARA_MCP_AGENT_ID"] = os.environ.get("ELARA_MCP_AGENT_ID", "strands-interop-test")
+# The EMIT leg runs elara-cli: pass ELARA_MCP_CLI through, or it must be on PATH.
+if os.environ.get("ELARA_MCP_CLI"):
+    env["ELARA_MCP_CLI"] = os.environ["ELARA_MCP_CLI"]
 # elara-mcp is fail-closed on config; inherit PATH so it can resolve libs.
 env["PATH"] = os.environ.get("PATH", "")
 
@@ -76,11 +80,19 @@ with client:
     if os.environ.get("EMIT") == "1":
         act = client.call_tool_sync(
             tool_use_id="probe-emit", name="mandate_act_emit",
-            arguments={"content": {"interop": "strands", "ts": "probe"},
-                       "op": "commit"})
+            arguments={"tool": "strands-interop-test", "action": "interop-test",
+                       "args": {"event": "Strands MCPClient end-to-end against elara-mcp",
+                                "example": "examples/strands"},
+                       "session_id": "strands-interop"})
         atxt = text_of(act)
+        try:
+            ad = json.loads(atxt)
+        except ValueError:
+            ad = {}
+        rid = ad.get("record_id")
         check("mandate_act_emit writes a receipted act via Strands dispatch",
-              ("record_id" in atxt or "recordId" in atxt), atxt[:160].replace("\n", " "))
+              ad.get("ok") is True and isinstance(rid, str) and len(rid) > 8,
+              f"record_id={rid}" if rid else atxt[:160].replace("\n", " "))
 
 ok = all(results) and len(results) >= 2
 print(f"\n{'ALL PASS' if ok else 'FAILURES PRESENT'} — {sum(results)}/{len(results)} checks")

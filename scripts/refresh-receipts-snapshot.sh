@@ -47,6 +47,11 @@
 #                             carried (the newest-LIMIT window skipped them —
 #                             measured 2026-09-12: 142 acts from Jul-19 on).
 #                             Oldest first, so the heal is monotone across runs.
+#   RECEIPTS_DECODER          reference decoder that labels act rows (default
+#                             <repo>/examples/verify/decode_record.py). A wire it
+#                             cannot decode is counted; the run warns on stderr
+#                             and in RECEIPTS_LOG with the first reason.
+#   RECEIPTS_LOG              default <repo>/logs/receipts-refresh.log
 
 set -u
 
@@ -73,7 +78,10 @@ OUT="${RECEIPTS_OUT:-$REPO_DIR/site/receipts.json}"
 MANDATE="${ELARA_MAINTAINER_MANDATE:-}"
 VERIFY_N="${RECEIPTS_VERIFY_N:-8}"
 VERIFY_DIR="$(dirname "$OUT")/receipts"
-DECODER="$REPO_DIR/examples/verify/decode_record.py"
+DECODER="${RECEIPTS_DECODER:-$REPO_DIR/examples/verify/decode_record.py}"
+# Refresh log. Set up here, not at the commit stage, because the snapshot's
+# python block writes to it too: cron sends both output streams to /dev/null.
+RCLOG="${RECEIPTS_LOG:-$REPO_DIR/logs/receipts-refresh.log}"
 VERIFY_BIN="${RECEIPTS_VERIFY_BIN:-$REPO_DIR/target/release/elara-verify}"
 # Ship-gate freshness lock (2026-08-24): a Jul-20 0.1.0 binary sat here through
 # TWO flag days and silently discarded every v6+ envelope — coverage froze at
@@ -117,7 +125,7 @@ trap 'rm -f "$TMP"' EXIT
 if ! ACTS_JSON="$ACTS_JSON" NODE="$NODE" MANDATE="$MANDATE" BUILD_MANDATE="${ELARA_BUILD_MANDATE:-}" TMP_OUT="$TMP" \
     VERIFY_N="$VERIFY_N" VERIFY_DIR="$VERIFY_DIR" DECODER="$DECODER" \
     VERIFY_BIN="$VERIFY_BIN" ANCHOR_PK="$ANCHOR_PK" LIMIT="$LIMIT" GAPFILL_MAX="$GAPFILL_MAX" \
-    OUT_PATH="$OUT" \
+    OUT_PATH="$OUT" RCLOG="$RCLOG" \
     python3 <<'PYEOF'
 import json, os, re, subprocess, sys, datetime, tempfile
 
@@ -129,6 +137,12 @@ verify_dir = os.environ.get("VERIFY_DIR") or ""
 decoder = os.environ.get("DECODER") or ""
 verify_bin = os.environ.get("VERIFY_BIN") or ""
 anchor_pk = os.environ.get("ANCHOR_PK") or ""
+rclog = os.environ.get("RCLOG") or ""
+# Decoder failures are counted and logged, never swallowed (2026-09-25): the
+# v7 flag day left the reference decoder's ceiling at 6, every wire after it
+# failed to decode, and 411 rows shipped without tool/action labels for a
+# month with nothing in any log.
+decode_failures = []
 # Coverage-active: the ONE predicate for minting/adopting envelope pairs.
 # Hoisted 2026-08-19 (fusion-audit fix): the membership-bound deletion pass
 # near the end MUST share this exact predicate. Before the hoist, a missing
@@ -206,14 +220,16 @@ def decode_wire(wire):
     against the published conformance fixture — nonzero for any other
     record, so ignore it and parse stdout."""
     if not (decoder and os.path.isfile(decoder)):
+        decode_failures.append(f"decoder missing: {decoder or '(unset)'}")
         return None, None
     path = None
     try:
         with tempfile.NamedTemporaryFile(suffix=".wire", delete=False) as t:
             t.write(wire)
             path = t.name
-        out = subprocess.run(["python3", decoder, path],
-                             capture_output=True, timeout=30, text=True).stdout
+        proc = subprocess.run(["python3", decoder, path],
+                              capture_output=True, timeout=30, text=True)
+        out = proc.stdout
         rh = re.search(r"^\s*record_hash:\s*([0-9a-f]{64})\s*$", out, re.M)
         md = re.search(r"^\s*metadata:\s*(\{.*)$", out, re.M)
         meta = None
@@ -222,8 +238,12 @@ def decode_wire(wire):
                 meta = json.loads(md.group(1))
             except Exception:
                 meta = None
+        if not rh:
+            why = [l.strip() for l in (proc.stderr or out).splitlines() if l.strip()]
+            decode_failures.append(why[-1][:200] if why else f"exit {proc.returncode}, no output")
         return (rh.group(1) if rh else None), meta
-    except Exception:
+    except Exception as e:
+        decode_failures.append(f"{type(e).__name__}: {e}"[:200])
         return None, None
     finally:
         if path:
@@ -712,6 +732,18 @@ with open(tmp, "w") as f:
 covered = sum(1 for e in entries if e.get("browser_verify"))
 print(f"receipts: {len(entries)} acts aggregated "
       f"({archived_n} archived, {covered} with offline envelopes)")
+if decode_failures:
+    msg = (f"receipts: WARNING — reference decoder failed on {len(decode_failures)} "
+           "wire(s): act rows lose their tool/action labels, seal hashes fall back "
+           f"to the route's. First: {decode_failures[0]}")
+    print(msg, file=sys.stderr)
+    if rclog:
+        try:
+            with open(rclog, "a") as f:
+                f.write(datetime.datetime.now(datetime.timezone.utc)
+                        .strftime("%Y-%m-%dT%H:%M:%SZ") + " " + msg + "\n")
+        except OSError:
+            pass
 PYEOF
 then
     echo "receipts: snapshot build FAILED — $OUT left unchanged." >&2
@@ -758,7 +790,7 @@ echo "receipts: wrote $OUT"
 # reporting are worth nothing if the only caller throws them away, so the stage
 # also appends to a log, the way elara-mail-watch.sh and
 # elara-feed-staleness-watch.sh already do. stdout is kept as-is for manual runs.
-RCLOG="$REPO_DIR/logs/receipts-refresh.log"
+# (RCLOG is set near the top: the snapshot's python block writes to it too.)
 rlog() { printf '%s %s\n' "$(date -u +%FT%TZ)" "$*" >> "$RCLOG" 2>/dev/null || true; }
 
 receipts_commit_own_output() {
