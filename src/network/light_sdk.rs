@@ -11,24 +11,37 @@
 //!
 //! 1. The server can lie about an account's balance.
 //! 2. The SDK re-hashes the claimed `AccountState` and compares to the leaf
-//!    hash inside the Merkle proof. Mismatch ⇒ server lied about the
+//!    hash inside the Merkle proof. The leaf is the account's state at the
+//!    last seal; a node whose live state has moved past it says so
+//!    (`live_state_matches_sealed: false`) and the SDK returns the soft
+//!    `StateAheadOfSeal`. Any other mismatch ⇒ server lied about the
 //!    balance fields.
 //! 3. The SDK reconstructs the SMT root from `(leaf, siblings)` along the
 //!    deterministic path derived from the account id. Mismatch ⇒ proof is
 //!    forged or for the wrong account.
-//! 4. The SDK requires `bound_to_seal: true` from the server: the proof's
-//!    root must match `latest_sealed_account.account_smt_root`, i.e. the
-//!    root signed in the latest epoch seal. An unsealed proof reflects
-//!    in-memory state that hasn't been signed yet — callers can opt in to
-//!    accepting it ([`VerifyOpts::allow_unsealed`]) but the default rejects.
+//! 4. The proof root must be bound to a signed epoch seal. The binding comes
+//!    in three strengths:
+//!    - [`LightClient::verify_balance`] accepts the server's
+//!      `bound_to_seal: true` flag. The flag is the server's word: a
+//!      malicious node can set it on a fabricated proof.
+//!    - [`LightClient::verify_balance_anchored`] fetches the seal record the
+//!      server names, checks its Dilithium3 signature against anchor keys the
+//!      caller pins, and requires the proof root to equal the
+//!      `epoch_account_smt_root` that signed seal commits.
+//!    - [`LightClient::verify_balance_against_trusted_seal`] compares the
+//!      proof root to an (epoch, root) pair the caller pinned out of band.
 //!
-//! Trust anchor: out-of-band the caller pins the Dilithium3 pubkeys of the
-//! validators it trusts and feeds them to
-//! [`crate::light_verify::verify_seal_record_against_anchor`] together with
-//! the seal record bytes (fetched via `/records/fetch`) and the expected
-//! `record_hash` from a header chain-linked to the caller's pinned
-//! checkpoint. That helper closes the previous "server told us
-//! bound_to_seal=true" caveat — see `light_verify` for the full chain.
+//!    An unsealed proof reflects in-memory state that hasn't been signed yet.
+//!    `verify_balance` can accept it ([`VerifyOpts::allow_unsealed`]); the
+//!    default rejects it, and the anchored path always does.
+//!
+//! Freshness: the anchored check proves that a pinned anchor signed this root
+//! at this epoch. It does not prove the seal is the latest one — a hostile
+//! server can replay an older signed seal together with a proof against its
+//! root. On that path [`VerifiedAccount::epoch_number`] and
+//! [`VerifiedAccount::sealed_at`] are read from the signed record, so a caller
+//! that needs "current" compares them with its own clock or a checkpoint it
+//! trusts.
 //!
 //! @spec Protocol §11.3 (light client mode)
 //! @spec Protocol §11.12 (account state proofs)
@@ -55,6 +68,13 @@ pub enum LightClientError {
          proof leaf is {proof_leaf} — server lied about balance fields"
     )]
     LeafHashMismatch { computed: String, proof_leaf: String },
+
+    #[error(
+        "the node says this account changed after its last seal \
+         (live_state_matches_sealed=false): the balance it reports has no \
+         sealed proof yet — retry after the next seal"
+    )]
+    StateAheadOfSeal,
 
     #[error("proof structure invalid: siblings do not reconstruct the claimed root")]
     ProofInvalid,
@@ -105,6 +125,25 @@ pub enum LightClientError {
     )]
     IdentityMismatch { requested: String, returned: String },
 
+    #[error(
+        "server named no seal for this proof (no latest_sealed_account.seal_id) — \
+         the anchored check needs the seal record"
+    )]
+    SealNotNamed,
+
+    #[error("the seal the server named failed the anchored check: {0}")]
+    SealRejected(String),
+
+    #[error(
+        "proof root {proof_root} is not the account root {seal_root} that the \
+         anchor-signed seal at epoch {seal_epoch} committed"
+    )]
+    AnchoredRootMismatch {
+        proof_root: String,
+        seal_root: String,
+        seal_epoch: u64,
+    },
+
     #[error("reqwest client build failed: {0}")]
     ClientBuild(String),
 }
@@ -131,11 +170,18 @@ pub struct VerifiedAccount {
     pub identity: String,
     /// Server-claimed account state, cryptographically verified by this SDK.
     pub state: AccountState,
-    /// True if the proof's root matches the latest sealed SMT root.
+    /// True if the proof's root matches the latest sealed SMT root. From
+    /// `verify_balance` this is the server's own flag; from
+    /// `verify_balance_anchored` it means the SDK checked the root against
+    /// an anchor-signed seal.
     pub bound_to_seal: bool,
-    /// Epoch the binding seal was emitted at, if available.
+    /// Epoch the binding seal was emitted at, if available. Server-reported
+    /// in `verify_balance`; read from the signed seal record in
+    /// `verify_balance_anchored`.
     pub epoch_number: Option<u64>,
-    /// Wall-clock time the seal was emitted at, if available.
+    /// Wall-clock time the seal was emitted at, if available. Same source
+    /// rule as `epoch_number` (the signed record's own timestamp when
+    /// anchored).
     pub sealed_at: Option<f64>,
     /// The proof root the SDK verified.
     pub root: [u8; 32],
@@ -154,9 +200,10 @@ pub struct VerifiedAccount {
 ///
 /// This does NOT check that `proof.root` matches a *signed* seal — and neither
 /// does [`LightClient::verify_balance`], which only relays the server-asserted
-/// `bound_to_seal` flag. To bind a proof to a seal you have independently
-/// verified against the genesis anchor, use
-/// [`LightClient::verify_balance_against_trusted_seal`] (caller-pinned root).
+/// `bound_to_seal` flag. To bind a proof to a seal whose signature the SDK
+/// checks against anchor keys you pin, use
+/// [`LightClient::verify_balance_anchored`]; to bind it to a root you pinned
+/// out-of-band, use [`LightClient::verify_balance_against_trusted_seal`].
 /// The `pq_client_sdk::light` path checks `proof.root` against a fetched
 /// header but does not verify that header's signature, so it is not a
 /// substitute.
@@ -175,6 +222,96 @@ pub fn verify_account_against_proof(
         return Err(LightClientError::ProofInvalid);
     }
     Ok(())
+}
+
+/// Largest seal record the anchored check reads. Every record the node
+/// accepts is capped at `MAX_RECORD_BYTES` on insert, so an honest seal wire
+/// never exceeds it.
+const MAX_SEAL_WIRE_BYTES: usize = crate::network::ingest::MAX_RECORD_BYTES;
+
+/// Verify a server-claimed `AccountState` against its proof AND against an
+/// epoch seal whose signature the SDK checks. Pure: no I/O, no clock.
+///
+/// Returns `Ok` only when:
+///   1. the proof is for `identity` (64 hex chars — the account id);
+///   2. [`verify_account_against_proof`] passes;
+///   3. `seal_wire` decodes, is signed by a key in `trusted_anchor_pubkeys`,
+///      and the Dilithium3 signature over its signable bytes verifies;
+///   4. the record is an epoch seal that commits an account root;
+///   5. that signed root equals `proof.root`.
+///
+/// Freshness is NOT checked: a replayed older seal with a proof against its
+/// root passes. The returned `epoch_number` and `sealed_at` come from the
+/// signed seal, so the caller can reject a seal older than it accepts.
+pub fn verify_account_against_anchored_seal(
+    identity: &str,
+    claimed: &AccountState,
+    proof: &AccountStateProof,
+    seal_wire: &[u8],
+    trusted_anchor_pubkeys: &[Vec<u8>],
+) -> Result<VerifiedAccount> {
+    let want = decode_hex32(identity).map_err(|e| LightClientError::Parse(format!("identity: {e}")))?;
+    if proof.account_id != want {
+        return Err(LightClientError::IdentityMismatch {
+            requested: identity.to_string(),
+            returned: hex::encode(proof.account_id),
+        });
+    }
+    verify_account_against_proof(claimed, proof)?;
+
+    if seal_wire.len() > MAX_SEAL_WIRE_BYTES {
+        return Err(LightClientError::SealRejected(format!(
+            "seal record is {} bytes, over the {MAX_SEAL_WIRE_BYTES}-byte record cap",
+            seal_wire.len()
+        )));
+    }
+    let record = crate::record::ValidationRecord::from_bytes(seal_wire)
+        .map_err(|e| LightClientError::SealRejected(format!("wire decode: {e}")))?;
+    // The expected hash is the record's own, so the helper's hash comparison
+    // is a tautology here. What it adds is the anchor-set membership and the
+    // signature check; the record's identity comes from the server naming it.
+    crate::light_verify::verify_seal_record_against_anchor(
+        seal_wire,
+        record.record_hash(),
+        trusted_anchor_pubkeys,
+    )
+    .map_err(|e| LightClientError::SealRejected(e.to_string()))?;
+
+    let seal = crate::network::epoch::extract_epoch_seal(&record)
+        .map_err(|e| LightClientError::SealRejected(format!("not a well-formed epoch seal: {e}")))?
+        .ok_or_else(|| LightClientError::SealRejected("record is not an epoch seal".into()))?;
+    let seal_root = seal.account_smt_root.ok_or_else(|| {
+        LightClientError::SealRejected(format!(
+            "seal at epoch {} commits no readable account root (legacy seal)",
+            seal.epoch_number
+        ))
+    })?;
+    if seal_root != proof.root {
+        return Err(LightClientError::AnchoredRootMismatch {
+            proof_root: hex::encode(proof.root),
+            seal_root: hex::encode(seal_root),
+            seal_epoch: seal.epoch_number,
+        });
+    }
+
+    Ok(VerifiedAccount {
+        identity: identity.to_string(),
+        state: claimed.clone(),
+        bound_to_seal: true,
+        epoch_number: Some(seal.epoch_number),
+        sealed_at: Some(record.timestamp),
+        root: proof.root,
+    })
+}
+
+fn decode_hex32(s: &str) -> std::result::Result<[u8; 32], String> {
+    let bytes = hex::decode(s).map_err(|e| format!("not hex: {e}"))?;
+    if bytes.len() != 32 {
+        return Err(format!("expected 32 bytes, got {}", bytes.len()));
+    }
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&bytes);
+    Ok(out)
 }
 
 // ─── HTTP client (native only) ───────────────────────────────────────────────
@@ -318,7 +455,9 @@ mod http_client {
         ///    plus the claimed `AccountState` inline. The returned proof is
         ///    bound to the requested `identity` (a proof for a different
         ///    account is rejected with `IdentityMismatch`).
-        /// 2. Verify `hash_account_state(claimed) == proof.state_hash`.
+        /// 2. Verify `hash_account_state(claimed) == proof.state_hash`. If the
+        ///    node reports its live state is ahead of the sealed leaf, stop
+        ///    with `StateAheadOfSeal`: nothing sealed describes that balance.
         /// 3. Verify proof structure reconstructs `proof.root`.
         /// 4. Unless `opts.allow_unsealed`, require `bound_to_seal: true`.
         ///
@@ -329,8 +468,9 @@ mod http_client {
         /// against the genesis anchor, so a malicious node can set it on a
         /// fabricated proof. The proof is bound to the requested identity and
         /// is internally consistent, but for end-to-end trust against an
-        /// untrusted node, pin the seal out-of-band and use
-        /// [`Self::verify_balance_against_trusted_seal`]. The
+        /// untrusted node use [`Self::verify_balance_anchored`] (it checks
+        /// the seal's signature against anchor keys you pin), or pin the seal
+        /// out-of-band and use [`Self::verify_balance_against_trusted_seal`]. The
         /// `pq_client_sdk::light` path is not a substitute: it checks the
         /// proof root against a fetched header whose signature it does not
         /// verify.
@@ -344,13 +484,7 @@ mod http_client {
                 .await?
                 .ok_or(LightClientError::AccountAbsent)?;
 
-            let claimed_state = proof_resp
-                .account_state
-                .clone()
-                .ok_or_else(|| LightClientError::Parse(
-                    "server omitted account_state from /proof response — \
-                     server is older than the inline-state fix".into()
-                ))?;
+            let claimed_state = proof_resp.claimed_state()?;
 
             verify_account_against_proof(&claimed_state, &proof_resp.proof)?;
 
@@ -421,7 +555,121 @@ mod http_client {
 
             Ok(verified)
         }
+
+        /// End-to-end balance verification bound to a seal whose signature
+        /// the SDK checks itself.
+        ///
+        /// 1. Fetch `/proof/account/{identity}` (proof + claimed state, bound
+        ///    to the requested identity as in [`Self::verify_balance`]).
+        /// 2. Require the server's `bound_to_seal: true` and a named seal
+        ///    (`latest_sealed_account.seal_id`).
+        /// 3. Fetch that seal's wire bytes from `/record/{seal_id}/wire`,
+        ///    reading at most the node's record cap.
+        /// 4. Run [`verify_account_against_anchored_seal`]: leaf re-hash, SMT
+        ///    reconstruction, a Dilithium3 signature by a key in
+        ///    `trusted_anchor_pubkeys`, and proof root == the seal's signed
+        ///    `epoch_account_smt_root`.
+        ///
+        /// `trusted_anchor_pubkeys` are seal-producer public keys the caller
+        /// pins out of band (on a single-authority network, the genesis
+        /// authority's key). An empty set is refused before any network call.
+        ///
+        /// Freshness is the caller's job: a hostile server can replay an older
+        /// signed seal with a proof against its root. Compare the returned
+        /// `epoch_number` / `sealed_at` (read from the signed record) with
+        /// what you accept as current.
+        pub async fn verify_balance_anchored(
+            &self,
+            identity: &str,
+            trusted_anchor_pubkeys: &[Vec<u8>],
+        ) -> Result<VerifiedAccount> {
+            if trusted_anchor_pubkeys.is_empty() {
+                return Err(LightClientError::SealRejected(NO_ANCHORS.into()));
+            }
+            decode_hex32(identity)
+                .map_err(|e| LightClientError::Parse(format!("identity: {e}")))?;
+            let proof_resp = self
+                .fetch_proof(identity)
+                .await?
+                .ok_or(LightClientError::AccountAbsent)?;
+            let claimed_state = proof_resp.claimed_state()?;
+            // A proof the server itself calls unbound cannot match the latest
+            // seal; fail before fetching the seal.
+            if !proof_resp.bound_to_seal {
+                return Err(LightClientError::ProofUnsealed {
+                    proof_root: hex::encode(proof_resp.proof.root),
+                    sealed_root: proof_resp.sealed_root.map(hex::encode),
+                });
+            }
+            let seal_id = proof_resp
+                .seal_id
+                .as_deref()
+                .ok_or(LightClientError::SealNotNamed)?;
+            let seal_wire = self.fetch_seal_wire(seal_id).await?;
+            verify_account_against_anchored_seal(
+                identity,
+                &claimed_state,
+                &proof_resp.proof,
+                &seal_wire,
+                trusted_anchor_pubkeys,
+            )
+        }
+
+        /// GET `/record/{seal_id}/wire`, reading at most
+        /// `MAX_SEAL_WIRE_BYTES`. The id comes from the server, so it must be
+        /// a plain record id before it goes into a URL path.
+        async fn fetch_seal_wire(&self, seal_id: &str) -> Result<Vec<u8>> {
+            let well_formed = !seal_id.is_empty()
+                && seal_id.len() <= 128
+                && seal_id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-');
+            if !well_formed {
+                return Err(LightClientError::SealRejected(format!(
+                    "server named a malformed seal id ({} bytes)",
+                    seal_id.len()
+                )));
+            }
+            let url = format!("{}/record/{}/wire", self.seed_url, seal_id);
+            let mut resp = self
+                .http
+                .get(&url)
+                .send()
+                .await
+                .map_err(|e| LightClientError::Http(format!("{url}: {e}")))?;
+            if !resp.status().is_success() {
+                return Err(LightClientError::Http(format!(
+                    "{url}: HTTP {}",
+                    resp.status()
+                )));
+            }
+            let over_cap = |n: u64| {
+                LightClientError::SealRejected(format!(
+                    "seal record body reached {n} bytes, over the \
+                     {MAX_SEAL_WIRE_BYTES}-byte record cap"
+                ))
+            };
+            if let Some(n) = resp.content_length() {
+                if n > MAX_SEAL_WIRE_BYTES as u64 {
+                    return Err(over_cap(n));
+                }
+            }
+            let mut wire = Vec::new();
+            while let Some(chunk) = resp
+                .chunk()
+                .await
+                .map_err(|e| LightClientError::Http(format!("{url}: body: {e}")))?
+            {
+                let total = wire.len().saturating_add(chunk.len());
+                if total > MAX_SEAL_WIRE_BYTES {
+                    return Err(over_cap(total as u64));
+                }
+                wire.extend_from_slice(&chunk);
+            }
+            Ok(wire)
+        }
     }
+
+    const NO_ANCHORS: &str =
+        "no trusted anchor keys supplied — pin at least one seal-producer key";
 
     /// Parsed `/proof/account/{identity}` response.
     #[derive(Debug, Clone)]
@@ -432,9 +680,38 @@ mod http_client {
         pub sealed_root: Option<[u8; 32]>,
         pub epoch_number: Option<u64>,
         pub sealed_at: Option<f64>,
+        /// Record id of the seal the server says binds this proof
+        /// (`latest_sealed_account.seal_id`). Server-named, not verified —
+        /// [`LightClient::verify_balance_anchored`] fetches and checks it.
+        pub seal_id: Option<String>,
+        /// The server's statement that `account_state` (its live ledger
+        /// view) hashes to the sealed leaf. `Some(false)`: the account
+        /// changed after the last seal. `None`: a node older than the field.
+        pub live_state_matches_sealed: Option<bool>,
     }
 
     impl ProofResponse {
+        /// The claimed `AccountState` to check against the proof leaf. The
+        /// leaf is the account's state at the last seal and `account_state`
+        /// is the node's live view; when the node reports they differ, an
+        /// honest answer cannot verify, so this returns the soft
+        /// `StateAheadOfSeal` rather than letting the leaf check call the
+        /// node a liar. The flag can turn a failure soft, never into an
+        /// acceptance: a node that says the states match and then fails the
+        /// leaf check still gets `LeafHashMismatch`.
+        fn claimed_state(&self) -> Result<AccountState> {
+            if self.live_state_matches_sealed == Some(false) {
+                return Err(LightClientError::StateAheadOfSeal);
+            }
+            self.account_state.clone().ok_or_else(|| {
+                LightClientError::Parse(
+                    "server omitted account_state from /proof response — \
+                     server is older than the inline-state fix"
+                        .into(),
+                )
+            })
+        }
+
         pub fn from_json(body: &Value) -> Result<Self> {
             let identity = body
                 .get("identity")
@@ -492,8 +769,11 @@ mod http_client {
                 .get("bound_to_seal")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
+            let live_state_matches_sealed = body
+                .get("live_state_matches_sealed")
+                .and_then(|v| v.as_bool());
 
-            let (sealed_root, epoch_number, sealed_at) = match body.get("latest_sealed_account") {
+            let (sealed_root, epoch_number, sealed_at, seal_id) = match body.get("latest_sealed_account") {
                 Some(v) if !v.is_null() => {
                     let sr = v
                         .get("account_smt_root")
@@ -501,9 +781,10 @@ mod http_client {
                         .and_then(|s| decode_hex32(s).ok());
                     let ep = v.get("epoch_number").and_then(|x| x.as_u64());
                     let at = v.get("sealed_at").and_then(|x| x.as_f64());
-                    (sr, ep, at)
+                    let id = v.get("seal_id").and_then(|x| x.as_str()).map(str::to_string);
+                    (sr, ep, at, id)
                 }
-                _ => (None, None, None),
+                _ => (None, None, None, None),
             };
 
             let account_state = match body.get("account_state") {
@@ -530,18 +811,10 @@ mod http_client {
                 sealed_root,
                 epoch_number,
                 sealed_at,
+                seal_id,
+                live_state_matches_sealed,
             })
         }
-    }
-
-    fn decode_hex32(s: &str) -> std::result::Result<[u8; 32], String> {
-        let bytes = hex::decode(s).map_err(|e| format!("not hex: {e}"))?;
-        if bytes.len() != 32 {
-            return Err(format!("expected 32 bytes, got {}", bytes.len()));
-        }
-        let mut out = [0u8; 32];
-        out.copy_from_slice(&bytes);
-        Ok(out)
     }
 
     // ─── Multi-seed pool ────────────────────────────────────────────────────
@@ -549,25 +822,24 @@ mod http_client {
     /// Pool of light clients spread across multiple seed nodes.
     ///
     /// Use this when you need a `bound_to_seal: true` proof but cannot
-    /// rely on any single node to be the most recent seal creator. The
-    /// witness-side SMT flush (`flush_witness_smt_for_seal`) advances
-    /// every node's on-disk root at every seal, but only the seal
-    /// CREATOR's root currently matches the seal's signed
-    /// `account_smt_root` — every other node's root structurally
-    /// diverges because their `smt_dirty` set captured a different
-    /// snapshot of accounts. Cross-fleet probe shows roughly 1-of-N
-    /// nodes is bound at any given moment (the rotating creator).
-    /// Pool retry turns that into "any of N nodes" → near-100% bound
-    /// proofs without architectural surgery.
+    /// rely on any single node to have caught up with the latest seal. The
+    /// witness-side SMT flush (`flush_witness_smt_for_seal`) advances every
+    /// node's on-disk root at every seal, and a node answers bound only
+    /// when that root equals the latest seal's signed `account_smt_root`.
+    /// Propagation lag and the residual op-failed class can leave a node
+    /// unbound for a while (see `compute_account_proof`); trying several
+    /// seeds turns "this node" into "any of N nodes".
     ///
     /// Error semantics:
     ///   - `Ok(VerifiedAccount)` returned on the first seed that yields
     ///     a bound (or `allow_unsealed`) proof.
-    ///   - Soft errors (`ProofUnsealed`, `Http`, `AccountAbsent`)
-    ///     advance to the next seed.
-    ///   - Hard errors (`LeafHashMismatch`, `ProofInvalid`, `Parse`)
-    ///     abort immediately — those indicate active fraud or a
-    ///     server bug that retrying will not fix.
+    ///   - Soft errors (see `is_soft_pool_error`: unsealed, unreachable,
+    ///     absent, state ahead of the last seal, trusted-seal and
+    ///     anchored-seal failures, wrong-account proofs) advance to the next
+    ///     seed. When every seed soft-fails,
+    ///     `best_pool_error` picks the most informative one.
+    ///   - Hard errors (`LeafHashMismatch`, `ProofInvalid`, `Parse`,
+    ///     `ZoneNotSubscribed`) abort immediately.
     pub struct LightClientPool {
         seeds: Vec<LightClient>,
     }
@@ -650,12 +922,11 @@ mod http_client {
         /// Slice 7.5: pool variant of `LightClient::verify_balance_against_trusted_seal`.
         ///
         /// Soft errors (per `is_soft_pool_error`) advance to the next seed.
-        /// Trusted-seal mismatches are HARD: every honest seed should
-        /// return the same chain-head binding, so a mismatch means either
-        /// the caller's trusted seal is stale (refresh out-of-band) or the
-        /// pool is contaminated with a node serving a forked chain head —
-        /// retrying other seeds either confirms the divergence or hides it.
-        /// Surface the first mismatch and let the caller decide.
+        /// Trusted-seal mismatches are soft too: a seed one seal behind
+        /// returns a different binding, and the next seed may match. Only
+        /// when every seed disagrees does the caller see the mismatch
+        /// (ranked by `best_pool_error`) — then either the pinned seal is
+        /// stale or the pool serves a forked chain head.
         pub async fn verify_balance_against_trusted_seal(
             &self,
             identity: &str,
@@ -677,6 +948,45 @@ mod http_client {
                         trusted_seal_root,
                         opts,
                     )
+                    .await
+                {
+                    Ok(v) => return Ok(v),
+                    Err(e) if is_soft_pool_error(&e) => {
+                        soft_errs.push(e);
+                    }
+                    Err(hard) => return Err(hard),
+                }
+            }
+            Err(best_pool_error(soft_errs))
+        }
+
+        /// Pool variant of [`LightClient::verify_balance_anchored`]: tries
+        /// each seed until one yields a proof bound to an anchor-signed seal.
+        ///
+        /// Seal-side failures (`SealNotNamed`, `SealRejected`,
+        /// `AnchoredRootMismatch`) are soft: one seed serving a forged or
+        /// stale seal must not deny service while another seed can answer.
+        /// When every seed fails, `SealRejected` ranks first — it is the most
+        /// specific signal, and a refusal from every seed usually means the
+        /// caller pinned the wrong anchor key. Freshness caveat as in the
+        /// single-client method.
+        pub async fn verify_balance_anchored(
+            &self,
+            identity: &str,
+            trusted_anchor_pubkeys: &[Vec<u8>],
+        ) -> Result<VerifiedAccount> {
+            if trusted_anchor_pubkeys.is_empty() {
+                return Err(LightClientError::SealRejected(NO_ANCHORS.into()));
+            }
+            if self.seeds.is_empty() {
+                return Err(LightClientError::Http(
+                    "LightClientPool: no seeds configured".into(),
+                ));
+            }
+            let mut soft_errs: Vec<LightClientError> = Vec::with_capacity(self.seeds.len());
+            for client in &self.seeds {
+                match client
+                    .verify_balance_anchored(identity, trusted_anchor_pubkeys)
                     .await
                 {
                     Ok(v) => return Ok(v),
@@ -715,25 +1025,44 @@ mod http_client {
                 // abort the pool — one bad seed must not deny service. Surfaced
                 // (top-ranked) only if EVERY seed misbehaves.
                 | LightClientError::IdentityMismatch { .. }
+                // Anchored path: same rule. A seed that names no seal, names
+                // one the anchor check refuses, or proves against a root its
+                // seal did not sign is skipped, not trusted and not fatal.
+                | LightClientError::SealNotNamed
+                | LightClientError::SealRejected(_)
+                | LightClientError::AnchoredRootMismatch { .. }
+                // An honest node between seals: the account changed after the
+                // last seal. Transient — it clears at the next seal.
+                | LightClientError::StateAheadOfSeal
         )
     }
 
     /// Choose the most informative error to surface when every seed
     /// soft-failed. Priority order (highest → lowest information value):
-    /// `IdentityMismatch` (seed served a wrong-account proof — definitive
-    /// misbehaviour) > `TrustedSealRootMismatch` (chain-head divergence —
-    /// likely fraud) > `TrustedSealEpochMismatch` (sync gap — caller may need
+    /// `SealRejected` (a named seal failed the anchor check — forged, or the
+    /// caller pinned the wrong key) > `IdentityMismatch` (seed served a
+    /// wrong-account proof — definitive misbehaviour) >
+    /// `TrustedSealRootMismatch` (chain-head divergence — likely fraud) >
+    /// `AnchoredRootMismatch` (proof root differs from the root the signed
+    /// seal commits) > `TrustedSealEpochMismatch` (sync gap — caller may need
     /// fresher seal) > `TrustedSealEpochUnknown` (server-side bug) >
-    /// `ProofUnsealed` (proof exists but not yet sealed) > `AccountAbsent`
+    /// `SealNotNamed` (server bound the proof but named no seal) >
+    /// `StateAheadOfSeal` (account changed after the last seal — retry
+    /// after the next) > `ProofUnsealed` (proof exists but not yet sealed) >
+    /// `AccountAbsent`
     /// (account not on network) > `Http` (couldn't reach seed — least
     /// information).
     pub(crate) fn best_pool_error(errs: Vec<LightClientError>) -> LightClientError {
         errs.into_iter()
             .max_by_key(|e| match e {
-                LightClientError::IdentityMismatch { .. } => 7,
-                LightClientError::TrustedSealRootMismatch { .. } => 6,
-                LightClientError::TrustedSealEpochMismatch { .. } => 5,
-                LightClientError::TrustedSealEpochUnknown => 4,
+                LightClientError::SealRejected(_) => 11,
+                LightClientError::IdentityMismatch { .. } => 10,
+                LightClientError::TrustedSealRootMismatch { .. } => 9,
+                LightClientError::AnchoredRootMismatch { .. } => 8,
+                LightClientError::TrustedSealEpochMismatch { .. } => 7,
+                LightClientError::TrustedSealEpochUnknown => 6,
+                LightClientError::SealNotNamed => 5,
+                LightClientError::StateAheadOfSeal => 4,
                 LightClientError::ProofUnsealed { .. } => 3,
                 LightClientError::AccountAbsent => 2,
                 LightClientError::Http(_) => 1,
@@ -1222,7 +1551,7 @@ mod tests {
         }
 
         #[test]
-        fn slice75_root_mismatch_is_top_priority_overall() {
+        fn slice75_root_mismatch_outranks_every_other_slice75_error() {
             let errs = vec![
                 LightClientError::Http("a".into()),
                 LightClientError::AccountAbsent,
@@ -1247,14 +1576,14 @@ mod tests {
         // ─── Fixture-free pure-helper tests ───────────────────────────────
 
         #[test]
-        fn batch_b_light_client_error_nine_variant_exhaustive_soft_hard_partition_and_display_non_empty() {
-            // 9 variants total. Six SOFT (pool advances to next seed), three
-            // HARD (pool aborts). Exhaustive matrix: any future variant added
-            // without an explicit entry here will leave Display unproven and
-            // partition-coverage incomplete — the test forces a conscious
-            // classification decision on the PR.
+        fn batch_b_light_client_error_every_variant_soft_hard_partition_and_display_non_empty() {
+            // 16 variants total. Eleven SOFT (pool advances to next seed), five
+            // HARD (pool aborts). `err_tag` below matches every variant with
+            // no wildcard, so a new variant fails to compile until it gets a
+            // tag; this list then needs its entry and a deliberate soft/hard
+            // decision, or the count assertions fail.
             let variants: Vec<(LightClientError, &'static str, bool)> = vec![
-                // SOFT (6)
+                // SOFT (11)
                 (LightClientError::Http("dns".into()), "Http", true),
                 (LightClientError::AccountAbsent, "AccountAbsent", true),
                 (
@@ -1282,7 +1611,12 @@ mod tests {
                     true,
                 ),
                 (LightClientError::TrustedSealEpochUnknown, "TrustedSealEpochUnknown", true),
-                // HARD (3)
+                (mint_err("IdentityMismatch"), "IdentityMismatch", true),
+                (mint_err("SealNotNamed"), "SealNotNamed", true),
+                (mint_err("SealRejected"), "SealRejected", true),
+                (mint_err("AnchoredRootMismatch"), "AnchoredRootMismatch", true),
+                (mint_err("StateAheadOfSeal"), "StateAheadOfSeal", true),
+                // HARD (5)
                 (
                     LightClientError::LeafHashMismatch {
                         computed: "11".into(),
@@ -1293,13 +1627,32 @@ mod tests {
                 ),
                 (LightClientError::ProofInvalid, "ProofInvalid", false),
                 (LightClientError::Parse("garbled".into()), "Parse", false),
+                (
+                    LightClientError::ZoneNotSubscribed {
+                        identity: "ab".into(),
+                        zone: "medical/eu".into(),
+                    },
+                    "ZoneNotSubscribed",
+                    false,
+                ),
+                (LightClientError::ClientBuild("tls".into()), "ClientBuild", false),
             ];
 
-            assert_eq!(variants.len(), 9, "LightClientError must have exactly 9 variants");
+            assert_eq!(variants.len(), 16, "LightClientError must have exactly 16 variants");
             let soft_count = variants.iter().filter(|(_, _, s)| *s).count();
             let hard_count = variants.iter().filter(|(_, _, s)| !s).count();
-            assert_eq!(soft_count, 6, "exactly 6 variants must be soft");
-            assert_eq!(hard_count, 3, "exactly 3 variants must be hard");
+            assert_eq!(soft_count, 11, "exactly 11 variants must be soft");
+            assert_eq!(hard_count, 5, "exactly 5 variants must be hard");
+
+            // Each declared name is the variant's own tag, and no tag repeats,
+            // so the 16 entries are 16 distinct variants.
+            for (e, name, _) in &variants {
+                assert_eq!(err_tag(e), *name, "entry {name} holds a different variant");
+            }
+            let mut tags: Vec<&str> = variants.iter().map(|(_, n, _)| *n).collect();
+            tags.sort_unstable();
+            tags.dedup();
+            assert_eq!(tags.len(), 16, "a variant is listed twice");
 
             // is_soft_pool_error agrees with the declared classification.
             for (e, name, expected_soft) in &variants {
@@ -1341,7 +1694,7 @@ mod tests {
         }
 
         #[test]
-        fn batch_b_best_pool_error_full_six_tier_priority_sweep_and_order_invariance() {
+        fn batch_b_best_pool_error_full_soft_tier_priority_sweep_and_order_invariance() {
             // Empty input → synthetic Http (documented fallback).
             match best_pool_error(vec![]) {
                 LightClientError::Http(_) => {}
@@ -1387,18 +1740,24 @@ mod tests {
                 );
             }
 
-            // Full priority chain from lowest (Http) → highest
-            // (TrustedSealRootMismatch). Order: Http(1) < AccountAbsent(2) <
-            // ProofUnsealed(3) < TrustedSealEpochUnknown(4) <
-            // TrustedSealEpochMismatch(5) < TrustedSealRootMismatch(6).
+            // Full priority chain over all eleven soft variants, lowest (Http)
+            // → highest (SealRejected).
             let priority_order = [
                 "Http",
                 "AccountAbsent",
                 "ProofUnsealed",
+                "StateAheadOfSeal",
+                "SealNotNamed",
                 "TrustedSealEpochUnknown",
                 "TrustedSealEpochMismatch",
+                "AnchoredRootMismatch",
                 "TrustedSealRootMismatch",
+                "IdentityMismatch",
+                "SealRejected",
             ];
+            for tag in priority_order {
+                assert!(is_soft_pool_error(&mint_err(tag)), "{tag} must be soft");
+            }
 
             // Pairwise dominance matrix: for every i<j, an input containing
             // both variants returns the higher-priority one, regardless of
@@ -1435,14 +1794,14 @@ mod tests {
                 }
             }
 
-            // All six soft variants in one vec → highest priority
-            // (TrustedSealRootMismatch). Reverse-ordered input → SAME result.
-            let all_six: Vec<LightClientError> = priority_order
+            // All soft variants in one vec → highest priority
+            // (SealRejected). Reverse-ordered input → SAME result.
+            let all_soft: Vec<LightClientError> = priority_order
                 .iter()
                 .map(|n| mint_err(n))
                 .collect();
-            let chosen_all = best_pool_error(all_six);
-            assert_eq!(err_tag(&chosen_all), "TrustedSealRootMismatch");
+            let chosen_all = best_pool_error(all_soft);
+            assert_eq!(err_tag(&chosen_all), "SealRejected");
 
             let mut reversed: Vec<LightClientError> = priority_order
                 .iter()
@@ -1451,7 +1810,7 @@ mod tests {
                 .collect();
             reversed.push(mint_err("Http")); // duplicate Http to noise it up
             let chosen_rev_all = best_pool_error(reversed);
-            assert_eq!(err_tag(&chosen_rev_all), "TrustedSealRootMismatch");
+            assert_eq!(err_tag(&chosen_rev_all), "SealRejected");
         }
 
         // Helper: mint a soft variant from its name tag. Used only in the
@@ -1473,6 +1832,18 @@ mod tests {
                     proof_root: "aa".into(),
                     trusted_root: "bb".into(),
                 },
+                "IdentityMismatch" => LightClientError::IdentityMismatch {
+                    requested: "aa".into(),
+                    returned: "bb".into(),
+                },
+                "SealNotNamed" => LightClientError::SealNotNamed,
+                "SealRejected" => LightClientError::SealRejected("untrusted anchor".into()),
+                "AnchoredRootMismatch" => LightClientError::AnchoredRootMismatch {
+                    proof_root: "aa".into(),
+                    seal_root: "bb".into(),
+                    seal_epoch: 7,
+                },
+                "StateAheadOfSeal" => LightClientError::StateAheadOfSeal,
                 other => panic!("mint_err: unknown tag {other}"),
             }
         }
@@ -1530,6 +1901,18 @@ mod tests {
                     requested: requested.clone(),
                     returned: returned.clone(),
                 },
+                LightClientError::SealNotNamed => LightClientError::SealNotNamed,
+                LightClientError::SealRejected(s) => LightClientError::SealRejected(s.clone()),
+                LightClientError::AnchoredRootMismatch {
+                    proof_root,
+                    seal_root,
+                    seal_epoch,
+                } => LightClientError::AnchoredRootMismatch {
+                    proof_root: proof_root.clone(),
+                    seal_root: seal_root.clone(),
+                    seal_epoch: *seal_epoch,
+                },
+                LightClientError::StateAheadOfSeal => LightClientError::StateAheadOfSeal,
                 LightClientError::ClientBuild(s) => LightClientError::ClientBuild(s.clone()),
             }
         }
@@ -1547,6 +1930,10 @@ mod tests {
                 LightClientError::Parse(_) => "Parse",
                 LightClientError::ZoneNotSubscribed { .. } => "ZoneNotSubscribed",
                 LightClientError::IdentityMismatch { .. } => "IdentityMismatch",
+                LightClientError::SealNotNamed => "SealNotNamed",
+                LightClientError::SealRejected(_) => "SealRejected",
+                LightClientError::AnchoredRootMismatch { .. } => "AnchoredRootMismatch",
+                LightClientError::StateAheadOfSeal => "StateAheadOfSeal",
                 LightClientError::ClientBuild(_) => "ClientBuild",
             }
         }
@@ -1797,6 +2184,65 @@ mod tests {
             }
 
             handle.abort();
+        }
+
+        #[tokio::test]
+        async fn cold_start_reports_state_ahead_of_seal_instead_of_a_lie() {
+            // An honest node asked about an account that changed after the
+            // last seal: its live account_state is ahead of the sealed leaf,
+            // and it says so. That is the soft StateAheadOfSeal, not the
+            // hard LeafHashMismatch the same bytes gave before 2026-09-25.
+            let (_storage, _dir, id, state, proof) = build_real_proof("dave", 1_000_000);
+            let identity_hex = hex::encode(id);
+            let mut live = state.clone();
+            live.available = 900_000;
+            let mut ahead = build_proof_response_json(
+                &identity_hex,
+                &proof,
+                &live,
+                true,
+                Some(proof.root),
+                Some(7),
+                Some(0.0),
+            );
+            ahead["live_state_matches_sealed"] = serde_json::json!(false);
+            let (ahead_url, ahead_handle) = spawn_server(ahead).await;
+
+            let err = LightClient::new(ahead_url.clone())
+                .unwrap()
+                .verify_balance(&identity_hex, VerifyOpts::default())
+                .await
+                .expect_err("live state ahead of the seal cannot verify");
+            assert!(matches!(err, LightClientError::StateAheadOfSeal), "{err:?}");
+
+            // Soft in the pool: the next seed still answers, and with no
+            // answer it outranks an unreachable seed.
+            let current = build_proof_response_json(
+                &identity_hex,
+                &proof,
+                &state,
+                true,
+                Some(proof.root),
+                Some(7),
+                Some(0.0),
+            );
+            let (current_url, current_handle) = spawn_server(current).await;
+            let pool = LightClientPool::from_urls([ahead_url.clone(), current_url]).unwrap();
+            let verified = pool
+                .verify_balance(&identity_hex, VerifyOpts::default())
+                .await
+                .expect("the second seed verifies");
+            assert_eq!(verified.state.available, 1_000_000);
+            let pool =
+                LightClientPool::from_urls([ahead_url, "http://127.0.0.1:9".to_string()]).unwrap();
+            let err = pool
+                .verify_balance(&identity_hex, VerifyOpts::default())
+                .await
+                .expect_err("no seed can answer");
+            assert!(matches!(err, LightClientError::StateAheadOfSeal), "{err:?}");
+
+            ahead_handle.abort();
+            current_handle.abort();
         }
 
         #[tokio::test]
@@ -2103,6 +2549,552 @@ mod tests {
                 .expect_err("missing epoch_number must surface TrustedSealEpochUnknown");
             assert!(matches!(err, LightClientError::TrustedSealEpochUnknown));
             handle.abort();
+        }
+
+        // ── verify_balance_anchored: the seal the server names is fetched and
+        // its signature checked against anchor keys the caller pins ──────────
+        mod anchored {
+            use super::*;
+            use crate::identity::{CryptoProfile, EntityType, Identity};
+            use crate::network::epoch::{seal_metadata, SealMetadataParams};
+            use crate::record::{Classification, ValidationRecord};
+            use crate::ZoneId;
+
+            fn anchor() -> Identity {
+                Identity::generate(EntityType::Device, CryptoProfile::ProfileB)
+                    .expect("anchor identity")
+            }
+
+            // A v5 epoch seal signed by `signer`, committing `account_root`
+            // (None = a legacy seal that commits no account root).
+            fn signed_seal(
+                signer: &Identity,
+                account_root: Option<&[u8; 32]>,
+                epoch: u64,
+            ) -> ValidationRecord {
+                let merkle_root = [0x11u8; 32];
+                let previous = [0x22u8; 32];
+                let meta = seal_metadata(SealMetadataParams {
+                    zone: ZoneId::from_legacy(0),
+                    epoch_number: epoch,
+                    start: 1_000.0,
+                    end: 1_120.0,
+                    record_count: 0,
+                    merkle_root: &merkle_root,
+                    previous_seal_hash: &previous,
+                    vrf_output: None,
+                    vrf_proof: None,
+                    sparse_merkle_root: None,
+                    record_hashes: None,
+                    zone_balance_total: None,
+                    zone_registry_root: None,
+                    zone_registry_delta: None,
+                    aggregator_rank: 0,
+                    account_smt_root: account_root,
+                    drand_pulse: None,
+                });
+                let mut rec = ValidationRecord::create(
+                    b"epoch-seal",
+                    signer.public_key.clone(),
+                    vec![],
+                    Classification::Public,
+                    Some(meta),
+                );
+                rec.version = 5;
+                rec.nonce = 11;
+                rec.zone = Some(ZoneId::from_legacy(0));
+                signer.sign_record_light(&mut rec).expect("sign seal");
+                rec
+            }
+
+            fn alice() -> (
+                StorageEngine,
+                tempfile::TempDir,
+                String,
+                AccountState,
+                AccountStateProof,
+            ) {
+                let (storage, dir, id, state, proof) = build_real_proof("alice-anchored", 1_000_000);
+                (storage, dir, hex::encode(id), state, proof)
+            }
+
+            // What a seed answers for `proof`: it names seal "test-seal-id"
+            // and claims epoch 7, which the signed seal must override.
+            fn proof_json(
+                identity: &str,
+                state: &AccountState,
+                proof: &AccountStateProof,
+                bound: bool,
+            ) -> Value {
+                build_proof_response_json(
+                    identity,
+                    proof,
+                    state,
+                    bound,
+                    Some(proof.root),
+                    Some(7),
+                    Some(1.0),
+                )
+            }
+
+            // Serves the /proof response and the seal "test-seal-id" (any
+            // other id is 404). `streamed` sends the seal without a
+            // Content-Length, so only the client's running cap can stop it.
+            async fn spawn_anchored_server(
+                proof: Value,
+                seal_wire: Vec<u8>,
+                streamed: bool,
+            ) -> (String, tokio::task::JoinHandle<()>) {
+                use axum::body::Body;
+                use axum::http::{header, StatusCode};
+                use axum::response::{IntoResponse, Response};
+                let proof = Arc::new(proof);
+                let seal_wire = Arc::new(seal_wire);
+                let app = Router::new()
+                    .route(
+                        "/proof/account/{identity}",
+                        get(move |AxumPath(_id): AxumPath<String>| {
+                            let v = proof.clone();
+                            async move { Json((*v).clone()) }
+                        }),
+                    )
+                    .route(
+                        "/record/{id}/wire",
+                        get(move |AxumPath(id): AxumPath<String>| {
+                            let w = seal_wire.clone();
+                            async move {
+                                if id != "test-seal-id" {
+                                    return StatusCode::NOT_FOUND.into_response();
+                                }
+                                if streamed {
+                                    let chunks: Vec<std::result::Result<Vec<u8>, std::io::Error>> =
+                                        w.chunks(16 * 1024).map(|c| Ok(c.to_vec())).collect();
+                                    return Response::new(Body::from_stream(
+                                        futures_util::stream::iter(chunks),
+                                    ));
+                                }
+                                (
+                                    [(header::CONTENT_TYPE, "application/octet-stream")],
+                                    (*w).clone(),
+                                )
+                                    .into_response()
+                            }
+                        }),
+                    );
+                let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+                let addr = listener.local_addr().expect("local_addr");
+                let handle = tokio::spawn(async move {
+                    let _ = axum::serve(listener, app).await;
+                });
+                (format!("http://{addr}"), handle)
+            }
+
+            fn seal_rejected_text(err: LightClientError) -> String {
+                match err {
+                    LightClientError::SealRejected(m) => m,
+                    other => panic!("want SealRejected, got {other:?}"),
+                }
+            }
+
+            #[test]
+            fn anchored_seal_accepts_a_pinned_signer_and_reports_the_signed_epoch() {
+                let (_s, _d, identity, state, proof) = alice();
+                let signer = anchor();
+                let seal = signed_seal(&signer, Some(&proof.root), 42);
+                let v = verify_account_against_anchored_seal(
+                    &identity,
+                    &state,
+                    &proof,
+                    &seal.to_bytes(),
+                    std::slice::from_ref(&signer.public_key),
+                )
+                .expect("anchored verify");
+                assert!(v.bound_to_seal);
+                assert_eq!(v.epoch_number, Some(42));
+                assert_eq!(v.sealed_at, Some(seal.timestamp));
+                assert_eq!(v.root, proof.root);
+                assert_eq!(v.identity, identity);
+                assert_eq!(v.state.available, 1_000_000);
+            }
+
+            #[test]
+            fn anchored_seal_rejects_a_signer_outside_the_pinned_set() {
+                let (_s, _d, identity, state, proof) = alice();
+                let seal = signed_seal(&anchor(), Some(&proof.root), 42);
+                let pinned = vec![anchor().public_key.clone()];
+                let err = verify_account_against_anchored_seal(
+                    &identity,
+                    &state,
+                    &proof,
+                    &seal.to_bytes(),
+                    &pinned,
+                )
+                .expect_err("unpinned signer");
+                let m = seal_rejected_text(err);
+                assert!(m.contains("anchor set"), "{m}");
+            }
+
+            #[test]
+            fn anchored_seal_rejects_a_root_the_seal_does_not_commit() {
+                let (_s, _d, identity, state, proof) = alice();
+                let signer = anchor();
+                let other_root = [0x99u8; 32];
+                let seal = signed_seal(&signer, Some(&other_root), 42);
+                let err = verify_account_against_anchored_seal(
+                    &identity,
+                    &state,
+                    &proof,
+                    &seal.to_bytes(),
+                    std::slice::from_ref(&signer.public_key),
+                )
+                .expect_err("root mismatch");
+                match err {
+                    LightClientError::AnchoredRootMismatch {
+                        proof_root,
+                        seal_root,
+                        seal_epoch,
+                    } => {
+                        assert_eq!(proof_root, hex::encode(proof.root));
+                        assert_eq!(seal_root, hex::encode(other_root));
+                        assert_eq!(seal_epoch, 42);
+                    }
+                    other => panic!("want AnchoredRootMismatch, got {other:?}"),
+                }
+            }
+
+            #[test]
+            fn anchored_seal_rejects_a_legacy_seal_without_an_account_root() {
+                let (_s, _d, identity, state, proof) = alice();
+                let signer = anchor();
+                let seal = signed_seal(&signer, None, 42);
+                let err = verify_account_against_anchored_seal(
+                    &identity,
+                    &state,
+                    &proof,
+                    &seal.to_bytes(),
+                    std::slice::from_ref(&signer.public_key),
+                )
+                .expect_err("legacy seal");
+                let m = seal_rejected_text(err);
+                assert!(m.contains("legacy seal"), "{m}");
+            }
+
+            #[test]
+            fn anchored_seal_rejects_a_signed_record_that_is_not_a_seal() {
+                let (_s, _d, identity, state, proof) = alice();
+                let signer = anchor();
+                let mut rec = ValidationRecord::create(
+                    b"not-a-seal",
+                    signer.public_key.clone(),
+                    vec![],
+                    Classification::Public,
+                    Some(std::collections::BTreeMap::new()),
+                );
+                rec.version = 5;
+                rec.nonce = 11;
+                rec.zone = Some(ZoneId::from_legacy(0));
+                signer.sign_record_light(&mut rec).expect("sign");
+                let err = verify_account_against_anchored_seal(
+                    &identity,
+                    &state,
+                    &proof,
+                    &rec.to_bytes(),
+                    std::slice::from_ref(&signer.public_key),
+                )
+                .expect_err("not a seal");
+                assert_eq!(seal_rejected_text(err), "record is not an epoch seal");
+            }
+
+            #[test]
+            fn anchored_seal_rejects_seal_metadata_changed_after_signing() {
+                let (_s, _d, identity, state, proof) = alice();
+                let signer = anchor();
+                let mut seal = signed_seal(&signer, Some(&proof.root), 42);
+                // A later epoch under the old signature; the root still matches.
+                seal.metadata
+                    .insert("epoch_number".into(), serde_json::json!(4_200));
+                let err = verify_account_against_anchored_seal(
+                    &identity,
+                    &state,
+                    &proof,
+                    &seal.to_bytes(),
+                    std::slice::from_ref(&signer.public_key),
+                )
+                .expect_err("tampered seal");
+                let m = seal_rejected_text(err);
+                assert!(m.contains("Dilithium3"), "{m}");
+            }
+
+            #[test]
+            fn anchored_seal_rejects_a_proof_for_another_identity() {
+                let (_s, _d, _alice, state, proof) = alice();
+                let signer = anchor();
+                let seal = signed_seal(&signer, Some(&proof.root), 42);
+                let mallory = hex::encode(account_id("mallory"));
+                let err = verify_account_against_anchored_seal(
+                    &mallory,
+                    &state,
+                    &proof,
+                    &seal.to_bytes(),
+                    std::slice::from_ref(&signer.public_key),
+                )
+                .expect_err("wrong account");
+                match err {
+                    LightClientError::IdentityMismatch { requested, returned } => {
+                        assert_eq!(requested, mallory);
+                        assert_eq!(returned, hex::encode(proof.account_id));
+                    }
+                    other => panic!("want IdentityMismatch, got {other:?}"),
+                }
+            }
+
+            #[test]
+            fn anchored_seal_rejects_a_non_hex_identity() {
+                let (_s, _d, _alice, state, proof) = alice();
+                let err = verify_account_against_anchored_seal(
+                    "not-hex",
+                    &state,
+                    &proof,
+                    b"",
+                    &[vec![1u8]],
+                )
+                .expect_err("non-hex identity");
+                assert!(matches!(err, LightClientError::Parse(_)), "{err:?}");
+            }
+
+            #[test]
+            fn anchored_seal_rejects_oversize_and_undecodable_wire() {
+                let (_s, _d, identity, state, proof) = alice();
+                let pinned = vec![anchor().public_key.clone()];
+                let oversize = vec![0u8; MAX_SEAL_WIRE_BYTES + 1];
+                let m = seal_rejected_text(
+                    verify_account_against_anchored_seal(&identity, &state, &proof, &oversize, &pinned)
+                        .expect_err("oversize"),
+                );
+                assert!(m.contains("record cap"), "{m}");
+                let m = seal_rejected_text(
+                    verify_account_against_anchored_seal(
+                        &identity,
+                        &state,
+                        &proof,
+                        b"not-a-record",
+                        &pinned,
+                    )
+                    .expect_err("garbage"),
+                );
+                assert!(m.starts_with("wire decode"), "{m}");
+            }
+
+            #[tokio::test]
+            async fn verify_balance_anchored_end_to_end_reads_the_epoch_from_the_signed_seal() {
+                let (_s, _d, identity, state, proof) = alice();
+                let signer = anchor();
+                let seal = signed_seal(&signer, Some(&proof.root), 42);
+                let (url, handle) = spawn_anchored_server(
+                    proof_json(&identity, &state, &proof, true),
+                    seal.to_bytes(),
+                    false,
+                )
+                .await;
+                let client = LightClient::new(url).unwrap();
+                let v = client
+                    .verify_balance_anchored(&identity, std::slice::from_ref(&signer.public_key))
+                    .await
+                    .expect("anchored verify over HTTP");
+                // The server claimed epoch 7; the signed seal says 42.
+                assert_eq!(v.epoch_number, Some(42));
+                assert_eq!(v.sealed_at, Some(seal.timestamp));
+                assert!(v.bound_to_seal);
+                assert_eq!(v.root, proof.root);
+                handle.abort();
+            }
+
+            #[tokio::test]
+            async fn verify_balance_anchored_rejects_a_seal_the_server_signed_itself() {
+                // A node that fabricates a proof must also sign a seal for
+                // its root, and its own key is not pinned.
+                let (_s, _d, identity, state, proof) = alice();
+                let forged = signed_seal(&anchor(), Some(&proof.root), 42);
+                let (url, handle) = spawn_anchored_server(
+                    proof_json(&identity, &state, &proof, true),
+                    forged.to_bytes(),
+                    false,
+                )
+                .await;
+                let client = LightClient::new(url).unwrap();
+                let err = client
+                    .verify_balance_anchored(&identity, &[anchor().public_key.clone()])
+                    .await
+                    .expect_err("forged seal");
+                let m = seal_rejected_text(err);
+                assert!(m.contains("anchor set"), "{m}");
+                handle.abort();
+            }
+
+            #[tokio::test]
+            async fn verify_balance_anchored_needs_the_server_to_name_its_seal() {
+                let (_s, _d, identity, state, proof) = alice();
+                let signer = anchor();
+                let seal = signed_seal(&signer, Some(&proof.root), 42);
+                let mut canned = proof_json(&identity, &state, &proof, true);
+                canned["latest_sealed_account"]
+                    .as_object_mut()
+                    .expect("sealed object")
+                    .remove("seal_id");
+                let (url, handle) = spawn_anchored_server(canned, seal.to_bytes(), false).await;
+                let client = LightClient::new(url).unwrap();
+                let err = client
+                    .verify_balance_anchored(&identity, std::slice::from_ref(&signer.public_key))
+                    .await
+                    .expect_err("no seal id");
+                assert!(matches!(err, LightClientError::SealNotNamed), "{err:?}");
+                handle.abort();
+            }
+
+            #[tokio::test]
+            async fn verify_balance_anchored_rejects_a_malformed_seal_id() {
+                let (_s, _d, identity, state, proof) = alice();
+                let signer = anchor();
+                let seal = signed_seal(&signer, Some(&proof.root), 42);
+                let mut canned = proof_json(&identity, &state, &proof, true);
+                canned["latest_sealed_account"]["seal_id"] = serde_json::json!("../admin");
+                let (url, handle) = spawn_anchored_server(canned, seal.to_bytes(), false).await;
+                let client = LightClient::new(url).unwrap();
+                let err = client
+                    .verify_balance_anchored(&identity, std::slice::from_ref(&signer.public_key))
+                    .await
+                    .expect_err("malformed id");
+                let m = seal_rejected_text(err);
+                assert!(m.contains("malformed seal id"), "{m}");
+                handle.abort();
+            }
+
+            #[tokio::test]
+            async fn verify_balance_anchored_fails_fast_on_a_proof_the_server_calls_unbound() {
+                let (_s, _d, identity, state, proof) = alice();
+                let signer = anchor();
+                let seal = signed_seal(&signer, Some(&proof.root), 42);
+                let (url, handle) = spawn_anchored_server(
+                    proof_json(&identity, &state, &proof, false),
+                    seal.to_bytes(),
+                    false,
+                )
+                .await;
+                let client = LightClient::new(url).unwrap();
+                let err = client
+                    .verify_balance_anchored(&identity, std::slice::from_ref(&signer.public_key))
+                    .await
+                    .expect_err("unbound proof");
+                assert!(matches!(err, LightClientError::ProofUnsealed { .. }), "{err:?}");
+                handle.abort();
+            }
+
+            #[tokio::test]
+            async fn verify_balance_anchored_reports_state_ahead_of_seal() {
+                let (_s, _d, identity, state, proof) = alice();
+                let signer = anchor();
+                let seal = signed_seal(&signer, Some(&proof.root), 42);
+                let mut live = state.clone();
+                live.available += 1;
+                let mut body = proof_json(&identity, &live, &proof, true);
+                body["live_state_matches_sealed"] = serde_json::json!(false);
+                let (url, handle) = spawn_anchored_server(body, seal.to_bytes(), false).await;
+                let err = LightClient::new(url)
+                    .unwrap()
+                    .verify_balance_anchored(&identity, std::slice::from_ref(&signer.public_key))
+                    .await
+                    .expect_err("live state ahead of the seal cannot verify");
+                assert!(matches!(err, LightClientError::StateAheadOfSeal), "{err:?}");
+                handle.abort();
+            }
+
+            #[tokio::test]
+            async fn verify_balance_anchored_refuses_an_empty_anchor_set_before_any_request() {
+                // Nothing listens on port 9, so a request would fail as Http.
+                let client = LightClient::new("http://127.0.0.1:9").unwrap();
+                let err = client
+                    .verify_balance_anchored(&"ab".repeat(32), &[])
+                    .await
+                    .expect_err("no anchors");
+                let m = seal_rejected_text(err);
+                assert!(m.contains("no trusted anchor keys"), "{m}");
+            }
+
+            #[tokio::test]
+            async fn verify_balance_anchored_caps_the_seal_body_with_or_without_a_length() {
+                let (_s, _d, identity, state, proof) = alice();
+                let pinned = vec![anchor().public_key.clone()];
+                for streamed in [false, true] {
+                    let (url, handle) = spawn_anchored_server(
+                        proof_json(&identity, &state, &proof, true),
+                        vec![0u8; 200_000],
+                        streamed,
+                    )
+                    .await;
+                    let client = LightClient::new(url).unwrap();
+                    let m = seal_rejected_text(
+                        client
+                            .verify_balance_anchored(&identity, &pinned)
+                            .await
+                            .expect_err("oversize seal body"),
+                    );
+                    assert!(m.contains("over the 65536-byte record cap"), "{m}");
+                    // With a length the refusal quotes it; streamed, the read
+                    // stops near the cap and never reaches the full body.
+                    assert_eq!(m.contains("200000"), !streamed, "streamed={streamed}: {m}");
+                    handle.abort();
+                }
+            }
+
+            #[tokio::test]
+            async fn pool_anchored_skips_a_seed_serving_a_forged_seal() {
+                let (_s, _d, identity, state, proof) = alice();
+                let signer = anchor();
+                let forged = signed_seal(&anchor(), Some(&proof.root), 42);
+                let genuine = signed_seal(&signer, Some(&proof.root), 42);
+                let (bad_url, bad) = spawn_anchored_server(
+                    proof_json(&identity, &state, &proof, true),
+                    forged.to_bytes(),
+                    false,
+                )
+                .await;
+                let (good_url, good) = spawn_anchored_server(
+                    proof_json(&identity, &state, &proof, true),
+                    genuine.to_bytes(),
+                    false,
+                )
+                .await;
+                let pool = LightClientPool::from_urls([bad_url, good_url]).unwrap();
+                let v = pool
+                    .verify_balance_anchored(&identity, std::slice::from_ref(&signer.public_key))
+                    .await
+                    .expect("the second seed answers");
+                assert_eq!(v.epoch_number, Some(42));
+                bad.abort();
+                good.abort();
+            }
+
+            #[tokio::test]
+            async fn pool_anchored_reports_seal_rejected_when_no_seed_can_answer() {
+                let (_s, _d, identity, state, proof) = alice();
+                let forged = signed_seal(&anchor(), Some(&proof.root), 42);
+                let (bad_url, bad) = spawn_anchored_server(
+                    proof_json(&identity, &state, &proof, true),
+                    forged.to_bytes(),
+                    false,
+                )
+                .await;
+                // The second seed is down (Http); the forged seal outranks it.
+                let pool =
+                    LightClientPool::from_urls([bad_url, "http://127.0.0.1:9".to_string()]).unwrap();
+                let err = pool
+                    .verify_balance_anchored(&identity, &[anchor().public_key.clone()])
+                    .await
+                    .expect_err("no seed answers");
+                let m = seal_rejected_text(err);
+                assert!(m.contains("anchor set"), "{m}");
+                bad.abort();
+            }
         }
     }
 

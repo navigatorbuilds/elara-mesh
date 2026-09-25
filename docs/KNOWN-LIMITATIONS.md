@@ -325,19 +325,45 @@ does match NIST's vectors (`crates/elara-record/tests/acvp_slhdsa_shake192f.rs`)
 so SLH-DSA-SHAKE-192f is one migration path. A migration would be a new
 algorithm ID and a versioned change, and it is not scheduled.
 
-## 13. The light-client balance check trusts the node's root unless you pin one
+## 13. The light-client balance check needs keys you pin, and does not prove the seal is current
 
 `LightClient::verify_balance` checks that a node's account proof is consistent:
 it re-hashes the leaf and rebuilds the Merkle path up to the root the node
 supplied. That catches a node whose balance disagrees with its own proof. It
 does not catch a node that fabricates a whole consistent proof, root included,
 and the "sealed" flag it returns is the node's own claim (see the trust-boundary
-note in `src/network/light_sdk.rs`). `verify_balance_against_trusted_seal`
-compares the proof against a seal epoch and root that you supply, and it is
-exactly as good as your source for them. Neither method checks a seal's
-signature. `light_verify::verify_seal_record_against_anchor` does, against
-validator keys you pin, but the balance methods do not call it, so combining the
-two is up to the caller today.
+note in `src/network/light_sdk.rs`).
+
+`LightClient::verify_balance_anchored` (added 2026-09-25) closes that gap for
+the root. It fetches the seal record the node names, checks its Dilithium3
+signature against anchor keys you pin, and requires the proof root to equal the
+account root that the signed seal commits. What it still leaves to you:
+
+- **Freshness.** It proves that a pinned key signed this root at this epoch, not
+  that the seal is the latest one. A node can replay an older signed seal
+  together with a proof against its root. The method returns the epoch and seal
+  time read from the signed record; whether they are recent enough is your call.
+- **The keys.** The check is exactly as good as the keys you pin. It does not
+  follow changes to the validator set, and keys read from the node you are
+  checking prove nothing.
+- **Nodes that lag.** A node returns a bound proof only when its tree root
+  equals the latest seal's root. Propagation lag can keep that false for a
+  while; the check then stops at `ProofUnsealed` and a pool tries its next seed.
+- **Accounts that changed since the last seal.** The proof covers the account
+  as it was at the last seal, while the balance the node reports is its live
+  one. When the node says the two differ, every balance method returns
+  `StateAheadOfSeal`, and nothing can be verified until a later seal covers the
+  account; a busy account can spend much of its time in this state. Until
+  2026-09-25 the SDK reported this honest case as `LeafHashMismatch`, which
+  accused the node of lying and stopped a pool.
+- **One bad seed stops a pool.** A seed whose proof fails the leaf or path
+  check (`LeafHashMismatch`, `ProofInvalid`) or whose answer does not parse
+  ends the pool's search instead of being skipped. That is deliberate, so a
+  lying or broken node is reported rather than hidden, but it means one such
+  seed early in the list blocks an answer the later seeds could give.
+
+`verify_balance_against_trusted_seal` compares the proof against a seal epoch
+and root that you supply, and it is exactly as good as your source for them.
 
 ## 14. Records without a network identifier are accepted on every network
 

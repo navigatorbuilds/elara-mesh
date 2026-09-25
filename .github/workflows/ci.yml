@@ -768,8 +768,12 @@ jobs:
         # refuses connections (observed 2026-07-10: curl exit 7 redded this
         # gate; healthy 40 min earlier). Bounded retry absorbs brief upstream
         # flakes; a persistent outage still fails the gate — never masked.
+        # Each attempt refreshes the runner's apt index first: on 2026-09-25 a
+        # stale index 404'd the GTK system package opam installs, identically
+        # on all three attempts, because nothing between them changed.
         run: |
           for i in 1 2 3; do
+            sudo apt-get update -qq || echo "apt-get update failed (attempt $i)"
             opam install -y proverif.2.05 && exit 0
             if [ "$i" -lt 3 ]; then echo "install attempt $i failed — retrying in 75s"; sleep 75; fi
           done

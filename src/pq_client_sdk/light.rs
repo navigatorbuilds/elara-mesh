@@ -15,8 +15,10 @@
 //! The header's seal signature is NOT verified here, so a peer that serves
 //! both the header and the proof can fabricate a matching pair. Two-peer
 //! mode (header from peer A, proof from peer B) helps only while the two
-//! peers do not collude. For trust against an untrusted node, pin a seal
-//! verified against the genesis anchor and use
+//! peers do not collude. For trust against an untrusted node, use
+//! `crate::network::light_sdk::LightClient::verify_balance_anchored` (it
+//! checks the seal's signature against anchor keys the caller pins) or pin a
+//! seal out of band and use
 //! `crate::network::light_sdk::LightClient::verify_balance_against_trusted_seal`.
 
 use std::sync::Arc;

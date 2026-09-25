@@ -110,18 +110,21 @@ pub(crate) async fn compute_account_proof(
     // header.account_smt_root = last seal, mismatch → "no Gap-1 headers").
     //
     // Read the on-disk SMT directly. The persistent tree only advances at
-    // seal time (epoch.rs:3399 `apply_snapshot` under the seal-emission
-    // path). Between seals, smt_dirty accumulates mutations but the stored
-    // tree stays at the last sealed root, which matches the
-    // `account_smt_root` of the most recent epoch header.
+    // seal time (`apply_snapshot` on the seal-emission path in epoch.rs,
+    // `flush_witness_smt_for_seal` on a witness). Between seals, smt_dirty
+    // accumulates mutations but the stored tree stays at the last sealed
+    // root, which matches the `account_smt_root` of the most recent epoch
+    // header.
     //
     // The returned `state_hash` is therefore the at-last-seal leaf hash.
     // The included `account_state` is the LIVE ledger view and may be
     // ahead of `state_hash` for accounts mutated between seals — the
     // `live_state_matches_sealed` boolean below tells callers which
-    // regime they're in. SDK verification only consumes
-    // `proof.state_hash` + `proof.siblings` + `proof.root` so the live
-    // account_state cannot influence cryptographic outcomes.
+    // regime they're in. The HTTP SDK (`light_sdk.rs`) re-hashes
+    // account_state and requires it to equal `proof.state_hash`, which the
+    // siblings fold to `proof.root`, so a live state cannot pass as sealed;
+    // when this flag is false the SDK reports `StateAheadOfSeal` instead of
+    // calling an honest node a liar.
     let (account_state_live, expected_state_hash, proof_opt, exclusion_opt, on_disk_root) = {
         use crate::network::account_merkle::{hash_account_state, AccountStateSMT};
         let ledger = state.ledger.read().await;
@@ -283,11 +286,11 @@ pub(crate) async fn compute_account_proof(
         None => (false, serde_json::json!(null)),
     };
 
-    // Include the full live AccountState for display convenience. SDKs MUST
-    // NOT use account_state for cryptographic verification — only
-    // `proof.state_hash` is signed-by-seal. When
-    // `live_state_matches_sealed=false`, account_state is one or more
-    // epochs ahead of state_hash.
+    // Include the full live AccountState. SDKs must never trust it: only
+    // `proof.state_hash` is bound to the sealed root, so a client re-hashes
+    // account_state and compares. When `live_state_matches_sealed=false`,
+    // account_state is ahead of state_hash (changed after the last seal)
+    // and that comparison cannot pass.
     let account_state_json = account_state_live
         .as_ref()
         .map(|s| serde_json::to_value(s).unwrap_or(serde_json::Value::Null))

@@ -171,8 +171,10 @@ That alone is a consistency check, not trustlessness. The node supplies the root
 and by default the SDK relays the node's own "this root is sealed" flag. A node that
 fabricates a whole consistent proof is caught only against a root you trust: the
 example pins a seal root obtained out-of-band and rejects a one-byte-different one.
-To check a seal's signature against validator keys you pin yourself, use
-`light_verify::verify_seal_record_against_anchor`; the example does not call it.
+To check the seal's signature against validator keys you pin yourself, use
+`LightClient::verify_balance_anchored`: it fetches the seal the node names and
+verifies it (whether that seal is the latest one stays your check). The example
+does not call it.
 Read-only — the SDK holds no key and cannot move funds.
 Source: [`examples/light_client_live.rs`](examples/light_client_live.rs).
 
