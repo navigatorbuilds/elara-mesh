@@ -26,7 +26,7 @@ Scope note (honest): this decodes the FULL §4.3 frame in stream order — the
 hack, which would have silently mis-parsed any v6 record (v6 appends the
 u16-prefixed ``network_id`` AFTER the nonce, so the old tail read returned
 garbage with no error — exactly the failure a reference decoder must never
-have). Supported versions mirror the Rust decoder exactly: v4..v6
+have). Supported versions mirror the Rust decoder exactly: v4..v7
 (``WIRE_VERSION_MIN``=4 since 2026-08-18 — v1-v3 decode retired with the T80
 codec asymmetry; see docs/WIRE-FORMAT.md §5.3). Anything outside that range
 fails LOUDLY with a message saying which side it fell off. This script itself
@@ -150,7 +150,9 @@ def decode_metadata(r: Reader) -> dict:
 
 
 WIRE_VERSION_MIN = 4  # mirrors crates/elara-record/src/wire.rs (raised 1→4, 2026-08-18)
-WIRE_VERSION = 6      # decode ceiling; v6 emission is flag-day-gated
+WIRE_VERSION = 7      # decode ceiling; v7 (2026-08-23 flag day) is byte-for-byte v6's
+                      # layout — it only signals the seal-tree fold, no preimage change.
+                      # Pinned to the Rust ceiling by a test in src/conformance.rs.
 
 
 def decode_record(wire: bytes) -> dict:

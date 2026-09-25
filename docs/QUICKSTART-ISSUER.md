@@ -1,22 +1,28 @@
 # Give YOUR agent a proof-backed mandate — the issuer quickstart
 
-Fifteen minutes, one machine, no permission from anyone. At the end you have:
+About fifteen minutes on one machine, most of it the first build, and no
+permission from anyone. At the end you have:
 **your own chain**, **your own agent identity**, a **signed, scoped, revocable
 mandate** from you to it, **proven acts** under that mandate, a working
 **kill switch**, and offline verification of all of it — with post-quantum
 signatures throughout. Nothing here talks to Elara's own network: your chain
 is yours.
 
-Every command and output below was executed as written on 2026-08-19
-(single Linux box; the flow needs ~2 GB RAM and one free set of ports).
+Every command and output below was last executed as written on 2026-09-25,
+from a fresh clone of the public repo on a clean account (single Linux box;
+the flow needs ~2 GB RAM and one free set of ports).
 
 ## 0. Build once
 
 ```bash
 git clone https://github.com/navigatorbuilds/elara-mesh
 cd elara-mesh
-cargo build --release --features node   # ~30-60s warm, a few minutes cold
+cargo build --release --features node   # first build: ~10 minutes
 ```
+
+The first build compiles about 260 crates. In the last run the clone took
+55 s and the build 9 min 19 s on a 4-core / 8-thread desktop; steps 1-7 then
+take a few minutes of typing.
 
 Binaries used below: `target/release/elara-keygen`, `elara-node`, `elara-cli`.
 
@@ -67,7 +73,7 @@ Traps we hit so you don't (each of these produced a real failure first):
 - `ELARA_GENESIS_VALIDATORS` is `<identity_hash>:<stake_micros>` — a bare
   hash is dropped as malformed (the log tells you, but only the log).
 - Pick your `ELARA_NETWORK_ID` now. It is baked into every record your chain
-  emits (wire v6 binds it into the signed preimage) and the chain **rejects
+  emits (since wire v6 it is bound into the signed preimage) and the chain **rejects
   records bound to any other network** — see the trap in step 3.
 
 ## 3. Issue the mandate
@@ -85,8 +91,8 @@ echo "mandate: $MID"
 
 Real output shape:
 ```
-accepted: 01a01ae7-8cc5-7441-b19e-022c3ad507a2
-mandate-issue: mandate_id=cbead771… principal=f46a0cc9… agent=5344a7be… network=my-agent-chain window_hours=24
+accepted: 01a0d9a6-7fb7-72f1-b76a-804a582c95a9
+mandate-issue: mandate_id=f42d7731… carrier_record=01a0d9a6-7fb7-72f1-b76a-804a582c95a9 principal=b669db74… agent=6cda3354… network=my-agent-chain window_hours=24
 ```
 
 **The trap:** forget the `ELARA_NETWORK_ID` export and the CLI stamps its
@@ -120,9 +126,9 @@ Real answer (excerpt):
   "flag": "valid",
   "chain_depth": 1,
   "lineage": [{ "hop_index": 0,
-                "agent_identity_hash":     "5344a7be…",
-                "principal_identity_hash": "f46a0cc9…",
-                "mandate_id":              "cbead771…" }]
+                "agent_identity_hash":     "6cda3354…",
+                "principal_identity_hash": "b669db74…",
+                "mandate_id":              "f42d7731…" }]
 }
 ```
 
@@ -159,9 +165,11 @@ python3 examples/verify/decode_record.py $W/act.wire
 
 Real output (excerpt):
 ```
-version:    6   network_id: 'my-agent-chain'
-identity:   5344a7be…   ← the AGENT's key hash, recomputed from raw bytes
-record_hash: df75ca51…
+version:        7   nonce: 15378683264403243008   network_id: 'my-agent-chain'
+identity:       6cda3354…   ← the AGENT's key hash, recomputed from raw bytes
+record_hash:    e30e2cfd…
+
+DECODED — wire decode + §4.4 canonicalization completed; record_hash printed above.
 ```
 
 The pure-stdlib Python reimplements the wire format and the signing preimage
@@ -187,5 +195,6 @@ cross-zone scaling are the same records on more nodes — see
 `docs/AGENT-DELEGATION.md` and `docs/PROTOCOL-SPEC.md` when you outgrow one
 box.
 
-*This quickstart is executed end-to-end before every revision; if a step's
-output does not match what you see, that is a bug — file it.*
+*Last executed end-to-end on 2026-09-25, from a fresh clone on a clean
+account. If a step's output does not match what you see, that is a bug —
+file it.*

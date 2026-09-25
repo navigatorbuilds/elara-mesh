@@ -1835,4 +1835,39 @@ mod tests {
             }
         }
     }
+
+    /// `decode_record.py` is pure stdlib, so it carries its OWN copy of the
+    /// decode window instead of importing the Rust one — and nothing tied the
+    /// two. The v7 flag day (2026-08-23) raised `WIRE_VERSION` in Rust only;
+    /// from then on the Python decoder refused every record a node emitted, and
+    /// both the issuer quickstart's last step and the receipts page's
+    /// tool/action labels broke without a single failing check. Moving either
+    /// constant now fails here until the other side follows.
+    #[test]
+    fn python_reference_decoder_version_window_matches_rust() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/verify/decode_record.py");
+        let src = std::fs::read_to_string(path).expect("read examples/verify/decode_record.py");
+        let pinned = |name: &str| -> u16 {
+            let prefix = format!("{name} = ");
+            let line = src
+                .lines()
+                .find(|l| l.starts_with(&prefix))
+                .unwrap_or_else(|| panic!("decode_record.py has no top-level `{name} = N` line"));
+            line[prefix.len()..]
+                .split_whitespace()
+                .next()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or_else(|| panic!("decode_record.py `{name}` is not an integer: {line:?}"))
+        };
+        assert_eq!(
+            pinned("WIRE_VERSION"),
+            crate::wire::WIRE_VERSION,
+            "decode_record.py WIRE_VERSION must equal the Rust decode ceiling"
+        );
+        assert_eq!(
+            pinned("WIRE_VERSION_MIN"),
+            crate::wire::WIRE_VERSION_MIN,
+            "decode_record.py WIRE_VERSION_MIN must equal the Rust decode floor"
+        );
+    }
 }
