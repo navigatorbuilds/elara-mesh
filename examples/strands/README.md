@@ -53,11 +53,18 @@ Your model now sees four tools (verified live against `strands-agents` 1.53.0 wi
 (Node reachability isn't a tool: an unreachable or wrong-network chain surfaces as a
 loud startup refusal or per-call error — see the fail-closed note below.)
 
-Then anyone — your user, your auditor, a stranger — verifies a proof **offline**:
+Then anyone — your user, your auditor, a stranger — verifies a proof **offline**, with
+`elara-verify` from crates.io (`cargo install elara-verify --features cli`):
 
 ```
-elara-verify record <record-id>.bin --anchor <anchor-pubkey>
+curl -s http://127.0.0.1:19474/record/<record-id>/wire -o act.wire   # the record's bytes
+elara-verify --wire act.wire                                         # no node, no network
 ```
+
+The verdict checks the post-quantum signature and shows what the act claims: tool,
+action, args hash, mandate. The time inside the record is the agent's own claim unless
+you also pass an epoch-anchor proof (`--anchor`, see
+[`docs/ELARA-VERIFY.md`](../../docs/ELARA-VERIFY.md)).
 
 ## Why bother
 
@@ -81,7 +88,8 @@ such a mandate, proofs public: <https://navigatorbuilds.github.io/elara-mesh/rec
   `call_tool_sync` dispatch.** Reproduce it with that script.
 - The `mandate_act_emit` write leg (`EMIT=1`) was first run on 2026-09-25, on a scratch
   chain from the issuer quickstart, with `strands-agents` 1.57.0 and `mcp` 2.1.1: **3/3**,
-  record `01a0d9c4-7f81-7192-aa1e-ed46a6afb52a`. That run found the leg had been broken
+  record `01a0d9c4-7f81-7192-aa1e-ed46a6afb52a`, which then verified offline with
+  `elara-verify` 0.3.3 from crates.io (`VERDICT: VERIFIED`). That run found the leg had been broken
   since it was written: it sent argument names the server never had (`content`, `op`)
   and was refused with `missing field 'tool'`, and the script dropped `ELARA_MCP_CLI`.
   This note used to call the leg "one flag away"; it was not. Both are fixed.

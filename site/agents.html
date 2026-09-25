@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Receipts for AI agents — Elara</title>
+<meta name="description" content="Give your AI agent signed receipts for what it does: which key acted, a hash of what it sent, and the mandate it acted under. Plugs in through MCP; anyone can check a receipt's signature offline.">
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='38' fill='none' stroke='%2336e2c4' stroke-width='9'/><circle cx='50' cy='50' r='10' fill='%2336e2c4'/></svg>">
+<script src="reveal.js" defer></script>
+</head>
+<body>
+
+<header class="nav">
+  <a class="nav-brand" href="index.html">ELARA</a>
+  <nav class="nav-links">
+    <a href="index.html#why">Why</a>
+    <a href="how.html">How it works</a>
+    <a href="usecases.html">Use cases</a>
+    <a href="verify/">Verify</a>
+    <a href="receipts.html">Receipts</a>
+    <a href="index.html#papers">Papers</a>
+    <a class="nav-gh" href="https://github.com/navigatorbuilds/elara-mesh" rel="noopener">GitHub →</a>
+  </nav>
+</header>
+
+<main class="page">
+
+<header class="page-head">
+  <p class="hero-kicker">For agent builders</p>
+  <h1>Give your AI agent <em class="grad-text">receipts for what it does.</em></h1>
+  <p class="hero-sub">When an AI agent acts today, the record is a log on the machine it ran on,
+  editable by whoever controls that machine. Elara gives each act you record a receipt signed
+  with the agent's own key, naming the permission it acted under. Anyone can check the
+  signature offline, without trusting you or us.</p>
+</header>
+
+<!-- ── 01 · WHAT YOU GET ─────────────────────────────────────── -->
+<section id="what" class="block">
+  <h2><span class="sec-n">01</span> What you get</h2>
+  <div class="cols">
+    <div class="col">
+      <p><strong>A mandate.</strong> A signed permission slip from you to your agent, valid
+      for a window of time. You can revoke it with one command.</p>
+      <p><strong>A receipt for each act.</strong> Your agent calls one tool, and the act is
+      recorded and signed with the agent's post-quantum key (ML-DSA-65, FIPS 204). The MCP
+      server hashes the real arguments itself (SHA3-256 of canonical JSON) and never accepts a hash
+      computed elsewhere, so the receipt covers what the agent actually sent.</p>
+    </div>
+    <div class="col">
+      <p><strong>A status check for any act.</strong> Was it inside a live mandate? An act
+      after a revocation comes back flagged <code>post_revocation</code>, an act outside the
+      window <code>expired</code> or <code>not_yet_valid</code>, and an act by a different key
+      claiming your mandate <code>agent_mismatch</code>. Revoking stops the future and never
+      rewrites the past: acts made before it stay authorized.</p>
+      <p><strong>An offline check.</strong> Anyone can check a receipt's signature with
+      <code>elara-verify</code>: no node, no network, no account.</p>
+      <p class="uc-punch">A log is your word. A receipt is something others can check.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ── 02 · SET IT UP ────────────────────────────────────────── -->
+<section id="setup" class="block block-alt">
+  <h2><span class="sec-n">02</span> Set it up: three steps, about twenty minutes</h2>
+  <div class="steps">
+    <div class="step">
+      <span class="step-n">1</span>
+      <h3>Your own chain and a mandate</h3>
+      <p>Follow the <a href="https://github.com/navigatorbuilds/elara-mesh/blob/main/docs/QUICKSTART-ISSUER.md">issuer quickstart</a>:
+      two identities (yours and the agent's), a local node, a mandate, a first act, a
+      revocation, an offline check. About fifteen minutes, most of it the first build
+      (9 min 19 s on a 4-core desktop in our run). Nothing in it talks to our network:
+      the chain is yours.</p>
+    </div>
+    <div class="step">
+      <span class="step-n">2</span>
+      <h3>Install the MCP server</h3>
+      <p><code>cargo install elara-mcp</code> builds it from source, 82 s in our test. It
+      speaks MCP over stdio, so any MCP client can start it.</p>
+    </div>
+    <div class="step">
+      <span class="step-n">3</span>
+      <h3>Point your agent at it</h3>
+      <p>Add it to your MCP client's config, with your node, your network, the agent's
+      identity file and the mandate id from step 1, as below.</p>
+    </div>
+  </div>
+  <pre class="code"><code>{
+  "mcpServers": {
+    "elara-mandate": {
+      "command": "elara-mcp",
+      "env": {
+        "ELARA_MCP_NODE_URL": "http://127.0.0.1:19474",
+        "ELARA_NETWORK_ID": "my-agent-chain",
+        "ELARA_MCP_IDENTITY": "/path/to/agent.json",
+        "ELARA_MCP_MANDATE_ID": "&lt;mandate id from mandate-issue&gt;",
+        "ELARA_MCP_CLI": "/path/to/elara-mesh/target/release/elara-cli"
+      }
+    }
+  }
+}</code></pre>
+  <p class="start-note">Your agent now has four tools: <code>mandate_act_emit</code> records a
+  signed act, <code>mandate_act_status</code> asks whether an act was authorized,
+  <code>mandate_my_mandate</code> shows the agent its own mandate, and
+  <code>mandate_bundle_verify</code> checks a mandate bundle without touching the network.</p>
+  <p class="start-note">Tested on 2026-09-25 from a fresh clone, as a newcomer would, through
+  two real MCP clients: AWS Strands (3/3) and deepseek-harness (4/4). Each run recorded a real
+  act, and both acts then verified offline. Worked examples:
+  <a href="https://github.com/navigatorbuilds/elara-mesh/tree/main/examples/strands">examples/strands</a>,
+  <a href="https://github.com/navigatorbuilds/elara-mesh/tree/main/examples/dsh">examples/dsh</a>.
+  Not yet run: a full model-driven agent on top. The tests drive each client's own MCP layer,
+  below the model.</p>
+</section>
+
+<!-- ── 03 · CHECK A RECEIPT ──────────────────────────────────── -->
+<section id="check" class="block">
+  <h2><span class="sec-n">03</span> Check a receipt</h2>
+  <pre class="code"><code>cargo install elara-verify --features cli
+curl -s http://127.0.0.1:19474/record/&lt;record-id&gt;/wire -o act.wire
+elara-verify --wire act.wire</code></pre>
+  <p class="start-note">Real output for the act our test recorded through Strands (excerpt):</p>
+  <pre class="code"><code>VERDICT: VERIFIED
+         this exact content was signed by 6cda335498524165…,
+         who claims it existed at 2026-09-25 18:12:08 (UTC, the creator's own claim).
+         Trustless time bracketing requires an --anchor proof — not given here.</code></pre>
+  <p class="start-note">Read the last two lines. The signature is proven; the time is the
+  agent's own claim. Pinning the time down needs an epoch-anchor proof (a Bitcoin existed-by
+  and a drand not-before bound), which the quickstart does not set up; see
+  <a href="https://github.com/navigatorbuilds/elara-mesh/blob/main/docs/ELARA-VERIFY.md">ELARA-VERIFY.md</a>.
+  Fetching the record needs a node that holds it; the check itself needs nothing.</p>
+</section>
+
+<!-- ── 04 · LIMITS ───────────────────────────────────────────── -->
+<section id="limits" class="block block-alt">
+  <h2><span class="sec-n">04</span> Limits, stated plainly</h2>
+  <div class="cols">
+    <div class="col">
+      <p><strong>Only recorded acts get receipts.</strong> A receipt exists because the
+      agent, or your code around it, called the tool. An act nobody records has none, so
+      record at the point where your code carries the act out rather than leaving it to the
+      model's judgment.</p>
+      <p><strong>It proves what was sent, not what happened.</strong> A receipt shows which
+      key signed which arguments (by their hash), under which mandate. It does not show that
+      the tool call succeeded, or that the arguments were true.</p>
+      <p><strong>A narrowed scope is recorded, not enforced.</strong> You can write a narrower
+      scope into a mandate, such as a list of allowed operations. It is signed and recorded,
+      but not yet enforced: such a mandate reports <code>scope_deferred: true</code>. Don't
+      treat it as policy.</p>
+    </div>
+    <div class="col">
+      <p><strong>On a chain you run alone, it is only as trustworthy as you.</strong> You hold
+      every key and run the only node, so a receipt proves the agent's key signed, but the
+      chain's history rests on you. Independent nodes are the design; today stake admission is
+      operator-controlled, and several consensus features that engage only with multiple
+      staked nodes are shipped but not yet hardened
+      (<a href="https://github.com/navigatorbuilds/elara-mesh/blob/main/docs/KNOWN-LIMITATIONS.md">known limitations</a>, section 7).</p>
+      <p><strong>Keys are plaintext by default.</strong> The key files the quickstart writes
+      are owner-only (mode 0600) but unencrypted, and anyone who can read the agent's file can
+      act as your agent. A node encrypts its own identity file when you set
+      <code>ELARA_IDENTITY_PASSPHRASE</code> (section 17 of the same page).</p>
+    </div>
+  </div>
+</section>
+
+<!-- ── 05 · DOGFOOD ──────────────────────────────────────────── -->
+<section id="dogfood" class="block">
+  <h2><span class="sec-n">05</span> We run it on ourselves</h2>
+  <p>Elara's maintainer is an AI agent, and it publishes its receipts: a public proof log where
+  every row carries the commands to check it yourself, including the status of the mandate
+  behind it.</p>
+  <p><a href="receipts.html">See the maintainer's proof log →</a></p>
+</section>
+
+<section class="cta-band">
+  <h2>Give your agent <em class="grad-text">its first receipt.</em></h2>
+  <p>Your chain, your keys, open source. No account, no permission needed.</p>
+  <span class="code-line">git clone https://github.com/navigatorbuilds/elara-mesh.git</span><br>
+  <a class="btn btn-solid" href="https://github.com/navigatorbuilds/elara-mesh/blob/main/docs/QUICKSTART-ISSUER.md">Start the quickstart</a>
+</section>
+
+</main>
+
+<footer class="footer">
+  <div><strong>ELARA</strong> — an open-source post-quantum validation mesh.</div>
+  <div class="footer-links">
+    <a href="index.html">Home</a>
+    <a href="how.html">How it works</a>
+    <a href="https://github.com/navigatorbuilds/elara-mesh" rel="noopener">GitHub</a>
+    <a href="papers/ELARA-PROTOCOL-WHITEPAPER.pdf">Whitepaper</a>
+  </div>
+  <div class="footer-fine">© 2026 Elara Protocol contributors · AGPL-3.0 node, MIT/Apache SDK · No cookies, no trackers, no token.</div>
+</footer>
+
+</body>
+</html>

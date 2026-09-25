@@ -45,11 +45,18 @@ these are the exact registered names):
 (Node reachability isn't a tool: an unreachable or wrong-network chain surfaces as a
 loud startup refusal or per-call error — see the fail-closed note below.)
 
-Then anyone — your user, your auditor, a stranger — verifies a proof **offline**:
+Then anyone — your user, your auditor, a stranger — verifies a proof **offline**, with
+`elara-verify` from crates.io (`cargo install elara-verify --features cli`):
 
 ```
-elara-verify record <record-id>.bin --anchor <anchor-pubkey>
+curl -s http://127.0.0.1:19474/record/<record-id>/wire -o act.wire   # the record's bytes
+elara-verify --wire act.wire                                         # no node, no network
 ```
+
+The verdict checks the post-quantum signature and shows what the act claims: tool,
+action, args hash, mandate. The time inside the record is the agent's own claim unless
+you also pass an epoch-anchor proof (`--anchor`, see
+[`docs/ELARA-VERIFY.md`](../../docs/ELARA-VERIFY.md)).
 
 ## Why bother
 
@@ -72,7 +79,8 @@ such a mandate, proofs public: <https://navigatorbuilds.github.io/elara-mesh/rec
   `01a0201b-23cc-7100-99d4-590da36f9be5`, args hashed server-side, status
   `authorized`/`valid`). Reproduce it with [`interop-test.mjs`](interop-test.mjs).
   Re-run on 2026-09-25 as a newcomer would, on a scratch chain from the issuer quickstart
-  with `elara-mcp` 0.1.0 from crates.io: 4/4, record `01a0d9c4-bb90-7b13-8687-86543baa3002`.
+  with `elara-mcp` 0.1.0 from crates.io: 4/4, record `01a0d9c4-bb90-7b13-8687-86543baa3002`,
+  which then verified offline with `elara-verify` 0.3.3 from crates.io (`VERDICT: VERIFIED`).
   What is NOT yet exercised: a full model-driven dsh composition (that needs a DeepSeek
   runtime; the plugin↔server surface below the model is the part tested here). If you
   run the full harness, we'd genuinely like to hear what broke or didn't: open an issue.

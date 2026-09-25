@@ -175,8 +175,24 @@ DECODED — wire decode + §4.4 canonicalization completed; record_hash printed 
 The pure-stdlib Python reimplements the wire format and the signing preimage
 from the spec — no Rust, no node. For full signature verification and the
 graded verdicts (VERIFIED / PARTIAL / FAILED with the honest UNPROVEN
-states), use the published crate: `cargo install elara-verify --features cli` — or read
-`examples/verify/verify.sh` for the complete offline evidence walk.
+states), use the published crate:
+
+```bash
+cargo install elara-verify --features cli     # once
+elara-verify --wire $W/act.wire
+```
+
+Real output (excerpt):
+```
+VERDICT: VERIFIED
+         this exact content was signed by 6cda335498524165…,
+         who claims it existed at 2026-09-25 17:39:22 (UTC, the creator's own claim).
+         Trustless time bracketing requires an --anchor proof — not given here.
+```
+
+The signature is checked; the time is not, until you add an epoch-anchor proof
+(`--anchor`, see `docs/ELARA-VERIFY.md`). `examples/verify/verify.sh` walks the
+complete offline evidence chain.
 
 Three committed mandate-bundle vectors — harvested from exactly this flow on
 a real chain — live at `examples/verify/mandate-bundle-{valid,post-revocation,
