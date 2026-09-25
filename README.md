@@ -39,12 +39,12 @@ Expected output:
   ✓ structure         ValidationRecord v5 id=019f4e4f-22a8-74b2-82c4-69350e210fe9 (0 parents)
   ✓ identity binding  creator identity derived from embedded key: ada8575c57e1da94 (record carries no separate identity claim to cross-check)
   ✓ signature         ML-DSA-65 (FIPS 204, "Dilithium3") valid over canonical record bytes
-  ✓ profile           Profile A (dual signature) — SPHINCS+ (SLH-DSA) also valid
+  ✓ profile           Profile A (dual signature) — SPHINCS+-SHA2-192f also valid, under the key the record carries (not bound to the creator identity)
 
 VERDICT: VERIFIED
          this exact content was signed by ada8575c57e1da94…,
          who claims it existed at 2026-07-10 23:13:56 (UTC, the creator's own claim).
-         Trustless time bracketing requires an --anchor proof — not given here.
+         An independent time bracket requires an --anchor proof — not given here.
 ```
 
 That closing note is the point: the verifier states exactly what it proved and what
@@ -92,7 +92,7 @@ credible — an open-source, post-quantum, zone-partitioned **validation mesh**,
 written in Rust. Records work fully offline at creation; when connectivity exists,
 a peer-to-peer DAG weaves them into shared, witness-attested history.
 
-~350,000 lines of Rust · 5,700+ tests · post-quantum signatures (ML-DSA-65 in the consensus hot path; optional SPHINCS+ dual-signing for anchor/identity/governance records) · offline-first by design.
+~410,000 lines of Rust · 7,000+ tests · post-quantum signatures (ML-DSA-65 on every record; an optional second SPHINCS+ signature from Profile A identities, with the limits in [Known limitations](docs/KNOWN-LIMITATIONS.md)) · offline-first by design.
 
 ## Project status — read this first
 
@@ -110,20 +110,20 @@ This codebase was built by a solo developer (Nenad Vasic) working with [Claude](
 
 ## What it does
 
-- **Post-quantum cryptography** — ML-DSA-65 + SLH-DSA-SHA2-192f ("SPHINCS+") + ML-KEM-768 (FIPS 203 key encapsulation, CRYSTALS-Kyber family)
+- **Post-quantum cryptography** — ML-DSA-65 (FIPS 204) signatures; an optional second SPHINCS+-SHA2-192f signature, which uses the pre-FIPS 205 hashing and is not yet bound to identities ([Known limitations](docs/KNOWN-LIMITATIONS.md)); X25519 + ML-KEM-768 (FIPS 203) hybrid key exchange for node-to-node transport
 - **Directed Acyclic Mesh** — zone-partitioned DAG with BFS traversal, tips, roots, ancestors, fork detection
 - **Interval Tree Clocks** — causal ordering without timestamps, zone-aware clock management
 - **Binary wire format** — compact ELRA encode/decode with LEB128 varints
 - **Internal resource model** — fixed-supply conservation ledger (staking, witness rewards, storage delegation) — see beats note above
 - **Attestation-Weighted Consensus** — confirmation levels, epoch seals, Merkle proofs
-- **Network daemon** — gossip, peer discovery, post-quantum ElaraPQ transport (ML-KEM-768 + X25519 + Dilithium3, see whitepaper §4.7), rate limiting, content-routed structured gossip
+- **Network daemon** — gossip, peer discovery, post-quantum ElaraPQ transport (hybrid ML-KEM-768 + X25519 key exchange, ML-DSA-65 authentication; see whitepaper §4.7), rate limiting, content-routed structured gossip
 - **Full node REST API** — verification, explorer, governance, admin, DAG inspection
-- **Hash-commitment privacy (SHA3)** — 3 commitment proof types (BalanceRange, MetadataProperty, ContentCommitment) with a fail-closed verifier. These are SHA3-256 commitments, **not** zero-knowledge proofs; Groth16 zk-SNARK circuits remain design-stage scaffolding (see whitepaper §5, §14.3 for the honest gap assessment).
+- **SHA3 commitment proofs (not yet private)** — 3 commitment proof types (BalanceRange, MetadataProperty, ContentCommitment) with a fail-closed verifier. Each proof carries its own opening and is not yet bound to its record, so these commitments hide nothing today ([KNOWN-LIMITATIONS #31](docs/KNOWN-LIMITATIONS.md)); they are **not** zero-knowledge proofs, and the Groth16 zk-SNARK layer is specified, not built (see whitepaper §5, §14.3).
 - **Python** — 26 native PyO3 sign/verify bindings (`pyo3` feature) + a zero-dependency pure-stdlib HTTP SDK (`sdks/python/`)
 - **Light clients** — header-only sync with SMT account proofs; checkpoint skip-sync (no genesis replay)
 - **Agent-mandate accountability (observational v0)** — `MandateRecord` / `RevocationRecord` wire types, storage (CF_MANDATE / CF_REVOCATION / CF_MANDATE_ACT), and front-run-proof read-time revocation for *"agent A was authorized by principal P to do X, revocable over time"*, with public `/mandate/{id}` + `/mandate/status/{record_id}` queries and a runnable demo (`cargo run --example mandate_demo`). v0 verifies the *who* + *when* + *revocation* + *sub-delegation lineage* (leaf→root chain-walk) and **records-and-flags** out-of-mandate acts (zero trust/consensus weight); consensus-weight enforcement and non-wildcard op/zone scope are deferred to v1.
 
-## Verify it yourself — offline, no node, no trust in us
+## Verify it yourself — offline, no node
 
 "Don't trust us — check us" is the whole point, so verification is a standalone
 binary that needs **no running node and no network**. Build it and check any
@@ -161,15 +161,19 @@ inclusion/seal/anchor — that full chain is the CLI above. Build and serve it
 yourself from [`browser-node/verify-demo/`](browser-node/verify-demo/):
 `wasm-pack build --target web -d ../browser-node/verify-demo/pkg verify-wasm`.
 
-**Or verify an account on a *live* node — without trusting it.** The checks above
-need no node; this one needs a running node but still trusts only the math.
-`cargo run --features node-core --example light_client_live` points the read-only
-light-client SDK at a node, pulls its `/proof/account` Merkle proof, and re-derives
-the account-SMT root locally — so a node that lies about a balance is caught by
-arithmetic, not reputation. The example proves it end-to-end: inflating the claimed
-balance fails with `LeafHashMismatch`, corrupting one Merkle sibling fails with
-`ProofInvalid`, and pinning a seal root you obtained out-of-band rejects a
-one-byte-different root. Read-only — the SDK holds no key and cannot move funds.
+**Or check an account against a *live* node.** The checks above need no node; this
+one needs a running node. `cargo run --features node-core --example light_client_live`
+points the read-only light-client SDK at a node, pulls its `/proof/account` Merkle
+proof, and re-derives the account-SMT root locally, so a balance that disagrees with
+the node's own proof is caught by arithmetic: inflating the claimed balance fails
+with `LeafHashMismatch`, and corrupting one Merkle sibling fails with `ProofInvalid`.
+That alone is a consistency check, not trustlessness. The node supplies the root,
+and by default the SDK relays the node's own "this root is sealed" flag. A node that
+fabricates a whole consistent proof is caught only against a root you trust: the
+example pins a seal root obtained out-of-band and rejects a one-byte-different one.
+To check a seal's signature against validator keys you pin yourself, use
+`light_verify::verify_seal_record_against_anchor`; the example does not call it.
+Read-only — the SDK holds no key and cannot move funds.
 Source: [`examples/light_client_live.rs`](examples/light_client_live.rs).
 
 ### For agents — the same verdict as a paid API (x402 on Algorand)
@@ -264,7 +268,7 @@ enforcement is the design-stage next slice). Realms remain a **design document
 under active development**, not a shipped feature (honest-claims rule applies —
 see Project status above):
 
-- **Trustless time — live today.** Epoch seals embed a **drand**
+- **Independent time bounds — live today.** Epoch seals embed a **drand**
   public-randomness pulse as a not-before bound; `elara-verify` checks that
   pulse's BLS signature against the pinned League-of-Entropy key — offline, when
   the artifact carries the signature — so the lower bound rests only on the
@@ -321,7 +325,7 @@ src/
 │   ├── kem.rs                  # ML-KEM-768 (FIPS 203) post-quantum key encapsulation
 │   ├── commitment.rs           # SHA3-based deterministic commitment proofs
 │   ├── vrf.rs                  # Dilithium3-signed sortition draw (SHA3-based; not a full RFC-9381 VRF)
-│   └── zk.rs                   # Hash-commitment privacy (SHA3; Groth16 zk-SNARK = design-stage)
+│   └── zk.rs                   # SHA3 commitment proofs (not yet private; Groth16 zk-SNARK = design-stage)
 │
 ├── accounting/                 # internal resource accounting (staking, Sybil-resistance, metering)
 │   ├── types.rs                # operation types + fixed-supply constants (9-decimal base unit)
@@ -469,7 +473,7 @@ git clone https://github.com/navigatorbuilds/elara-mesh.git && cd elara-mesh
 scripts/build.sh                 # add --verify to also build the offline verifier
 
 # …or the raw commands it wraps:
-cargo test  --features node --lib                                   # 5,700+ tests
+cargo test  --features node --lib                                   # 6,100+ tests
 cargo build --features node --release --bin elara-node --bin elara-cli
 ```
 
@@ -631,19 +635,25 @@ $CLI unstake --stake-record-id <id> --identity id.json
 
 ## Benchmarks
 
-Measured on Xeon E5 / 64GB RDIMM — single-machine microbenchmarks of the **shipped pure-Rust** crypto stack, not production SLAs. Most rows reproduce with `cargo bench`; the SPHINCS+ sign figure is whitepaper-measured (no cargo bench for it exists). AVX2-optimized C implementations are considerably faster (~0.3 ms Dilithium3 sign) — we ship pure Rust for auditability and portability.
+Single-machine microbenchmarks of the **shipped pure-Rust** crypto stack, measured in September 2026 on an Intel Xeon E5-1620 v3 (3.5 GHz, 4 cores / 8 threads, a 2014-era desktop CPU) with a node running on the same machine. They are not production SLAs, and no phone or ARM hardware has been measured. Every row reproduces with `cargo bench --bench <bench>`, using the bench named in its row.
 
-| Operation | Time |
-|-----------|------|
-| Dilithium3 keygen | 57 µs |
-| Dilithium3 sign | ~1 ms |
-| Dilithium3 verify | 55 µs |
-| SPHINCS+ sign (SHA2-192f) | ~130 ms |
-| SHA3-256 (4 KB) | 16 µs |
-| Batch verify 100 sigs | 1.7 ms |
-| Wire serialize | 292 ns |
-| Wire deserialize | 780 ns |
-| DAG insert 10K records | 16 ms |
+| Operation | Time | Bench |
+|-----------|------|-------|
+| Dilithium3 (ML-DSA-65) keygen | 198 µs | `bench_crypto` |
+| Dilithium3 sign | 680 µs | `bench_crypto` |
+| Dilithium3 verify | 187 µs | `bench_crypto` |
+| SPHINCS+-SHA2-192f sign¹ | 125 ms | `bench_crypto` |
+| SPHINCS+-SHA2-192f verify¹ | 6.7 ms | `bench_crypto` |
+| SHA3-256 (4 KB) | 15.7 µs | `bench_crypto` |
+| Batch verify, 100 Dilithium3 signatures, parallel (`--features node`) | 5.0 ms | `bench_crypto` |
+| Batch verify, 100 Dilithium3 signatures, sequential (default features) | 18.6 ms | `bench_crypto` |
+| Wire serialize (one record) | 248 ns | `bench_wire` |
+| Wire deserialize (one record) | 732 ns | `bench_wire` |
+| DAG insert, 10K-record chain | 14.5 ms | `bench_dag` |
+
+Batch verification runs in parallel only in node builds (`--features node`); other builds, including WebAssembly, verify one signature at a time.
+
+¹ The shipped SPHINCS+ backend hashes with SHA-256 throughout. FIPS 205 requires SHA-512 in parts of SLH-DSA-SHA2-192f, so this is not FIPS 205 SLH-DSA and does not interoperate with it; `crates/elara-record/tests/acvp_slhdsa192f.rs` pins the difference against NIST's test vectors.
 
 ## Configuration
 
@@ -669,8 +679,8 @@ Copy `elara-node.toml.example` and customize. Every field has an `ELARA_*` env v
 
 | Document | Description |
 |----------|-------------|
-| [Protocol Whitepaper](docs/whitepaper/ELARA-PROTOCOL-WHITEPAPER.pdf) | The Elara Protocol — post-quantum universal validation layer (v0.7.37) |
-| [MESH-BFT Paper](docs/whitepaper/MESH-BFT-PAPER.pdf) | Consensus: diversity-weighted Byzantine fault tolerance |
+| [Protocol Whitepaper](docs/whitepaper/ELARA-PROTOCOL-WHITEPAPER.pdf) | The Elara Protocol — post-quantum universal validation layer (v0.7.40) |
+| [MESH-BFT Paper](docs/whitepaper/MESH-BFT-PAPER.pdf) | Consensus design, 2026-09-25 edition: safety for Byzantine stake below one third, under the conditions it states; the diversity weighting does not gate finality yet |
 | [Protocol Economics](docs/PROTOCOL-ECONOMICS.md) | Validation-beat mechanics as implemented — fixed supply, conservation invariant, staking, slashing; with a "rejected alternatives" appendix |
 | [Design Specification](docs/spec/) | Full protocol / architecture / hardware design corpus |
 | [Differentiation FAQ](docs/launch/differentiation-faq.md) | "How is this not just X?" — how Elara differs from C2PA, sigstore, blockchains, and timestamping SaaS |

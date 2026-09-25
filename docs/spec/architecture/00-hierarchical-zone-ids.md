@@ -5,7 +5,7 @@ Current: zone_id is u8 (256 zones max). Production: variable-length hierarchical
 ```
 "medical/eu/west/germany/bavaria"
 "finance/global"
-"iot/manufacturing/toyota/plant-7"
+"iot/manufacturing/automotive/plant-7"
 "personal/alice"
 ```
 

@@ -168,7 +168,7 @@ if [ -n "$PY" ] && [ -f "$HERE/verify_pq.py" ]; then
 fi
 
 # ── 0d. Bitcoin existed-by — independent OTS → Bitcoin verification ──────────
-# The Rust elara-verify legs 1-4 below prove the trustless anchoring window (the
+# The Rust elara-verify legs 1-4 below prove the anchoring window (the
 # anchor's drand freshness + the seal's Bitcoin existed-by). This leg re-derives the *upper* (Bitcoin)
 # bound in a second, non-Rust toolchain: the opentimestamps reference Python
 # library walks the .ots proof to a Bitcoin block-header attestation, and stdlib
@@ -216,7 +216,7 @@ fi
 run "1. record — authentically signed (post-quantum, dual signature)" \
     "$HERE/sample-record.wire" --wire
 
-run "2. anchor — the seal's Bitcoin existed-by upper bound (block 957487, trustless: the seal provably existed by then) plus the anchor's BLS-verified drand freshness below (the anchor is provably fresh, minted after that pulse — not back-dated): the anchoring window, both ends proven offline (a still-pending anchor would exit 3, not 0). The seal's OWN not-before is its embedded pulse — see leg 5." \
+run "2. anchor — the seal's Bitcoin existed-by upper bound (block 957487, pin-authenticated: the seal existed by that block's header time) plus the anchor's BLS-verified drand freshness below (the anchor was minted after that pulse, so it was not prepared in advance): the anchoring window, both ends proven offline (a still-pending anchor would exit 3, not 0). The seal's OWN not-before is its embedded pulse — see leg 5." \
     --anchor "$HERE/epoch-41340-zone-0.json"
 
 # Record + anchor in ONE run. These are two INDEPENDENT proofs — the record is
@@ -230,13 +230,13 @@ run_expect_partial "3. record + anchor together — two INDEPENDENT proofs, no b
 
 # 4. Honest failure on purpose — the SAME confirmed anchor, but with its Bitcoin
 # existed-by proof (the .ots sidecar) withheld. Staged in a temp dir so only the
-# anchor JSON is present. The verifier keeps the trustless drand freshness bound (✓,
-# the anchor is provably fresh) and marks the Bitcoin existed-by ⚠ UNPROVEN — so the
+# anchor JSON is present. The verifier keeps the BLS-verified drand freshness bound (✓,
+# the anchor was minted after that pulse) and marks the Bitcoin existed-by ⚠ UNPROVEN — so the
 # seal's existed-by is not established: PARTIAL (exit 3), never a false VERIFIED.
 PARTIAL_DIR="$(mktemp -d)"
 trap 'rm -rf "$PARTIAL_DIR"' EXIT
 cp "$HERE/epoch-41340-zone-0.json" "$PARTIAL_DIR/"   # NB: the .ots is deliberately NOT copied
-run_expect_partial "4. honest failure by design — the SAME anchor with its Bitcoin existed-by proof withheld: the verifier keeps the trustless drand freshness bound but marks the seal's existed-by ⚠ UNPROVEN (exit 3 PARTIAL), it does NOT fake a green ✓" \
+run_expect_partial "4. honest failure by design — the SAME anchor with its Bitcoin existed-by proof withheld: the verifier keeps the BLS-verified drand freshness bound but marks the seal's existed-by ⚠ UNPROVEN (exit 3 PARTIAL), it does NOT fake a green ✓" \
     --anchor "$PARTIAL_DIR/epoch-41340-zone-0.json"
 
 # 5 & 6. The account-chain legs bind a sealed account-state into a validator-signed

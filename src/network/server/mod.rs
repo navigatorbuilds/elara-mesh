@@ -1449,6 +1449,7 @@ fn max_open_fds() -> u64 {
     #[cfg(unix)]
     {
     let mut rl = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+    // SAFETY: getrlimit only writes the rlimit struct we pass by valid &mut.
     let rc = unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut rl) };
     if rc == 0 {
         rl.rlim_cur
@@ -1721,6 +1722,7 @@ fn process_blkio_wait_seconds() -> f64 {
     let parts: Vec<&str> = tail.split_whitespace().collect();
     let ticks: u64 = parts.get(39).and_then(|s| s.parse().ok()).unwrap_or(0);
     #[cfg(unix)]
+    // SAFETY: sysconf takes an integer name and touches no caller memory.
     let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
     // No sysconf off-unix; 0 routes to the 100 Hz default (and /proc is absent
     // there anyway, so ticks is already 0).
@@ -2225,6 +2227,7 @@ fn process_cpu_seconds() -> (f64, f64) {
     let utime: u64 = parts.get(11).and_then(|s| s.parse().ok()).unwrap_or(0);
     let stime: u64 = parts.get(12).and_then(|s| s.parse().ok()).unwrap_or(0);
     #[cfg(unix)]
+    // SAFETY: sysconf takes an integer name and touches no caller memory.
     let ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
     // No sysconf off-unix; 0 routes to the 100 Hz default (utime/stime are
     // already 0 there — /proc is absent).
@@ -3746,6 +3749,7 @@ fn process_fd_state() -> (u64, u64) {
     #[cfg(unix)]
     let max_fds = {
         let mut rlim = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+        // SAFETY: getrlimit only writes the rlimit struct we pass by valid &mut.
         unsafe {
             if libc::getrlimit(libc::RLIMIT_NOFILE, &mut rlim) == 0 {
                 rlim.rlim_cur
@@ -3948,6 +3952,7 @@ fn host_cpu_jiffies() -> (f64, f64, f64, f64, f64, f64) {
     let softirq: u64 = parts.next().and_then(|v| v.parse().ok()).unwrap_or(0);
     let steal: u64 = parts.next().and_then(|v| v.parse().ok()).unwrap_or(0);
     #[cfg(unix)]
+    // SAFETY: sysconf takes an integer name and touches no caller memory.
     let ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
     // No sysconf off-unix; 0 routes to the 100 Hz default (all jiffy fields are
     // already 0 there — /proc is absent).
@@ -6946,7 +6951,7 @@ pub(crate) async fn metrics_body_tiered(
          # HELP elara_committee_resolver_cache_capacity Configured FIFO cap on the resolver cache (`committee_resolver_cache_size` config, default 4096). Static gauge — variance across the fleet signals config drift.\n\
          # TYPE elara_committee_resolver_cache_capacity gauge\n\
          elara_committee_resolver_cache_capacity {ccr_cap}\n\
-         # HELP elara_committee_resolver_hits_total Cache-hit count. Hot path returns a clone of the cached committee without re-running the Efraimidis–Spirakis sort.\n\
+         # HELP elara_committee_resolver_hits_total Cache-hit count. Hot path returns a clone of the cached committee without re-running the priority-key sort.\n\
          # TYPE elara_committee_resolver_hits_total counter\n\
          elara_committee_resolver_hits_total {ccr_hits}\n\
          # HELP elara_committee_resolver_misses_total Cache-miss count. Each miss falls through to `select_zone_committee` and inserts the result. Sustained miss-rate ≈ 1.0 at low query rate signals candidates_fingerprint thrash (VRF registry / stake set mutating faster than the cache can amortize).\n\
@@ -8527,6 +8532,8 @@ pub(crate) async fn metrics_body_tiered(
                 use std::os::unix::ffi::OsStrExt;
                 let path = std::ffi::CString::new(state.config.data_dir.as_os_str().as_bytes()).ok();
                 if let Some(p) = path {
+                    // SAFETY: statvfs is a plain C struct of integers, so all-zero is a valid value; the path is a
+                    // NUL-terminated CString that outlives the call and `stat` is a valid, writable out-pointer.
                     let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
                     if unsafe { libc::statvfs(p.as_ptr(), &mut stat) } == 0 {
                         dt = (u64::from(stat.f_blocks) * u64::from(stat.f_frsize)) / (1024 * 1024);

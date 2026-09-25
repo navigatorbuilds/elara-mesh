@@ -1133,7 +1133,15 @@ async fn apply_ledger_op_phase4(
     creator_hash: String,
     parsed_ledger_op: Option<crate::accounting::types::ParsedLedgerOp>,
 ) {
-    // Apply ledger/governance operation to ledger after successful storage.
+    // Commit path for a record's ledger operation after successful storage.
+    // A parsed ledger op (`beat_op`) is PARKED (PendingLedger +
+    // CF_PENDING_DELTAS) and committed at finality by
+    // `pending_drain::drain_and_commit_pending`; the direct
+    // `apply_single_record` below runs only when the park is rejected
+    // (`tentative_fallback_to_direct`), which needs a parsed ledger op. A
+    // governance-only record has none, so this live path never applies it to
+    // the ledger; only ledger rebuilds do (2026-09-25 self-audit; consensus
+    // change, queued).
     // Dedup check uses RocksDB CF_APPLIED (O(1) key lookup) instead of the in-memory
     // HashSet, which grew to 135K+ entries and made every ledger clone take seconds.
     // Check BEFORE acquiring the write lock to avoid contention on already-applied records.
@@ -2371,6 +2379,9 @@ async fn insert_record_inner(state: &Arc<NodeState>, mut record: ValidationRecor
     // PRIVATE = "I can prove I know the content without revealing it."
     // Records with these classifications MUST carry a valid ZK proof.
     // Without enforcement, "PRIVATE" is just a label with no cryptographic guarantee.
+    // Caveat (2026-09-25 self-audit): the check below needs only a proof its own
+    // verifier accepts. The proof is not bound to this record and carries its
+    // opening, so PRIVATE is still a label today (docs/KNOWN-LIMITATIONS.md §31).
     //
     // Skip enforcement for synced/historical records (skip_timestamp_defense=true)
     // to avoid rejecting pre-existing Private records created before this enforcement.

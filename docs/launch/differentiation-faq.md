@@ -109,7 +109,7 @@ So, precisely: x402 settles agent payments and its community standardizes *payme
 receipts; AP2 — FIDO-governed — produces *authorization* evidence for commerce on
 classical signatures with no published PQ roadmap; **neither proves the
 non-payment act.** Elara is shipped work-layer proof for any signed agent act —
-post-quantum (FIPS 204 ML-DSA / FIPS 205 SLH-DSA), bound to a revocable on-mesh
+post-quantum (FIPS 204 ML-DSA, with an optional pre-standard SPHINCS+ second signature), bound to a revocable on-mesh
 mandate from a named principal, verifiable fully offline by a signing-incapable
 MIT/Apache verifier — that plugs into `action_ref` and **composes with those
 payment receipts rather than competing with them** (the payment stack proves the
@@ -152,7 +152,7 @@ C2PA is media-provenance metadata under a consortium PKI. Precisely:
   with no caveat — corrected.)
 - C2PA manifests **do** carry a time authority: the spec uses RFC 3161 TSA
   timestamps. (An earlier draft said "no time authority" — that was wrong;
-  corrected. It is a *trusted-authority* timestamp, not a trustless anchor.)
+  corrected. It is a *trusted-authority* timestamp, not a public-chain anchor.)
 
 What C2PA is *not*: a consensus network, a validator quorum, or a queryable
 ledger of authorized acts. It attests *who made this media and how it was
@@ -182,13 +182,16 @@ factory basement or an air-gapped agency works the same way.
 ## "Just a timestamping SaaS?"
 
 Those ask you to trust the vendor's key custody and database. Elara's
-**trustless path** touches no server and no third party. A **drand**
-public-randomness pulse gives a *not-before* lower bound — a seal cites a beacon
-round that did not exist until that moment, so it cannot be backdated; verified
-offline against the pinned League-of-Entropy BLS key. **Hash-linked epoch seals**
+**independent path** touches no server at verification time. A **drand**
+public-randomness pulse gives a *not-before* lower bound — a seal that cites a beacon
+round could not have been made before that round was published; verified
+offline against the pinned League-of-Entropy BLS key, assuming fewer than drand's
+threshold of operators collude. **Hash-linked epoch seals**
 give tamper-evident ordering — a record cannot be reordered or silently inserted
 after the fact. The verifier in this repo checks both in front of you, zero
-network — no clock of ours, and no outside authority, is trusted. (The drand
+network — no clock of ours is trusted; the outside assumptions are drand's operator
+threshold and, for a Bitcoin existed-by bound, the block's header time, which the
+miner sets. (The drand
 fetcher is opt-in; the sample bundle's own epoch seal is a real pulse-carrying
 production seal, offline-checkable.)
 

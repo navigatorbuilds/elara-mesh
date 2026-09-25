@@ -120,7 +120,7 @@ expect_live_violation MCXZoneLiveNoGST     MCXZoneLiveNoGST_Fast     LiveFast   
 expect_live_clean     MCXZoneLiveNoGST     MCXZoneLiveNoGST_Back     LiveBackstop                                 || rc=1
 expect_live_violation MCXZoneLiveByzStall  MCXZoneLiveByzStall_Fast  LiveFast     "honest >= 2/3 is necessary for the fast path" || rc=1
 expect_live_clean     MCXZoneLiveByzStall  MCXZoneLiveByzStall_Back  LiveBackstop                                 || rc=1
-echo "--- Phase E.2: IN-ZONE epoch-seal liveness (VRF rank ladder + cross-zone escalation; NO quorum-free floor) ---"
+echo "--- Phase E.2: IN-ZONE epoch-seal liveness (hash rank ladder + cross-zone escalation; NO quorum-free floor) ---"
 expect_live_clean     MCInZoneLiveSafe      MCInZoneLiveSafe_Local      LiveLocal                                  || rc=1
 expect_live_clean     MCInZoneLiveSafe      MCInZoneLiveSafe_Esc        LiveWithEscalation                         || rc=1
 expect_live_clean     MCInZoneLiveLadder    MCInZoneLiveLadder_Local    LiveLocal                                  || rc=1
@@ -134,7 +134,7 @@ expect_live_clean     MCInZoneLiveByzWit    MCInZoneLiveByzWit_Esc      LiveWith
 expect_live_violation MCInZoneLiveNoEscGST  MCInZoneLiveNoEscGST_Esc    LiveWithEscalation "no quorum-free floor: global GST is necessary" || rc=1
 expect_live_violation MCInZoneLiveEscByz    MCInZoneLiveEscByz_Esc      LiveWithEscalation "escalation needs a 2/3 cross-zone quorum (global f < 1/3)" || rc=1
 expect_live_violation MCInZoneLiveBootstrap MCInZoneLiveBootstrap_Esc   LiveWithEscalation "staked<3 freeze trap has no safety net" || rc=1
-echo "--- Phase E.3: CROSS-EPOCH seal recurrence ([]<>sealed) — the chained VRF beacon re-randomizes ranks ---"
+echo "--- Phase E.3: CROSS-EPOCH seal recurrence ([]<>sealed) — the chained beacon re-randomizes ranks ---"
 expect_live_clean     MCRecurSafe       MCRecurSafe_Any         RecurSealed                                  || rc=1
 expect_live_clean     MCRecurSafe       MCRecurSafe_Local       RecurLocalSealed                             || rc=1
 expect_live_clean     MCRecurLadder     MCRecurLadder_Any       RecurSealed                                  || rc=1

@@ -12902,11 +12902,13 @@ mod tests {
             &identity, &storage, &epoch_state, ZoneId::from_legacy(0), 50.0, 200.0, Some(&vrf_sk), None,
         ).unwrap();
 
-        // Verify with WRONG VRF public key — must fail
+        // Verify with WRONG VRF public key — must fail, and in the VRF step (an
+        // error from any earlier check would also satisfy a bare `is_err()`).
         let result = verify_epoch_seal(
             &record, &storage, &epoch_state, &genesis, Some(&wrong_vrf_pk), None, SealStakeView::empty(),
         );
-        assert!(result.is_err(), "wrong VRF key must cause verification failure");
+        let msg = result.expect_err("wrong VRF key must cause verification failure").to_string();
+        assert!(msg.contains("epoch seal VRF"), "expected the VRF check to reject, got: {msg}");
     }
 
     #[test]

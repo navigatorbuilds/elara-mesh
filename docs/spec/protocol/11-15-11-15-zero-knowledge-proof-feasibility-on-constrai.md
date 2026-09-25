@@ -1,6 +1,6 @@
 ### 11.15 Zero-Knowledge Proof Feasibility on Constrained Devices
 
-> **Implementation status — DESIGN-STAGE.** The proving-cost figures below are projections for the *specified* zk-SNARK construction (§5.3), not measurements of running code. The Phase-1 SHA3-256 commitment scheme generates proofs in microseconds on every device class; this analysis governs a future zk-SNARK deployment.
+*Implementation-status note: this section plans for the specified zk-SNARK layer, which is design-stage (Section 5.3). The current runtime attaches SHA3-256 commitments, which any device that can hash can produce, to PRIVATE and RESTRICTED records; they are not zero-knowledge proofs and do not yet hide anything (each proof carries its opening, and every record carries its plain content hash). SOVEREIGN is a label only; its zk-STARK construction is not implemented. The timings below are estimates, not measurements of Elara code.*
 
 **The problem:** generating a zk-SNARK proof (in the specified construction) requires significant computation:
 
@@ -17,7 +17,7 @@ The Kenya teenager's $30 phone can generate a proof, but it takes up to a minute
 **Solution: Layered Privacy by Device Capability**
 
 **Capable devices (phones, laptops, servers):**
-Generate privacy proofs locally (Phase 1: SHA3-256 commitments; the zk-SNARK path is design-stage per the banner above). PRIVATE, RESTRICTED, and SOVEREIGN classifications supported.
+Would generate ZK proofs locally once the zk-SNARK layer lands, supporting PRIVATE, RESTRICTED, and SOVEREIGN classifications. Today they attach the SHA3-256 commitments described above, which do not yet hide anything.
 
 **Constrained devices (IoT, ESP32):**
 Three options for privacy-preserving validation:

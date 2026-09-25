@@ -41,10 +41,13 @@ pub const MAX_HISTORICAL_DEPTH: u64 = 315_000_000;
 /// The per-record publication model in [`PublicationState::process_publication`]
 /// (imported records ENTER public consensus, `retroactive_witnessing: true`) is the
 /// coin-era trust-conferral design dropped by the 2026-06-09 pivot. The 2026-06-14
-/// disjoint-DAG merge audit found it unsound: `ValidationRecord::signable_bytes` carries
-/// no realm/network binding, so an imported record is consensus-indistinguishable from a
-/// native one, and MESH-BFT's single-network safety theorem does not cover adopting a
-/// foreign realm's records as native settlement parents. The agreed reframe is
+/// disjoint-DAG merge audit found it unsound: MESH-BFT's single-network safety theorem
+/// does not cover adopting a foreign realm's records as native settlement parents, and at
+/// the time `ValidationRecord::signable_bytes` carried no realm/network binding, so an
+/// imported record was consensus-indistinguishable from a native one. (Since wire format
+/// v6 each new record signs its network identifier and a node rejects a record that names
+/// a different network; v4/v5 records, which nodes still accept, and records that name no
+/// network carry no binding.) The agreed reframe is
 /// *inert-import*: public consensus attests the publication BUNDLE existed at an anchored
 /// time, never the individual records. The reframe, the M1-M5 disjoint-DAG merge rules, the
 /// finality-preservation argument, and the G1-G4 re-enable gates are specified in
@@ -56,9 +59,9 @@ pub const NETWORK_PUBLISH_ENABLED: bool = false;
 /// Error returned by [`PublicationState::process_publication`] while NETWORK_PUBLISH is off.
 pub const NETWORK_PUBLISH_DISABLED_MSG: &str =
     "NETWORK_PUBLISH is disabled pending the multi-root merge theorem: the per-record \
-     publication model is unsound (no realm binding; not covered by MESH-BFT single-network \
-     safety) and is being reframed to inert bundle-attestation. See \
-     docs/MESH-BFT-MERGE-SEMANTICS.md (gates G1-G4) + an internal audit.";
+     publication model is unsound (not covered by MESH-BFT single-network safety; records \
+     below wire v6 carry no network binding) and is being reframed to inert \
+     bundle-attestation. See docs/MESH-BFT-MERGE-SEMANTICS.md (gates G1-G4) + an internal audit.";
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -1143,8 +1146,8 @@ mod tests {
     #[test]
     fn network_publish_is_hard_disabled_by_default() {
         // NETWORK_PUBLISH implements the dropped coin-era per-record trust-conferral
-        // model (2026-06-14 disjoint-DAG-merge audit: unsound, no realm binding in
-        // record signing). It must stay hard-disabled until the inert bundle-attestation
+        // model (2026-06-14 disjoint-DAG-merge audit: unsound; record signing had no
+        // realm binding then). It must stay hard-disabled until the inert bundle-attestation
         // reframe lands, so the dead model cannot be flipped on by accident.
         // Compile-time guard: flipping NETWORK_PUBLISH_ENABLED on without removing
         // this assertion fails the build — the dropped per-record model cannot be

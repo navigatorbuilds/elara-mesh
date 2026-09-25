@@ -1,13 +1,10 @@
 ### Phase 1: Protocol Development (2026–2027)
 
-- Reference implementation of Layer 1 (local validation, PQC keypair, DAG) — **shipped**
-- Reference implementation of Layer 1.5 (Rust DAM VM, 9 ops, PyO3 bindings) — **shipped**
-- Reference implementation of Layer 2 (HTTP server, record exchange, witness attestation) — **shipped** (v0.11.0: server, client, discovery, witness manager, trust scoring — 985 lines across 8 files)
-- Layer 2 testnet hardening (signature verification, peer rate limiting, attestation back-propagation, heartbeat protocol, weighted trust with temporal decay + diversity bonus, role enforcement) — **shipped** (v0.12.0)
-- Layer 1↔Layer 3 bridge (cognitive outputs signed as DAM records, hardened with validation guards, dedup, rate limiting) — **shipped** (v0.10.8, hardened v0.11.0)
-- Cortical Execution Model (5-layer concurrent architecture for non-blocking tool dispatch) + long-range temporal memory — **shipped** (v0.13.0)
-- Tier system (4-level hardware capability gating: VALIDATE/REMEMBER/THINK/CONNECT) — **shipped** (v0.15.0)
-- Cognitive Continuity Chain (hash-chained, dual-signed cognitive state snapshots in DAG — cryptographic proof of unbroken AI experience) — **shipped** (v0.15.0)
-- Security audit by independent cryptography firm — **not yet done** (no third-party security audit has been performed as of 2026)
-- Developer SDK (Python, Rust, C/embedded) — **partial** (Rust + PQ/light-client SDK crates shipped; packaged Python/C bindings planned)
+- Reference implementation of Layer 1 (local validation, PQC keypair, DAG) — **shipped** (Rust, public source repository; releases v0.2.0–v0.3.0)
+- Layer 1.5 runtime features (DAM VM with its 9 operations; PyO3 bindings for signing, verification, hashing and record encoding) — **shipped**
+- Reference implementation of Layer 2 (HTTP server, record exchange, witness attestation, MESH-BFT epoch seals and settlement) — **shipped** (Rust, public source repository)
+- Layer 2 hardening (signature verification on ingest, peer rate limiting, witness reputation with a 180-day half-life and a zone-diversity bonus, peer heartbeat and liveness probes, bounded post-quantum verification under load) — **shipped**
+- Layer 3 prototype (Elara Core, private and frozen; not part of the open-source release): Layer 1↔Layer 3 bridge, Cortical Execution Model, tier system, Cognitive Continuity Chain — built in the prototype. Earlier editions of this paper tagged these with the prototype's internal version numbers (v0.10.8–v0.15.0); those were never public releases.
+- Security audit by independent cryptography firm — **not yet done**
+- Developer SDK (Python, Rust, C/embedded) — partly shipped: Rust crates on crates.io (`elara-record`, `elara-verify` and others), Python and TypeScript SDKs in the source repository; C/embedded not started
 

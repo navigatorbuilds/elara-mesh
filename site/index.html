@@ -59,9 +59,9 @@
     </p>
   </div>
   <div class="hero-strip">
-    <div><strong>~350K</strong><span>lines of Rust, open source</span></div>
-    <div><strong>5,700+</strong><span>tests green — the suite is the spec</span></div>
-    <div><strong>ML-DSA-65 + SLH-DSA</strong><span>NIST FIPS 204/205 post-quantum ("Dilithium3" + "SPHINCS+") — default and only mode</span></div>
+    <div><strong>~410K</strong><span>lines of Rust, open source</span></div>
+    <div><strong>6,100+</strong><span>lib tests green — the suite is the spec</span></div>
+    <div><strong>ML-DSA-65</strong><span>NIST FIPS 204 post-quantum signature on every record — there is no classical-signature mode</span></div>
     <div><strong>Verifiable offline</strong><span>check any proof yourself — no server, no account</span></div>
   </div>
 </section>
@@ -76,8 +76,8 @@
         Everything signed with today's classical cryptography can be harvested now and
         forged later, once quantum computers arrive. Proof that must still be true in
         twenty years has to be post-quantum <em>from the moment it is created</em>.
-        Elara signs every record with NIST-standardised post-quantum signatures —
-        Dilithium3 and SPHINCS+ — not as an add-on, but as the default and only mode.
+        Elara signs every record with a NIST-standardised post-quantum signature —
+        ML-DSA-65 (FIPS 204, "Dilithium3") — not as an add-on, but as the default and only mode.
       </p>
     </div>
     <div class="col">
@@ -111,17 +111,19 @@
       <h3>Witness</h3>
       <p>
         When connectivity exists, a peer-to-peer mesh gossips the record into its zone,
-        where a diversity-weighted committee of independent witnesses attests to it.
-        Correlated witnesses — same org, same subnet — count less. Sybil farms don't settle.
+        where staked witnesses attest to it. MESH-BFT's design discounts correlated
+        witnesses — same org, same subnet; today that weighting is reported but does not
+        yet gate finality (<a href="https://github.com/navigatorbuilds/elara-mesh/blob/main/docs/KNOWN-LIMITATIONS.md">known limitations</a>).
       </p>
     </div>
     <div class="step">
       <span class="step-n">3</span>
       <h3>Seal</h3>
       <p>
-        Epochs seal attested history under Merkle roots, chained and checkpointed.
-        A light client on a phone verifies any record against the sealed history —
-        no full node, no genesis replay, post-quantum all the way down.
+        Epochs seal history under Merkle roots, chained and checkpointed. A light
+        client checks any record against the sealed history with a short proof — no
+        full node, no genesis replay; the signatures and hashes on that path are
+        post-quantum.
       </p>
     </div>
   </div>
@@ -143,7 +145,7 @@
     </a>
     <a class="uc-card" href="usecases.html#authorship">
       <h3>Proof of priority</h3>
-      <p>Seal a work's fingerprint into a drand-anchored timeline that cannot be back-dated. Registration priority, precisely scoped — in most disputes, the ordering is the whole fight.</p>
+      <p>Seal a work's fingerprint, then anchor the seal in Bitcoin with OpenTimestamps — an existed-by time that cannot be back-dated by more than Bitcoin's block-time tolerance (typically at most about an hour). Registration priority, precisely scoped — in most disputes, the ordering is the whole fight.</p>
       <span class="paper-cta">Read the case →</span>
     </a>
     <a class="uc-card" href="usecases.html#offline">
@@ -152,13 +154,13 @@
       <span class="paper-cta">Read the case →</span>
     </a>
     <a class="uc-card" href="usecases.html#spamfarm">
-      <h3>Sybil resistance as arithmetic</h3>
-      <p>Correlated witnesses — same operator, same subnet — collapse toward one vote in consensus. A thousand clones weigh about as much as one honest voice.</p>
+      <h3>Sybil resistance as arithmetic — the design</h3>
+      <p>In MESH-BFT's design, correlated witnesses — same operator, same subnet — collapse toward one vote. Today finality counts raw stake; the weighting is computed and reported, not yet enforced.</p>
       <span class="paper-cta">Read the case →</span>
     </a>
     <a class="uc-card" href="usecases.html#aiboxes">
       <h3>The coming fleet of personal AI machines</h3>
-      <p>Always-on local-AI boxes need exactly two things at scale: provable agent authorization, and something useful for idle cycles. Elara ships the first and is built for the second.</p>
+      <p>Always-on local-AI boxes need exactly two things at scale: provable agent authorization, and something useful for idle cycles. Elara ships the first and is designed for the second.</p>
       <span class="paper-cta">Read the case →</span>
     </a>
   </div>
@@ -172,9 +174,9 @@
     <em>tested-at</em>. This table is the honest version — it is the same one in the README.
   </p>
   <table class="status-table">
-    <tr><th>Tested at</th><td>small private testnets — historically up to 6 rented VPS nodes across Europe and North America (that fleet was retired 2026-06-09); the current fleet is 3 local machines (one desktop + two laptops), weeks of continuous soak; ~17K-record DAGs; first external-machine join over the public internet completed July&nbsp;2026; full test suite (5,700+ tests) green</td></tr>
+    <tr><th>Tested at</th><td>small private testnets — historically up to 6 rented VPS nodes across Europe and North America (that fleet was retired 2026-06-09); the current fleet is 3 local machines (one desktop + two laptops), weeks of continuous soak; ~17K-record DAGs; first external-machine join over the public internet completed July&nbsp;2026; the full CI test suite (7,000+ tests) green</td></tr>
     <tr><th>Designed for</th><td>1M zones × 10T records/day × 10K+ nodes — <em>design targets that shaped the architecture, not demonstrated capacity</em></td></tr>
-    <tr><th>Hardening</th><td>explicit-panic phase done — <strong>0</strong> <code>unwrap()</code>/<code>expect()</code>/<code>panic!</code> across the node and published protocol crates (test code excluded), CI-gated. Active lane: hot-path bounds/arithmetic hardening — a Byzantine peer must never crash a node</td></tr>
+    <tr><th>Hardening</th><td>explicit-panic phase done — <strong>0</strong> <code>unwrap()</code>/<code>expect()</code>/<code>panic!</code> across the node and published protocol crates (test code excluded), CI-gated. Bounds and arithmetic on bytes from peers have been reviewed across the network-facing code, with decoder fuzz tests in CI — the goal is that a Byzantine peer can never crash a node; no outside audit has checked this yet</td></tr>
     <tr><th>Public network</th><td>none yet — this is a runtime you can build and run yourself today</td></tr>
     <tr><th>Beats</th><td>the internal unit (the <strong>beat</strong>) is protocol plumbing (staking, sybil resistance, resource accounting). <strong>It is not a cryptocurrency offering: there is no token sale, no exchange listing, no airdrop — and none is planned.</strong></td></tr>
   </table>
@@ -186,17 +188,17 @@
   <div class="papers">
     <a class="paper" href="papers/ELARA-PROTOCOL-WHITEPAPER.pdf">
       <h3>Protocol Whitepaper</h3>
-      <p>The Elara Protocol — a post-quantum universal validation layer for digital work. 121 pages, v0.7.30.</p>
+      <p>The Elara Protocol — a post-quantum universal validation layer for digital work. 131 pages, v0.7.40.</p>
       <span class="paper-cta">PDF →</span>
     </a>
     <a class="paper" href="papers/MESH-BFT-PAPER.pdf">
       <h3>MESH-BFT</h3>
-      <p>Diversity-weighted Byzantine fault tolerance: consensus where independence counts, with liveness theorem.</p>
+      <p>Diversity-weighted Byzantine fault tolerance: the consensus design, where independence counts. The 2026-09-25 edition proves safety for Byzantine stake below one third, under conditions it states, and marks where the shipped code differs: finality counts raw stake, and seal liveness has only a proof sketch the code does not meet yet (see Known limitations in the repository).</p>
       <span class="paper-cta">PDF →</span>
     </a>
     <a class="paper" href="https://github.com/navigatorbuilds/elara-mesh/tree/main/docs/spec" rel="noopener">
       <h3>Design specification</h3>
-      <p>The full working corpus: protocol, architecture, discovery, hardware tiers — published verbatim for review.</p>
+      <p>The full working corpus: protocol, architecture, discovery, hardware tiers — open for review. Where it and the whitepaper differ, the whitepaper is canonical.</p>
       <span class="paper-cta">Browse →</span>
     </a>
   </div>
@@ -207,12 +209,13 @@
   <h2><span class="sec-n">06</span> Run it yourself</h2>
   <pre class="code"><code>git clone https://github.com/navigatorbuilds/elara-mesh.git
 cd elara-mesh
-cargo test                          # the suite is the spec
+cargo test --features node --lib    # the library suite CI runs
 cargo build --release --features node
 ./target/release/elara-node         # your node. your history.</code></pre>
   <p class="start-note">
-    Rust 1.87+, Linux/macOS (WSL2 works). The node runs on any 2&nbsp;GB machine; light clients
-    verify proofs on phone-class hardware. The node is AGPL-3.0-only; the SDKs and reusable crates are MIT/Apache-2.0. If the AGPL does not fit your deployment, a <a href="https://github.com/navigatorbuilds/elara-mesh/blob/main/LICENSING.md#commercial-licensing">commercial licence</a> for the node is available.
+    Rust 1.87+ on Linux (WSL2 works; CI builds and tests the node on Linux only, the verifier
+    also on macOS and Windows). Our authority node runs in under 400&nbsp;MB of memory at today's
+    load; light clients verify proofs in a browser tab. The node is AGPL-3.0-only; the SDKs and reusable crates are MIT/Apache-2.0. If the AGPL does not fit your deployment, a <a href="https://github.com/navigatorbuilds/elara-mesh/blob/main/LICENSING.md#commercial-licensing">commercial licence</a> for the node is available.
   </p>
 </section>
 

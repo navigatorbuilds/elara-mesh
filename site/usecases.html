@@ -29,7 +29,7 @@
 <header class="page-head">
   <p class="hero-kicker">Use cases</p>
   <h1>One primitive. <em class="grad-text">Every domain that needs proof.</em></h1>
-  <p class="hero-sub">Elara does one thing: a signed, independently witnessed, time-bracketed
+  <p class="hero-sub">Elara does one thing: a signed, sealed, time-bracketed
   record of <em>who did what, when</em> — cheap enough to attach to any action, strong enough
   to still be checkable decades from now. What follows is where that primitive carries weight.</p>
 </header>
@@ -67,7 +67,7 @@
       <p>A production line is a sequence of custody hand-offs: cut, weld, paint, test, ship.
       Each station signs what it did to which unit at which second, and the unit accumulates
       a verifiable history — not a database entry someone can edit after a recall notice,
-      but a chain of independently witnessed records.</p>
+      but a chain of signed, sealed records.</p>
     </div>
     <div class="col">
       <p>When a defect surfaces months later, tracing it is a lookup, not an investigation:
@@ -85,9 +85,10 @@
   <div class="cols">
     <div class="col">
       <p>A creator finishes a work and seals its fingerprint — a hash that could only come
-      from those exact bytes — into the timeline. The time bound cites a drand pulse,
-      so it cannot be back-dated by anyone, including the network itself. The work stays
-      private; only the fingerprint is public.</p>
+      from those exact bytes — into the timeline. Anchoring that seal in a Bitcoin block with
+      OpenTimestamps proves it existed by then, and nobody, including the network itself, can
+      move that proof earlier; the drand pulse the seal cites proves it was made no earlier
+      than the pulse. The work stays private; only the fingerprint is public.</p>
     </div>
     <div class="col">
       <p>When a dispute comes — a copy posted later, a design claimed by a competitor,
@@ -107,15 +108,18 @@
     <div class="col">
       <p>A thousand bot identities behind one operator are a single voice pretending to be
       a crowd. Most systems fight this with CAPTCHAs and heuristics. Elara's consensus
-      (MESH-BFT) treats it as arithmetic: witnesses that share an organization, a subnet,
+      design (MESH-BFT) treats it as arithmetic: witnesses that share an organization, a subnet,
       or an operator are <strong>correlation-penalized</strong> — their combined weight
       collapses toward a single vote.</p>
     </div>
     <div class="col">
-      <p>Independence is what counts. A thousand clones settle roughly one vote's worth of
-      weight; three genuinely independent witnesses settle three. The property is proved in
-      the MESH-BFT paper and enforced in the consensus hot path, not in a moderation queue.</p>
-      <p class="uc-punch">Buying a crowd stops working when the mesh can count.</p>
+      <p>In that design, a thousand clones carry roughly one vote's worth of weight; three
+      genuinely independent witnesses carry three. <strong>Status:</strong> the shipped code
+      computes this weighting and reports it, but finality today counts raw stake, so stake is
+      what holds clones off, as in any proof-of-stake system. The weighting also cannot catch
+      identities spread across distinct organizations and networks, and the paper's argument
+      is a proof sketch, not a checked proof (<a href="https://github.com/navigatorbuilds/elara-mesh/blob/main/docs/KNOWN-LIMITATIONS.md">known limitations</a>).</p>
+      <p class="uc-punch">The aim: buying a crowd stops working when the mesh can count.</p>
     </div>
   </div>
 </section>
@@ -131,8 +135,8 @@
       sequence of events.</p>
     </div>
     <div class="col">
-      <p>When a connection returns — hours or weeks later — the backlog syncs, and the mesh
-      weaves it into history in the order it was created, not the order it arrived. Offline
+      <p>When a connection returns — hours or weeks later — the backlog syncs, and each record
+      keeps the causal position it was signed with, not the order it arrived. Offline
       operation is the designed-for case, not a degraded mode.</p>
       <p class="uc-punch">Disconnection is a delay in reporting, never a gap in the record.</p>
     </div>

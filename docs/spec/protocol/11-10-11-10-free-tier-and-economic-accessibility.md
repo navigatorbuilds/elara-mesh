@@ -14,7 +14,7 @@ This is the foundational principle of the protocol. Layer 1 never has a cost, on
 
 **Layer 2: Free propagation, paid priority.**
 
-When a node syncs to the network, its validation records propagate through the gossip protocol. Basic propagation is free — relay nodes forward records as part of their normal operation (they benefit from a well-connected DAM, so relaying is incentive-compatible).
+When a node syncs to the network, its validation records propagate through the gossip protocol. Basic propagation is free — relay nodes forward record announcements as part of their normal operation (they benefit from a well-connected DAM, so relaying is incentive-compatible).
 
 What costs beats is **priority**: requesting faster propagation, higher witness counts, or guaranteed inclusion in the next epoch summary. Free-tier records propagate and accumulate witnesses organically. Paid-tier records get expedited service.
 
@@ -41,5 +41,5 @@ Free-tier records propagate for free, get witnessed by community-funded anchors,
 
 **Earn-by-participation:**
 
-Nodes that contribute resources (relay bandwidth, storage, compute) earn beats. The teenager's phone, by relaying other users' records, earns enough beats to request priority witnessing if she ever needs it. The protocol pays its participants. The complete tiered economic model, storage delegation markets, and earn-by-participation mechanics are specified separately.
+Nodes that contribute resources (relay bandwidth, storage, compute) earn beats. The teenager's phone, by relaying other users' records, earns enough beats to request priority witnessing if she ever needs it. The protocol pays its participants.
 

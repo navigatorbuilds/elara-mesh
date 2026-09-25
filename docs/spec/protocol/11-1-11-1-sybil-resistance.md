@@ -16,7 +16,7 @@ Witness attestation is not free. To attest to a validation record, a witness nod
 
 ```
 puzzle_input  = SHA3-256(record_id || witness_pubkey || nonce)
-difficulty    = BASE_DIFFICULTY × (1 / sqrt(stake_amount))
+difficulty    = BASE_DIFFICULTY × 1000 / sqrt(stake_base_units)
 target        = 2^256 / difficulty
 valid_if      = puzzle_input < target
 ```
@@ -25,15 +25,15 @@ The difficulty is inversely proportional to the square root of the witness's sta
 
 ```
 effective_difficulty = clamp(difficulty, MIN_DIFFICULTY, MAX_DIFFICULTY)
-where MIN_DIFFICULTY = BASE_DIFFICULTY / 100 (no one gets a free pass)
-      MAX_DIFFICULTY = BASE_DIFFICULTY × 10   (minimum stake is viable)
+where MIN_DIFFICULTY = BASE_DIFFICULTY / 10 (no one gets a free pass)
+      MAX_DIFFICULTY = BASE_DIFFICULTY × 10 (minimum stake is viable)
 ```
 
-A witness staking 1,000 beats solves a puzzle ~32x easier than a witness staking 1 beat, but the bounds ensure that very large stakers still perform meaningful computation and very small stakers are not excluded entirely. This creates a combined economic-computational barrier: attacking cheaply requires massive computation; attacking with minimal computation requires massive stake.
+With stake measured in base units (10⁹ per beat), the unclamped inverse-sqrt curve differentiates only sub-floor stakes: every witness at or above the 100-beat admission floor clamps to MIN_DIFFICULTY, so all admitted witnesses perform the same minimum work — the curve's differentiation is a property of the sub-floor band, not of the admitted set. The bounds ensure that very large stakers still perform meaningful computation and very small stakers are not excluded entirely. This creates a combined economic-computational barrier: attacking cheaply requires massive computation; attacking with minimal computation requires massive stake.
 
-Difficulty adjusts per-zone every epoch to maintain a target attestation rate (~10 attestations per second per zone). This prevents both under-utilization (too hard) and spam (too easy).
+Per-zone, per-epoch difficulty retargeting toward a target attestation rate is a design-stage extension — the shipped runtime uses the static clamp above, and difficulty does not currently adjust at runtime.
 
-An adversary creating a million Sybil nodes would need to acquire beats for each (economic barrier), solve puzzles for each attestation (computational barrier), and build reputation over time for each node (temporal barrier). The cost of attack scales linearly; the defense is multiplicative. Detailed Sybil cost analysis and diminishing returns per entity are specified separately.
+An adversary creating a million Sybil nodes would need to acquire beats for each (economic barrier), solve puzzles for each attestation (computational barrier), and build reputation over time for each node (temporal barrier). The cost of attack scales linearly; the defense is multiplicative.
 
 **Layer 2: Social Graph Analysis**
 

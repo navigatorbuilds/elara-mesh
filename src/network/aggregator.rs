@@ -1,8 +1,10 @@
-//! VRF-ranked aggregator chain for epoch seal proposal.
+//! Ranked aggregator chain for epoch seal proposal.
 //!
 //! Replaces the "anyone-with-VRF-can-propose" seal loop with a bounded,
 //! deterministic, stake-weighted rank chain. Per (zone, epoch), staked
-//! identities are ranked `0..MAX_VIEW_DEPTH` by VRF-sorted priority.
+//! identities are ranked `0..MAX_VIEW_DEPTH` by a stake-weighted hash
+//! priority over the chained beacon below. No VRF output enters the rank
+//! today, despite the `vrf_output` parameter name (see `chained_beacon`).
 //! Rank-0 proposes first; if rank-0 times out, rank-1 takes over; etc.
 //! After `MAX_VIEW_DEPTH` ranks time out, the zone escalates to cross-zone
 //! global quorum (Stage 3b — `session_2`).
@@ -12,22 +14,31 @@
 //! - **Bounded view depth, not `f+1`.** With `f ≈ 1000` per-zone at mainnet
 //!   scale, an `f+1`-deep chain is useless: timeouts approach zero and every
 //!   network jitter triggers a spurious view change. Instead we cap depth
-//!   at `MAX_VIEW_DEPTH = 7`. Under honest-majority (< 1/3 byzantine),
-//!   `Pr[7 consecutive malicious aggregators] = (1/3)^7 ≈ 0.05%`. The rare
-//!   case falls through to cross-zone escalation.
+//!   at `MAX_VIEW_DEPTH = 7`. Under honest-majority (< 1/3 byzantine) and
+//!   independent draws, `Pr[7 consecutive malicious aggregators] = (1/3)^7
+//!   ≈ 0.05%`. The rare case falls through to cross-zone escalation. The
+//!   draws are not independent of the previous sealer (next bullet but one),
+//!   and a byzantine third of stake can win far more than a third of the
+//!   draws by splitting across identities (next bullet).
 //!
-//! - **Stake-weighted VRF sampling.** A low-stake sybil farm must not dilute
-//!   rank-0 away from honest large stakeholders. Each identity's hash-score
-//!   is divided by `isqrt(stake)` (same √-dampening economics uses). Lower
-//!   score wins — honest majority stake statistically dominates rank-0.
+//! - **Stake-weighted sampling.** Each identity's hash-score is divided by
+//!   `isqrt(stake)` (same √-dampening economics uses); lower score wins.
+//!   The weight is sub-linear per identity, so it is NOT split-proof: stake
+//!   divided across k identities gains about √k in rank-0 share. Anchor
+//!   status is self-declared and each stake needs only `MIN_STAKE`, so
+//!   majority stake does not dominate rank-0 against a split holder. The
+//!   pinning test's own case: one identity with 99% of stake ties 100
+//!   identities sharing 1%. Tracked in `docs/KNOWN-LIMITATIONS.md`.
 //!
 //! - **Integer-only arithmetic.** All priority math is `u128` / `u64::isqrt`.
 //!   No `f64`: determinism must hold across x86/ARM/WASM validators.
 //!
 //! - **Chained beacon.** `vrf_output` is expected to be
-//!   `H(prev_epoch_seal_hash || epoch || zone)`. Chaining the beacon to the
-//!   previous seal hash prevents last-moment beacon grinding — a proposer
-//!   cannot bias its own rank by choosing the seed.
+//!   `H(prev_epoch_seal_hash || epoch || zone)`, which every node can compute,
+//!   so all nodes derive the same chain. This does NOT prevent grinding: the
+//!   previous sealer authors that seal, so it can search its free fields for a
+//!   hash that ranks it (or its allies) early next epoch. Tracked as R1-X1-F2;
+//!   see `chained_beacon` and `docs/KNOWN-LIMITATIONS.md`.
 //!
 //! Spec references:
 //!   @spec Protocol §11.13 (aggregator chain, bounded view depth)
@@ -39,9 +50,9 @@ use crate::ZoneId;
 /// Maximum aggregator ranks per epoch before cross-zone escalation.
 ///
 /// Chosen as 7: under honest-majority assumption (< 1/3 byzantine),
-/// `Pr[7 consecutive malicious] = (1/3)^7 ≈ 0.05%`. Log-bounded depth
-/// decouples finality latency from zone size — `O(log n)` finality
-/// holds regardless of how many nodes live in a zone.
+/// `Pr[7 consecutive malicious] = (1/3)^7 ≈ 0.05%` for independent draws
+/// (the chained beacon is steerable; see the module doc). A constant depth
+/// keeps the worst-case view-change count independent of zone size.
 pub const MAX_VIEW_DEPTH: usize = 7;
 
 /// Bootstrap carve-out boundary: with fewer than this many staked anchors ONLY
@@ -612,10 +623,11 @@ mod tests {
     }
 
     #[test]
-    fn stake_weighting_dominates_rank_zero() {
-        // Honest high-stake node vs many low-stake sybils.
-        // Under uniform weighting, rank-0 would be random across all.
-        // Under √-weighting, the high-stake node wins rank-0 disproportionately.
+    fn sqrt_weighting_whale_ties_split_farm() {
+        // Pins the √-weighting arithmetic, including its limitation: a 99%
+        // holder ties 100 identities sharing 1%, because splitting stake
+        // across k identities gains about √k (see the module doc). This is
+        // NOT a dominance guarantee.
         let mut staked = vec![("whale".to_string(), 1_000_000u64)];
         for i in 0..100 {
             staked.push((format!("sybil{:03}", i), 100));
@@ -844,11 +856,10 @@ mod tests {
     }
 
     #[test]
-    fn beacon_grinding_resistance() {
-        // An adversary controlling the current epoch's input bytes
-        // cannot pick a `prev_epoch_seal_hash` that makes them rank-0.
-        // Demonstrated by: changing only the prev hash reshuffles the chain
-        // so no single input consistently produces a fixed rank-0.
+    fn beacon_rank_depends_on_prev_seal_hash() {
+        // Pins that the rank chain depends on the previous seal hash:
+        // changing only that hash reshuffles rank-0. This is NOT grinding
+        // resistance: the previous sealer chooses that hash (R1-X1-F2).
         let staked = make_staked(&[
             ("n01", 100), ("n02", 100), ("n03", 100), ("n04", 100), ("n05", 100),
         ]);

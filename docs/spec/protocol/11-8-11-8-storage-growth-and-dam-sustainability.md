@@ -1,6 +1,6 @@
 ### 11.8 Storage Growth and DAM Sustainability
 
-**The problem:** "Nothing is ever deleted" combined with IoT-scale validation creates unbounded storage growth. A single factory with 10,000 sensors producing readings every second generates ~864 million records per day. At ~4.5 KB per validation record (dominated by the PQC signature), that is **~3.9 TB per day from one deployment.** At planetary scale, the DAM would grow by petabytes daily.
+**The problem:** "Nothing is ever deleted" combined with IoT-scale validation creates unbounded storage growth. A single factory with 10,000 sensors producing readings every second generates ~864 million records per day. At ~4.5 KB per validation record (dominated by the PQC signature), that is **~3.9 TB per day from one deployment.** (A measured record signed with ML-DSA-65 alone is about 6 KB (Section 11.32), which raises this figure to about 5 TB per day; the projections below are low by the same factor, about 1.3.) At planetary scale, the DAM would grow by petabytes daily.
 
 No single node can store this. The protocol must handle it.
 

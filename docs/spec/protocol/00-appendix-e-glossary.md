@@ -20,15 +20,15 @@
 | **Reincarnation detection**       | Behavioral fingerprinting that identifies likely identity resets from the same physical device                               |
 | **Organizational identity chain** | A hierarchy linking device fleet identities to an organizational root for accountability persistence                         |
 | **Hardware attestation level**    | Classification of identity binding strength: NONE, SOFTWARE, SECURE_BOOT, HARDWARE_KEY, or PUF                               |
-| **Cognitive Continuity Chain**    | A hash-chained sequence of dual-signed cognitive state snapshots that provides cryptographic proof of unbroken AI experience  |
+| **Cognitive Continuity Chain**    | A hash-chained sequence of dual-signed cognitive state snapshots, designed to make a gap or alteration in an AI's recorded state detectable (Section 11.35; a private prototype, not in the open-source runtime) |
 | **CognitiveDigest**               | A structured summary of a node's cognitive state (mood, memory counts, goals, allostatic load) captured in each checkpoint    |
 | **Module Tier**                   | A 4-level capability classification (VALIDATE/REMEMBER/THINK/CONNECT) that controls what cognitive features a node activates  |
 | **Cognitive Checkpoint**          | A ValidationRecord of type `cognitive_checkpoint` containing a CognitiveDigest, chained to previous checkpoints via DAG refs  |
 
 ---
 
-**Document Hash (SHA-256, v0.6.1):** *computed after final edit*
-**Hash verification:** To verify, replace the hash on the line above with the literal string `HASH_PLACEHOLDER` and compute SHA-256 of the file.
+**Provenance:** the whitepaper this specification is cut from is published as a PDF with an OpenTimestamps proof beside it in the public repository's `docs/whitepaper/`. The entries below record earlier whitepaper versions; the proof files they name are not part of this repository.
+
 **Previous Hash (v0.5.3):** *see ELARA-PROTOCOL-WHITEPAPER.v0.5.3.md.ots*
 **Previous Hash (v0.5.2):** *see ELARA-PROTOCOL-WHITEPAPER.v0.5.2.md.ots*
 **Previous Hash (v0.5.1):** *see ELARA-PROTOCOL-WHITEPAPER.v0.5.1.md.ots*
@@ -39,7 +39,7 @@
 **Previous Hash (v0.2.6):** `ec1c676b447c9082a4ecd3079f4b74057f64d7f41bdd282e77af31e84d667e26`
 **Previous Hash (v0.2.5):** `25dfbe17d91208ad28feb1263105b818a367680539a9d506ac6191d80c5b4c12`
 **Previous Hash (v0.2.3):** `b7220126fc907685ee946ea0226f49688a6fc3e585c1055811368d0c223a6336`
-**OpenTimestamps Proof:** `ELARA-PROTOCOL-WHITEPAPER.v0.6.1.md.ots`
+**OpenTimestamps Proof:** `ELARA-PROTOCOL-WHITEPAPER.pdf.ots` (published beside the PDF)
 **Genesis Document:** `ELARA-PROTOCOL-GENESIS.md` (2026-02-09, OpenTimestamps verified on Bitcoin blocks 935812, 935817, 935820, 935861)
 
 ---
@@ -52,5 +52,8 @@ hard-rejects legacy 3293-byte signatures), so the older name is lineage, never a
 Code identifiers (`dilithium3_*`, `DilithiumMode::Dilithium3`) and the `Dilithium3-VRF`
 construction name are frozen labels over FIPS 204 code.
 
-**SLH-DSA-SHA2-192f / "SPHINCS+":** the secondary (Profile A) signature scheme, FIPS 205;
-"SPHINCS+" is its pre-standardization name, same lineage rule as above.
+**SPHINCS+-SHA2-192f:** the secondary (Profile A) signature scheme. The shipped library
+implements the NIST round-3 SPHINCS+ with SHA-256 throughout, so it is **not** FIPS 205
+SLH-DSA-SHA2-192f and does not interoperate with it (`docs/PROTOCOL-SPEC.md` §2.3); moving to
+a FIPS 205 parameter set is planned. Its public key is not yet bound to the signer's identity.
+

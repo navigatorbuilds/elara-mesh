@@ -6,11 +6,11 @@
 
 The DAM maintains a Merkle tree over all validation records. A light client can verify any specific record with:
 
-1. The validation record itself (~4-5 KB)
+1. The validation record itself (~6 KB, or about 41 KB with the optional SPHINCS+ signature)
 2. A Merkle proof path (~log2(N) × 32 bytes — for a billion records, this is ~960 bytes)
 3. The Merkle root (32 bytes, published by anchor nodes)
 
-Total verification payload for a single record: **under 6 KB**, regardless of how large the DAM grows.
+Total verification payload for a single record: **about 7 KB** (about 42 KB with the SPHINCS+ signature), regardless of how large the DAM grows.
 
 **Trust headers:**
 

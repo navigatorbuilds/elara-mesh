@@ -4,12 +4,13 @@
 
 **Defense Layer 1: Traffic Obfuscation**
 
-The protocol supports tunneling ElaraPQ frames inside outer carriers so that deep-packet-inspection middleboxes cannot easily fingerprint Elara traffic. The ElaraPQ handshake and AEAD (§4.7) remain unchanged in every case; only the outer wrapper differs:
+The design allows for **pluggable transports** — the same concept used by Tor to operate in jurisdictions with restrictive internet policies. None is built into the current node; an operator can already carry node traffic through an external tunnel (WireGuard, SSH or Tor), since the transport is ordinary TCP:
 
-- **Tor pluggable transports:** Elara nodes can speak ElaraPQ inside a Tor obfs4 / Snowflake / meek tunnel, hiding the fact that the underlying traffic is Elara at all.
-- **WireGuard / Tailscale / SSH tunneling:** ElaraPQ inside a WireGuard datagram or SSH port-forward — useful in network environments where the outer protocol is allowlisted.
-- **Steganographic encoding:** Validation records embedded in innocent-looking traffic (images, video calls, DNS queries) for extreme cases. Per-message overhead is high; reserved for one-shot record exfiltration, not bulk gossip.
-- **Bridge relays:** Unlisted relay nodes operated by volunteers outside the censoring jurisdiction, accessible via out-of-band key exchange. The bridge speaks ElaraPQ inward and any allowlisted outer transport outward.
+- **Tunnels:** Elara traffic carried inside an allowlisted outer protocol (WireGuard, SSH, or a Tor pluggable transport such as obfs4 or Snowflake)
+- **Steganographic encoding:** Validation records embedded in innocent-looking traffic (images, video calls, DNS queries)
+- **Bridge relays:** Unlisted relay nodes operated by volunteers outside the censoring jurisdiction, accessible via out-of-band key exchange
+
+The techniques are proven at scale by the Tor Project and Signal; for Elara, steganographic encoding and bridge relays are designs, not implemented.
 
 The protocol explicitly does **not** support a "domain-fronting mode" that masquerades as classical HTTPS to a permitted CDN. Earlier drafts of this section listed domain fronting as a pluggable transport; that recommendation is retired by §4.7. Domain fronting requires a classical TLS outer layer, which leaks per-connection metadata (TLS ClientHello fingerprints, SNI when not encrypted via ECH) and breaks the post-quantum forward-secrecy goal of the transport. Operators who need DPI bypass in a censored environment should use the carriers above, not bake classical TLS into the protocol.
 
@@ -26,15 +27,15 @@ A government can slow the network. It cannot kill records that already exist on 
 
 **Defense Layer 3: Mesh Networking Fallback**
 
-In extreme censorship scenarios (internet shutdown), devices can form local mesh networks:
+In extreme censorship scenarios (internet shutdown), devices could form local mesh networks. These are design directions; Bluetooth and LoRa meshes are not implemented:
 
 - **Bluetooth mesh:** Phone-to-phone, ~100 meter range, chain across a city
 - **LoRa mesh:** 10+ km range, low bandwidth but sufficient for compact validation payloads (full PQC records require gateway relay)
-- **Sneakernet:** Physical transfer of DAM data via USB drives, SD cards — the protocol supports offline sync by design
+- **Sneakernet:** Physical transfer of DAM data via USB drives, SD cards. Records are self-contained signed objects that verify offline (`elara-verify`), and a node can export its records (`/admin/export`) for another to ingest (`POST /records`); a dedicated offline sync tool is not built yet
 
 Records validated during an internet blackout propagate when any node in the mesh eventually reaches the global network. The DAM is patient. It can wait.
 
 **Defense Layer 4: Geographic Distribution of Anchor Nodes**
 
-The protocol requires anchor nodes on at least 3 continents for the decentralization threshold (Section 11.4). Once that threshold is reached, no single government can compel all anchor nodes to comply — though the pre-launch network currently runs on a single-region development fleet and has not yet reached it. Even if a government seizes all domestic anchor nodes, the global DAM continues — and the domestic zone's records are already replicated internationally.
+The design places anchor nodes on at least three continents at network launch (roadmap, Phase 2), and Section 11.4 sets the decentralization threshold at 1,000 active witness nodes across at least 10 geographic regions; neither is enforced in code, and the pre-launch network, which runs on a single-region development fleet, has not reached either. Once they hold, no single government can compel all anchor nodes to comply. Even if a government seizes all domestic anchor nodes, the global DAM continues — and the domestic zone's records are already replicated internationally.
 

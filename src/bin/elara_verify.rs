@@ -7,7 +7,7 @@
 //! **Record mode** (`<record>`) verifies, in order:
 //!   1. **structure** — parses as a `ValidationRecord` (JSON, or wire with `--wire`)
 //!   2. **binding** — the creator public key hashes (SHA3-256) to the claimed identity
-//!   3. **signature** — Dilithium3 (ML-DSA-65), plus SPHINCS+ (SLH-DSA) for Profile A
+//!   3. **signature** — Dilithium3 (ML-DSA-65), plus SPHINCS+-SHA2-192f for Profile A
 //!   4. **content** — with `--content <file>`, SHA3-256 of your artifact == content hash
 //!
 //! **Anchor mode** (`--anchor <epoch-anchor.json>`) verifies the Bitcoin-anchored

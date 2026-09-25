@@ -1,5 +1,7 @@
 ### 5.2 Classification Levels
 
+*Phase 1 status: the levels below describe the design. In the current runtime every record, whatever its level, carries its plain content hash, and PRIVATE and RESTRICTED records add a SHA3-256 commitment that is checked only for form and is not bound to the record, so a classified record does not yet hide its content hash; SOVEREIGN is a label only (Section 5.3).*
+
 Every validation record carries a classification level that determines what the network can see:
 
 **PUBLIC** — Full content hash visible. Anyone can verify the exact content. Default for open-source code, published work, public sensor data.

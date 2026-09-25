@@ -2,7 +2,7 @@
 
 1. [Problem Statement](#1-problem-statement)
 2. [Related Work](#2-related-work)
-3. [Protocol Architecture](#3-protocol-architecture) — Layered design (Layer 1 / 1.5 / 2 / 3), DAM definition, node types, minimum viable validation
+3. [Protocol Architecture](#3-protocol-architecture) — Layered design (Layer 1 / 1.5 / 2 / 3), DAM definition, node types, minimum viable validation, genesis and network bootstrap
 4. [Post-Quantum Cryptography](#4-post-quantum-cryptography) — PQC primitives, dual signatures, algorithm agility, constrained device profiles
 5. [Zero-Knowledge Validation](#5-zero-knowledge-validation) — Classification levels, ZKP construction, selective disclosure
 6. [Identity and Attribution](#6-identity-and-attribution) — Self-sovereign identity, entity types, AI attribution, digital succession

@@ -1,7 +1,7 @@
 //! Peer liveness probes — three-in-one protocol.
 //!
 //! Each probe performs three functions in a single round trip:
-//! 1. **Liveness check** — peer responds → alive, no response → reputation penalty
+//! 1. **Liveness check** — peer responds → alive; no response → no reputation penalty (it may just be offline)
 //! 2. **Record exchange** — response includes a recent record the prober might not have
 //! 3. **Trust scoring** — successful probes generate positive reputation signals
 //!

@@ -1,9 +1,9 @@
 # Verifying Elara Release Artifacts
 
 Every binary in an Elara GitHub Release carries two independent proofs you can
-check before running anything (releases v0.2.0 and v0.2.1 are live on the
-Releases page with `SHA256SUMS` + SLSA attestations; building from source
-remains an option if you prefer). Neither proof requires trusting us — only the
+check before running anything (every release on the Releases page, v0.2.0
+through the latest, v0.3.0, ships `SHA256SUMS` + SLSA attestations; building
+from source remains an option if you prefer). Neither proof requires trusting us — only the
 math and publicly auditable infrastructure.
 
 ---
@@ -81,7 +81,7 @@ attestation above, not from hash-comparing your own build.)
 
 These release binaries are not signed with a long-lived maintainer key
 (GPG/minisign/cosign). The reason is architectural: Elara uses post-quantum
-signatures (Dilithium3 / ML-DSA-65 + SPHINCS+ / SLH-DSA) for all on-chain
+signatures (ML-DSA-65, FIPS 204, plus an optional pre-standard SPHINCS+ signature) for all on-chain
 record authentication. Signing release artifacts with Ed25519 (the classical
 choice for minisign/cosign) would be technically dishonest for a project whose
 explicit purpose is post-quantum verifiability.

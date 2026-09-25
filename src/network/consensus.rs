@@ -12096,7 +12096,7 @@ mod tests {
 
         // Subscribers = all candidates → pool size > COMMITTEE_SMALL_NETWORK
         // so v2's small-network short-circuit does NOT engage; it actually
-        // runs the Efraimidis–Spirakis draw.
+        // runs the stake-weighted priority draw.
         let subs: std::collections::HashSet<String> = staked_weighted
             .iter()
             .map(|(id, _)| id.clone())

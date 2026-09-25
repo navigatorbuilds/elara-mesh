@@ -72,11 +72,13 @@ An imported record is byte-for-byte indistinguishable, under signature
 verification, from a record native to the importing mesh.
 
 **F2 — MESH-BFT's safety theorem is stated over a single stake universe.**
-Theorem 1 (Diversity-Weighted Safety, `docs/whitepaper/MESH-BFT-PAPER.pdf`)
-fixes one DAM `M` with one identity set `I`, one total staked supply
-`S_total`, and one diversity function `d(·,·)`. The proof partitions `I` into
-honest `H` and Byzantine `B` *within that single universe* and concludes a
-conflicting pair `r, r'` cannot both reach `ES(r) ≥ ⅔·S_total`. Liveness
+Theorem 1 (Settlement Safety, `docs/whitepaper/MESH-BFT-PAPER.pdf`; titled
+Diversity-Weighted Safety before the 2026-09-25 edition) fixes one DAM `M`
+with one identity set `I`, one eligible-stake denominator `S_elig` shared by
+both conflicting records, and one diversity function `d(·,·)`. The proof
+partitions that stake into honest `H` and Byzantine `B` (below `S_elig/3`)
+*within that single universe* and concludes a conflicting pair `r, r'` cannot
+both settle. Liveness
 (Theorem 3, §5) likewise assumes "honest stake > ⅔ persists
 globally" and "no Byzantine correlation across zones." Nothing in either proof
 covers two independent realms with two different `S_total` values. Adopting a
@@ -246,7 +248,8 @@ These are the formal merge rules. They are deliberately restrictive: the only
 
 This section discharges gate **G3**: it hardens the prior sketch into a **stated
 reduction** with an explicit assumption list and a *split* safety/liveness
-conclusion, reviewed against Theorem 1 (Diversity-Weighted Safety) and
+conclusion, reviewed against Theorem 1 (then titled Diversity-Weighted Safety; Settlement
+Safety since the 2026-09-25 edition) and
 §5 (Theorem 3, Per-Record Causal Finality) of `docs/whitepaper/MESH-BFT-PAPER.pdf`. It is pen-and-paper, **not a
 machine-checked proof** (mechanization is post-flip residue, §8). The assumption
 list and the safety/liveness split are the product of an independent
@@ -306,7 +309,7 @@ Legend: **✓** architecture upholds it today · **⚠** design-first, rides a g
 | **A2** | **No foreign settlement parents** — no native record's signed `parents` names an element of `F`. | M1, enforced as an *ingest predicate* (foreign/unknown parent ids rejected, not silently tolerated). `parents` is in `signable_bytes`, so this must be an enforced check, not a convention. | ⚠ G1 |
 | **A3** | **No foreign state entries** — `F` enters no account SMT, `previous_seal_hash`, or settled `merkle_root`. | M2; the seal/SMT builder iterates settled *native* records only, and `F` lives under `bundle_merkle_root` *inside* `B`. | ✓ (once G1 types `B` as content-carrier) |
 | **A4** | **No exclusive disclosure key** (M4 integrity) — bundle insertion writes **no** native key two bundles can contend: no `source_realm_root` uniqueness registry, no per-publisher exclusive counter. Re-publication dedups by *content-equality*, never by exclusive slot. | A *prohibition* on the bundle schema. If violated, two bundles claiming the same exclusive key are conflicting records — Lemma 5.1(c) breaks and 2.1's conflict-set is no longer invariant. | ⚠ G1 (stated ban) |
-| **A5** | **Consensus-inert anchors** — consensus attests existence+publication of `B` only; `time_bracket` and `completeness_proof` are verifier-side. The drand not-before is **reference-only** (BLS unverified in-protocol); the Bitcoin/OTS existed-by is the trustless leg when its block header is pin-authenticated by the verifier (else reference). | M5; `ParsedEpochSeal` carries no bracket. In-protocol drand BLS verify is gate G2. | ✓ (reference-only honestly labelled) |
+| **A5** | **Consensus-inert anchors** — consensus attests existence+publication of `B` only; `time_bracket` and `completeness_proof` are verifier-side. The drand not-before is **reference-only** (BLS unverified in-protocol); the Bitcoin/OTS existed-by is the verified leg when its block header is pin-authenticated by the verifier (else reference); its bound is the block's header time, which the miner sets. | M5; `ParsedEpochSeal` carries no bracket. In-protocol drand BLS verify is gate G2. | ✓ (reference-only honestly labelled) |
 | **A6** | **Bounded ingestion** — bundle admission is rate/size-limited so `{B_i}` cannot exhaust a zone's per-epoch sealing budget (Theorem 3's *implicit* resource premise). | `assess_mega_publication` / `max_records_per_day` (`publish.rs`) — **retained but ADVISORY-ONLY today** (both call sites are tests). Must be wired as an enforcing admission gate. | ✗ new gate G6 |
 | **A7** | **Bounded `F`-storage** — each `F` payload counts against the disk-pressure budget so no mega-bundle drives `under_avail_pressure()` true and starves **native** ingest. (The shared `insert_record_inner` funnel rejects *all* ingest under avail-pressure — `insert_record_inner` in `src/network/ingest.rs`, gated on `under_avail_pressure` in `src/network/state.rs`.) Decide: `F` in-band (`⊆ B`, capped by `MAX_RECORD_BYTES = 64 KB`, so a large realm is *many* bundles — re-raising A6 at bundle granularity) vs out-of-band (content-addressed, needs its own bound the disk gate can see). | Open design decision + storage gate. | ✗ new gate G6 |
 | **A8** | **No replay-as-native** (the dangling premise) — no foreign-origin record settles **natively** outside a bundle. Enforced *today at the settlement layer*: a foreign creator not staked in `P` cannot reach `⅔·S_total`, so a replayed foreign record ingests as inert spam (an A6/A7 concern) but **never settles**. It FAILS only under **cross-realm key reuse** — an identity staked in `P` that also signs in a foreign realm — where the replayed record is a bona-fide native record that *can* settle, re-importing foreign history through the back door the killswitch blocks. `signable_bytes` carries no realm at v≤5 (`signable_bytes` in `crates/elara-record/src/record.rs`; see the F1 correction above for the shipped v6+ binding); the ingest funnel has no realm gate (verified). | **SPLIT (ruled 2026-09-06, D10-A8).** *Binding — SHIPPED and in force:* `CURRENT_SIGNING_VERSION = 7` (`crates/elara-record/src/wire.rs`) since the 2026-08-19 flag day, so every record this fleet emits signs `ELARA_RECORD_V1` + its `network_id`; A8 is discharged **in protocol** for all fresh traffic. *Ingest floor — OPEN:* `WIRE_VERSION_MIN = 4` still admits v4-v5, whose preimages carry no binding, so a cross-realm replay must present a **v4 or v5** record. The operational rule is load-bearing for exactly that window and nothing wider. Lever: raise `WIRE_VERSION_MIN` 4→6, preconditioned on `RocksStore::wire_version_histogram()` (`src/storage/rocks.rs`) proving no stored bytes below the new MIN (T63 Q5/A2 "proven by scan, never believed"; mind the RR4 count-drift trap documented beside it). | ◑ G5 binding SHIPPED / ingest floor ✗ (fork-sensitive — its own gated item) |
@@ -358,10 +361,10 @@ Three distinct claims, three distinct attestors:
 - `P`'s consensus attests: *this bundle existed and was published* (native
   finality of `B`).
 - The anchor braid attests: *the underlying records existed by `T2`* (Bitcoin/OTS
-  existed-by — trustless when the block header is pin-authenticated, offline) and *not before `T1`* (drand not-before —
+  existed-by — verified offline when the block header is pin-authenticated) and *not before `T1`* (drand not-before —
   **reference-only** until the in-protocol BLS verify of G2 ships; see A5.
-  Anchor trust model: existed-by is trustless only against a pin-authenticated
-  Bitcoin header; not-before inherits drand's beacon trust).
+  Anchor trust model: existed-by is verified only against a pin-authenticated
+  Bitcoin header, and it is the header time, which the miner sets; not-before inherits drand's beacon trust).
 - **Nobody** attests: *the imported records are true.* Publication ≠ endorsement
   (`docs/REALMS-SELF-ASSEMBLY.md`, the Attestation-semantics law).
 

@@ -437,16 +437,7 @@ fn run_rekey(rest: Vec<String>) -> std::result::Result<(), String> {
         .unwrap_or(0);
     let bak = path.with_extension(format!("bak-rekey-{ts}"));
     std::fs::copy(&path, &bak).map_err(|e| format!("backup failed: {e}"))?;
-    let tmp = path.with_extension("rekey-tmp");
-    let json = serde_json::to_string_pretty(&reenc).map_err(|e| format!("serialize: {e}"))?;
-    std::fs::write(&tmp, &json).map_err(|e| format!("write tmp failed: {e}"))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
-            .map_err(|e| format!("chmod tmp failed: {e}"))?;
-    }
-    std::fs::rename(&tmp, &path).map_err(|e| format!("atomic rename failed: {e}"))?;
+    write_identity_file(&path, &reenc).map_err(|e| format!("atomic write failed: {e}"))?;
 
     eprintln!("elara-keygen rekey: OK");
     eprintln!("  file:            {}", path.display());

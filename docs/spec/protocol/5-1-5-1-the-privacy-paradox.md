@@ -9,5 +9,5 @@ Validation and privacy are traditionally in tension. To prove you created someth
 - Corporate R&D
 - Personal journals or private communications
 
-The Elara Protocol specifies zero-knowledge proofs (ZKPs) as the target privacy layer: cryptographic constructions that prove a statement is true without revealing the underlying data. Phase 1 ships SHA3-256 hash commitments as a stand-in (not genuine zero-knowledge — see §5.3); the zk-SNARK constructions described below are design-stage.
+The Elara Protocol specifies zero-knowledge proofs (ZKPs) as the target privacy layer: cryptographic constructions that prove a statement is true without revealing the underlying data. Phase 1 ships SHA3-256 hash commitments as a stand-in (not genuine zero-knowledge — see §5.3), and they do not yet hide anything: each proof carries its opening, and every record carries its plain content hash. The zk-SNARK constructions described below are design-stage.
 

@@ -5,17 +5,24 @@
 //! anchors witness a specific zone at a specific epoch** — deterministic
 //! across nodes, stake-weighted, unpredictable ahead of the seed.
 //!
-//! The selection rule is Efraimidis–Spirakis weighted reservoir sampling
-//! with the uniform draw replaced by a SHA3-256 hash of `(domain || zone ||
-//! epoch || identity)`. Each candidate `i` gets a priority key
+//! Each candidate `i` gets a priority key from a SHA3-256 hash of
+//! `(domain || zone || epoch || identity)`:
 //!
 //! ```text
-//!   key_i = hash(i) / weight_i              (treated as rational)
+//!   key_i = floor(h_i / weight_i)    h_i = first 16 hash bytes, big-endian u128
 //! ```
 //!
-//! and the `k` candidates with the *smallest* key win. Rational
-//! comparison is done by cross-multiplication in u128 so the output is
-//! bit-for-bit identical on every CPU regardless of float behaviour.
+//! and the `k` candidates with the *smallest* key win, ties broken by
+//! identity hash. The arithmetic is integer division only, so the output
+//! is bit-for-bit identical on every CPU.
+//!
+//! This is NOT Efraimidis–Spirakis weighted sampling (whose key is
+//! `-ln(u) / w`), and selection is NOT proportional to stake: with two
+//! candidates at 2:1 stake the heavier one takes the first seat with
+//! probability 3/4, not 2/3, and stake held by one identity wins the
+//! first seat more often than the same stake split across many
+//! identities. Replacing the key is a consensus change and is queued
+//! (2026-09-25 self-audit, B17).
 //!
 //! ## Why per-zone committees matter at 1M-zone scale
 //!
@@ -25,8 +32,9 @@
 //! this to k signatures/seal (k ≈ 5-17). Safety is preserved by
 //! stake-weighting + per-epoch rotation:
 //!
-//! * Stake weighting means an adversary with ε of the stake gets ε of
-//!   the seats on average — they can't buy majorities cheaply.
+//! * Stake weighting means more stake wins more seats, though not in
+//!   proportion (see above): an adversary's seat share can exceed its
+//!   stake share, most of all when its stake sits in one identity.
 //! * Per-epoch rotation means the attacker doesn't know next epoch's
 //!   committee ahead of time, so they can't corrupt it in advance.
 //!
@@ -87,7 +95,8 @@ pub struct Candidate {
     /// refer to this node (e.g., `Identity::identity_hash`).
     pub identity_hash: String,
     /// Bonded stake in protocol-native units. Higher weight raises the
-    /// probability of selection linearly. Zero means ineligible.
+    /// probability of selection, but not in proportion (see the module
+    /// doc). Zero means ineligible.
     pub weight: u64,
 }
 
@@ -107,9 +116,9 @@ pub struct Candidate {
 ///   same committee. Callers don't need to pre-sort `eligible`; we
 ///   re-sort by the derived priority keys.
 /// * Stake monotonicity: if candidate A has higher weight than B, A's
-///   expected selection probability is higher. The exact distribution
-///   is the Efraimidis–Spirakis weighted-without-replacement draw,
-///   which is the standard construction with this property.
+///   expected selection probability is higher. The distribution is not
+///   the Efraimidis–Spirakis draw and is not proportional to stake (see
+///   the module doc).
 ///
 /// # Domain separation
 ///
@@ -130,9 +139,8 @@ pub fn select_zone_committee(
     // Build (key, identity) pairs, dropping zero-weight candidates.
     // Key is the 128-bit prefix of the SHA3 hash — enough entropy that
     // collisions are astronomically unlikely at any realistic
-    // eligible-population size, and small enough that cross-
-    // multiplication below fits in u128 × u64 ≤ u192 which we still
-    // safely compare via u128-constrained arithmetic.
+    // eligible-population size, and small enough to divide by a u64
+    // weight in u128 arithmetic below.
     let mut keyed: Vec<(u128, u64, &str)> = eligible
         .iter()
         .filter(|c| c.weight > 0)
@@ -155,20 +163,12 @@ pub fn select_zone_committee(
         return Vec::new();
     }
 
-    // Sort ascending by rank = key / weight (small = high priority).
-    // Cross-multiplication in u128 is exact: (key_i / w_i) < (key_j / w_j)
-    // iff key_i * w_j < key_j * w_i. `key * w` fits in u128 because key
-    // is 128 bits already; u128.checked_mul(u128::from(w)) overflows
-    // for key near 2^128 and w > 1. We therefore compare by the
-    // "small-argument" form — key_i < key_j / (w_j / w_i), handled via
-    // u256 math. Simpler: shift key down by 32 bits so key_trimmed *
-    // weight always fits in u128 (96 + 64 = 160 ... still not safe).
-    //
-    // Simpler-still approach that IS safe: map priority to a u64 via
-    // key / weight with a u128 numerator, since u128 / u64 → u128 but
-    // the quotient is bounded by u128::MAX / 1 = u128::MAX. That's
-    // fine for comparison — just sort by the u128 quotient. No
-    // overflow, exactly the rational we want, and deterministic.
+    // Sort ascending by rank = floor(key / weight) (small = high
+    // priority). A u128 divided by a u64 cannot overflow, but the
+    // division floors: it is not an exact comparison of the rationals
+    // key / weight, and two different ids can share a rank. The
+    // identity tiebreaker below keeps the order canonical, so every
+    // node computes the same committee.
     keyed.sort_by(|a, b| {
         let rank_a = a.0 / a.1 as u128;
         let rank_b = b.0 / b.1 as u128;
@@ -196,9 +196,10 @@ pub fn select_zone_committee(
 ///   `epoch` alone, which is predictable.
 /// * **Domain separation** (`ELARA_ZONE_COMMITTEE_V1`) — free defence
 ///   against cross-protocol hash collisions.
-/// * **Linear stake weighting** (`rank = key / weight`) — proper
-///   Efraimidis–Spirakis. Stake-proportional selection probability;
-///   matches MESH-BFT §5.
+/// * **Stake weighting** (`rank = floor(key / weight)`) — the same key
+///   as `select_zone_committee`: not Efraimidis–Spirakis and not
+///   proportional to stake (see the module doc; 2026-09-25 self-audit,
+///   B17).
 /// * **Sort-by-identity output** — downstream consumers
 ///   (`committee_hash_from_members`, attestation gating) depend on
 ///   lexical ordering. Preserved from the consensus-path output shape.
@@ -283,9 +284,10 @@ pub fn select_committee_v2(
         return out;
     }
 
-    // Linear-stake-weighted Efraimidis–Spirakis draw. Identical math
-    // to `select_zone_committee` but with `vrf_output` folded into
-    // the hash input instead of just `epoch`.
+    // Same `floor(key / weight)` priority draw as
+    // `select_zone_committee` (not Efraimidis–Spirakis; see the module
+    // doc), but with `vrf_output` folded into the hash input instead
+    // of just `epoch`.
     let mut keyed: Vec<(u128, u64, String)> = non_zero
         .into_iter()
         .map(|(id, w)| {
@@ -345,7 +347,7 @@ pub fn assemble_candidates(
 /// them. Used by Gap 2.1 Phase 2b.3 finality committees, where
 /// witness-tier nodes have a captured Dilithium PK but may not yet
 /// have bonded beat — a non-zero `fallback_weight` keeps them in the
-/// Efraimidis–Spirakis draw at the smallest possible weight, so
+/// priority draw at the smallest possible weight, so
 /// staked anchors still dominate selection but small fleets aren't
 /// stuck below `MIN_COMMITTEE_SIZE`. `fallback_weight = 0` reproduces
 /// the strict (mainnet-correct) behaviour.
@@ -755,7 +757,7 @@ pub async fn finality_committee_pks(
     // anchor ingests the same `(zone, epoch)` repeatedly across seal
     // creation, attestation verification, and xzone-abort retries —
     // every redundant call previously paid the full O(n log n)
-    // Efraimidis–Spirakis sort. The resolver collapses repeats to one
+    // priority-key sort. The resolver collapses repeats to one
     // O(n) fingerprint + O(1) hashmap lookup. Cache key includes the
     // candidates fingerprint so VRF/stake changes invalidate
     // automatically (no TTL needed).
@@ -788,7 +790,7 @@ pub async fn finality_committee_pks(
 ///
 /// Phase 6b (Gap 5): routes through the shared
 /// `state.zone_committee_resolver` cache so a dashboard polling many
-/// zones doesn't re-run the `O(n log n)` Efraimidis–Spirakis sort on
+/// zones doesn't re-run the `O(n log n)` priority-key sort on
 /// every request. Cache key includes a fingerprint of the candidates
 /// set, so VRF registrations / stake changes invalidate stale entries
 /// automatically.
@@ -2262,7 +2264,7 @@ mod tests {
     /// `finality_committee_pks` repeatedly for the same `(zone, epoch)`
     /// across seal-create, attestation-verify, and xzone-abort retry
     /// paths. Previously each call paid the full O(n log n)
-    /// Efraimidis–Spirakis sort. This test pins that repeat calls now
+    /// priority-key sort. This test pins that repeat calls now
     /// hit the shared `ZoneCommitteeResolver` cache — one miss, then
     /// hits.
     #[tokio::test]
@@ -3758,8 +3760,8 @@ mod tests {
     fn gap5_v2_higher_stake_higher_selection_probability() {
         // Statistical / Monte-Carlo: over many distinct VRF seeds,
         // a high-stake candidate must win seats *more often* than a
-        // low-stake candidate. Pins the linear-weight Efraimidis–
-        // Spirakis invariant.
+        // low-stake candidate. Pins stake monotonicity (the draw is
+        // not Efraimidis–Spirakis; see the module doc).
         let mut elig: Vec<(String, u64)> = (0..30)
             .map(|i| (format!("normal{i:02}"), 100u64))
             .collect();

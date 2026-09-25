@@ -6,17 +6,17 @@ The Elara Protocol is not an incremental improvement to existing systems. It asp
 
 This paper has presented:
 
-- A novel data structure — the **Directed Acyclic Mesh** — that extends distributed ledger technology beyond the single time-ordering axis of a blockchain to two structural axes — time-ordering within a zone and zone-partitioning across the mesh — with concurrency expressed through DAG parent edges and two orthogonal operational layers enabling classification-based projections and AI-powered cross-structure analysis.
+- A data structure — the **Directed Acyclic Mesh** — that composes published parts (hash-linked records, blockless DAG ledgers, adaptive state sharding, staked checkpoints, CRDT-style merge, transparency-log receipts, external time anchors; Section 2.11 of the whitepaper) into one partition-tolerant validation ledger, with two orthogonal operational layers enabling classification-based projections and AI-powered cross-structure analysis. The composition is the contribution; no part of it is claimed as new.
 
-- **Post-quantum cryptography from genesis** — not as a future migration, but as a founding decision. Dual-signature strategy, algorithm agility, and tiered cryptographic profiles that scale from a $4 microcontroller to a datacenter.
+- **Post-quantum cryptography from genesis** — not as a future migration, but as a founding decision. Dual-signature strategy (not yet effective against an ML-DSA break until the second key is bound; Section 4.3), algorithm agility, and tiered cryptographic profiles that scale from a $4 microcontroller to a datacenter.
 
-- **Zero-knowledge validation** — Phase 1 ships SHA3-256 hash commitments (not genuine ZK proofs; see §5.3), with a specified migration path through classical zk-SNARK constructions to fully quantum-safe ZKPs — addressing the tension between validation and privacy.
+- **Privacy-preserving validation (specified)** — a zero-knowledge layer with a defined migration path to fully quantum-safe ZKPs, addressing the tension between validation and privacy. Phase 1 attaches SHA3-256 commitments to classified records, but they are not yet bound to the record and every record still carries its content hash, so classified records do not yet hide it (Section 5.3 of the whitepaper).
 
-- **Adaptive Witness Consensus** — a continuous trust model targeting Byzantine fault tolerance at the 1/3 bound (specified in the companion paper; machine-checked formal verification pending — see §14.6), designed for networks where finality is impossible and partitions are expected.
+- **Adaptive Witness Consensus** — a continuous trust model with Byzantine fault tolerance at the one-third bound (proofs of safety and a liveness sketch in the companion paper; bounded model checks in TLA+), designed for networks where partitions are expected and global finality cannot be assumed.
 
-- **Interplanetary partition tolerance** — vector clocks, zone-scoped interval tree clocks, and bandwidth-optimized synchronization for communication delays measured in minutes to hours.
+- **Interplanetary partition tolerance (specified, not tested)** — vector clocks, zone-scoped interval tree clocks, and bandwidth-optimized synchronization for communication delays measured in minutes to hours.
 
-- **35 adversarial scenarios and design challenges analyzed and addressed** — from Sybil attacks, key compromise, and device identity recycling to nation-state censorship, storage economics, and the ethical implications of immutable validation. Each scenario includes a concrete defense mechanism, not a handwave.
+- **34 adversarial scenarios and design challenges analyzed and addressed** — from Sybil attacks, key compromise, and device identity recycling to nation-state censorship, storage economics, and the ethical implications of immutable validation. Each scenario names a concrete defense mechanism; where a defense is a design not yet built, its section says so.
 
 - A **free tier that is a moral commitment**, not a marketing feature. Layer 1 validation costs nothing, requires no network, and runs on any device. The protocol is useful to one person before anyone else joins.
 

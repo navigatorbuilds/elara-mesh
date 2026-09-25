@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Independent drand not-before (BLS) verification for the Elara conformance set.
 
-The trustless time bracket has two ends. ``verify_btc.py`` (leg 0d) reproduces the
+The independent time bracket has two ends. ``verify_btc.py`` (leg 0d) reproduces the
 **Bitcoin existed-by** upper bound in a second, non-Rust toolchain; this leg does
 the same for the **drand not-before** lower bound — the half that, until now, only
 the Rust ``elara-verify`` binary (legs 1-4 of ``verify.sh``, via the ``drand-verify``
@@ -17,17 +17,17 @@ What it checks (all against pins compiled INTO this script, never the bundle):
 
   1. CHAIN + PARAMS  the anchor's ``drand_chain_hash`` / genesis / period equal the
                      pinned League-of-Entropy **default** chain — so the round→time
-                     map is trustless, not read from the (operator-supplied) bundle.
+                     map is pinned, not read from the (operator-supplied) bundle.
   2. KEY PIN         the anchor's ``drand_public_key`` equals the pinned LoE group
                      key — an artifact that ships its own (key, signature) pair
-                     cannot pass; THIS is what makes the not-before trustless.
+                     cannot pass; THIS is what makes the not-before independent of the bundle's supplier.
   3. BLS VERIFY      ``py_ecc`` verifies the beacon signature over the chained-beacon
                      message ``SHA-256(previous_signature ‖ round_be_u64)`` against
                      the pinned key — the proof the round was really published.
   4. FAIL-CLOSED     a one-byte-tampered signature MUST verify False on every run —
                      the leg proves it is not fake-accepting, inline.
   5. RANDOMNESS      ``SHA-256(signature)`` equals the anchor's ``drand_randomness``.
-  6. NOT-BEFORE      ``genesis + (round-1)·period`` is the trustless lower bound.
+  6. NOT-BEFORE      ``genesis + (round-1)·period`` is the lower bound.
 
 Skips transparently (exit 3) when no BLS library is installed — exactly like the
 liboqs leg without ``oqs`` — leaving the Rust legs 1-4 as the reference; never a
@@ -52,9 +52,9 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 
-# Trustless pins — the League-of-Entropy default `pedersen-bls-chained` beacon, the
+# Pins — the League-of-Entropy default `pedersen-bls-chained` beacon, the
 # SAME constants the Rust elara-verify binary compiles in (src/bin/elara_verify.rs ::
-# LOE_DEFAULT_*). The not-before is trustless ONLY because the signature is verified
+# LOE_DEFAULT_*). The not-before is independent of the operator ONLY because the signature is verified
 # against THIS pinned key and the round→time map uses THESE pinned chain params —
 # never values read from the (operator-supplied) bundle. Public, auditable against
 # `curl https://api.drand.sh/info`.
@@ -67,8 +67,8 @@ LOE_PERIOD_SECS = 30
 
 # The existed-by ANCHOR artifact this leg checks (examples/verify demo, epoch
 # 41340, zone 0). Its drand_round is the pulse the anchor fetched FRESH at
-# stamping time, so this leg's not-before bounds the ANCHOR's minting (freshness
-# / not back-dated) — NOT the seal's existence, since the seal predates the
+# stamping time, so this leg's not-before bounds the ANCHOR's minting (freshness:
+# it was not pre-computed) — NOT the seal's existence, since the seal predates the
 # anchor it commits to (crown-F1). The seal's OWN not-before is its embedded
 # pulse, verified by the Rust --seal drand leg.
 ANCHOR_JSON = HERE / "epoch-41340-zone-0.json"
@@ -177,7 +177,7 @@ def main() -> int:
         print("\nMISMATCH — randomness is not SHA-256(signature). Never a fake green.")
         return 1
 
-    # 6. NOT-BEFORE — the trustless lower bound on the ANCHOR's minting (crown-F1:
+    # 6. NOT-BEFORE — the lower bound on the ANCHOR's minting (crown-F1:
     #    this is the anchor's fresh pulse, so it bounds the anchor, not the seal).
     nb = _not_before_unix(rnd)
     when = datetime.datetime.fromtimestamp(nb, datetime.timezone.utc)
@@ -188,9 +188,10 @@ def main() -> int:
     print("  whose randomness could not exist before its scheduled publication at")
     print("  {} UTC.".format(stamp))
     print("  ⇒ the ANCHOR (existed-by proof) that cites this round was minted NO EARLIER")
-    print("    THAN {} UTC — provably fresh, not back-dated. This bounds the anchoring,".format(stamp))
+    print("    THAN {} UTC, so it was not prepared in advance. This bounds the anchoring,".format(stamp))
     print("    NOT the seal, which predates it: the seal's OWN not-before is its embedded")
-    print("    pulse (Rust --seal drand leg). Trustless, against a beacon key this script pins.")
+    print("    pulse (Rust --seal drand leg). Checked against a beacon key this script pins;")
+    print("    it assumes fewer than drand's threshold of League-of-Entropy operators collude.")
     return 0
 
 

@@ -2570,7 +2570,7 @@ pub struct NodeState {
     /// Per-zone VRF committee resolver (Gap 5 Phase 6b).
     ///
     /// FIFO-bounded cache of `(zone, epoch, k, candidates_fingerprint)
-    /// → committee` for the stake-weighted Efraimidis–Spirakis draw.
+    /// → committee` for the stake-weighted priority draw.
     /// Today wires the advisory `/committees/is_member` and
     /// `/committees` snapshot endpoints through a shared cache so a
     /// dashboard polling many zones doesn't redo the `O(n log n)` sort

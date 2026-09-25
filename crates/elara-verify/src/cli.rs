@@ -7,23 +7,26 @@
 //! **Record mode** (`<record>`) verifies, in order:
 //!   1. **structure** — parses as a `ValidationRecord` (JSON, or wire with `--wire`)
 //!   2. **binding** — the creator public key hashes (SHA3-256) to the claimed identity
-//!   3. **signature** — Dilithium3 (ML-DSA-65), plus SPHINCS+ (SLH-DSA) for Profile A
+//!   3. **signature** — ML-DSA-65 (FIPS 204), plus SPHINCS+-SHA2-192f for Profile A
 //!   4. **content** — with `--content <file>`, SHA3-256 of your artifact == content hash
 //!
 //! **Anchor mode** (`--anchor <epoch-anchor.json>`) verifies the Bitcoin-anchored
-//! time bracket around the seal, both legs, fully offline (each leg is trustless
+//! time bracket around the seal, both legs, fully offline (each leg counts as verified
 //! only when it is cryptographically anchored — see below; otherwise a reference):
 //!   - **NOT-BEFORE** — the artifact references a drand round whose publication
 //!     time is fixed by the beacon's `genesis + period`, indicating the seal was
 //!     created no earlier (lower bound). When the artifact carries the beacon's
 //!     BLS signature it is verified against the PINNED League-of-Entropy key and
-//!     the bound is trustless; signature-less (legacy) artifacts stay a reference.
+//!     the bound is verified (assuming fewer than drand's threshold of League-of-Entropy
+//!     operators collude); signature-less (legacy) artifacts stay a reference.
 //!   - **EXISTED-BY** — the `.ots` proof is a SHA-256 path from the artifact's
 //!     hash into a Bitcoin block's merkle root; we walk it and confirm it lands
 //!     on the merkle root of a block header archived next to the artifact. That
 //!     header is the upper bound's trust root, so it must itself be authenticated:
 //!     when its double-SHA256 matches a block hash PINNED in this verifier the
-//!     bound is trustless; otherwise (no pin for that height) it is a REFERENCE
+//!     bound is verified (it is the header time, which the miner sets and which can
+//!     trail the real mining time, typically by at most about an hour); otherwise
+//!     (no pin for that height) it is a REFERENCE
 //!     bound whose strength rests on the operator-supplied header's authenticity —
 //!     this offline tool cannot validate an arbitrary Bitcoin header (no PoW chain
 //!     to a checkpoint), so it says so rather than implying a bound it cannot show.
@@ -1033,7 +1036,7 @@ pub fn emit_json(
             "not_before_utc": a.not_before_unix.map(|t| format_utc(t as f64)),
             "not_before_trustless": a.not_before_trustless,
             "not_before_note": if a.not_before_trustless {
-                "trustless freshness bound for the ANCHOR: the beacon's BLS signature verified against the pinned League-of-Entropy key — the existed-by proof was minted at/after this drand round (provably not back-dated). This is NOT a lower bound on the seal, which predates the anchor; the seal's own not-before comes from its embedded pulse (verify the seal wire)"
+                "verified freshness bound for the ANCHOR: the beacon's BLS signature verified against the pinned League-of-Entropy key (this assumes fewer than drand's threshold of operators collude) — the existed-by proof was minted at/after this drand round, so it was not prepared in advance. This is NOT a lower bound on the seal, which predates the anchor; the seal's own not-before comes from its embedded pulse (verify the seal wire)"
             } else {
                 "reference freshness bound: round->time only; the beacon BLS signature was not verified (legacy/signature-less artifact or unknown chain) — and in any case bounds the anchor's minting, not the seal's existence"
             },
@@ -1043,7 +1046,7 @@ pub fn emit_json(
             "existed_by_utc": a.existed_by_unix.map(|t| format_utc(t as f64)),
             "existed_by_btc_block": a.existed_by_height,
             "existed_by_note": if a.existed_by_trustless {
-                "trustless upper bound: the OTS proof commits into the named Bitcoin block, and the archived header is authenticated against a block hash pinned in the verifier"
+                "pin-authenticated upper bound: the OTS proof commits into the named Bitcoin block, and the archived header is authenticated against a block hash pinned in the verifier. The bound is the block's header time, which the miner sets and which can trail the real mining time, typically by at most about an hour"
             } else if a.existed_by_unix.is_some() {
                 "reference upper bound: the OTS proof commits into the named Bitcoin block and the archived header is internally consistent, but the header is NOT pin-authenticated — its strength rests on the (operator-supplied) header's authenticity, which you must establish independently (e.g. check the block on any Bitcoin explorer)"
             } else if a.has_ots_sidecar {
@@ -1184,8 +1187,8 @@ pub fn emit_prose(
         // crown-F1 — attribute each bound to what it actually proves. `nb` is the
         // ANCHOR's drand pulse, fetched fresh at stamping time
         // (`scripts/elara-epoch-anchor.sh` pulls `/public/latest`), so it bounds
-        // when the seal was ANCHORED — the existed-by proof is provably fresh
-        // (not back-dated) — NOT the seal's own existence floor, since the seal
+        // when the seal was ANCHORED — the existed-by proof is fresh (it could
+        // not have been pre-computed) — NOT the seal's own existence floor, since the seal
         // predates the anchor it commits to. Only `eb` (Bitcoin) bounds the SEAL,
         // from above. The seal's OWN not-before is an EARLIER bound proven from
         // the seal's embedded pulse (the --seal drand leg), which this anchor
@@ -1196,38 +1199,44 @@ pub fn emit_prose(
         let eb = a.existed_by_unix.map(|t| format_utc(t as f64));
         let seal_noun = if chain_bound { "record's seal" } else { "seal" };
         let nb_kind = if a.not_before_trustless {
-            "BLS-verified — trustless"
+            "BLS-verified"
         } else {
             "reference"
         };
         match (nb, eb) {
             (Some(nb), Some(eb)) => {
                 println!("         TIME BRACKET (seal {}…):", &short(&a.seal_hash));
-                println!("           the {seal_noun} was NOTARIZED into Bitcoin within a trustless window:");
+                println!("           the {seal_noun} was NOTARIZED into Bitcoin within this window:");
                 println!(
-                    "             after  {nb} UTC  — drand round ({nb_kind}): the anchor is provably fresh, minted after this pulse"
+                    "             after  {nb} UTC  — drand round ({nb_kind}): the anchor was minted after this pulse"
                 );
                 println!(
                     "             by     {eb} UTC  — Bitcoin block {} (archived header — {}): the anchoring was mined by here",
                     a.existed_by_height.unwrap_or(0),
                     if a.existed_by_trustless {
-                        "pin-authenticated, trustless"
+                        "pin-authenticated"
                     } else {
                         "reference — not pin-authenticated"
                     },
                 );
-                println!("           ⇒ the {seal_noun} provably existed BY the upper bound. Its OWN (earlier) not-before is proven from the seal's embedded pulse — verify the seal wire.");
+                println!("           ⇒ the {seal_noun} existed BY the upper bound, within Bitcoin's header-time tolerance. Its OWN (earlier) not-before is proven from the seal's embedded pulse — verify the seal wire.");
+                println!("           Trust: the drand bound assumes fewer than drand's threshold of operators collude; a Bitcoin header time is set by the miner and can trail the real mining time, typically by at most about an hour.");
             }
             (Some(nb), None) => {
                 println!("         TIME BRACKET (seal {}…):", &short(&a.seal_hash));
                 println!(
-                    "           this existed-by anchor was minted after {nb} UTC ({}, {}) — provably fresh, not back-dated.",
+                    "           this existed-by anchor was minted after {nb} UTC ({}, {}) — {}",
                     if a.not_before_trustless {
-                        "drand BLS-verified — trustless"
+                        "drand BLS-verified"
                     } else {
                         "drand reference — BLS not verified"
                     },
                     a.beacon_label,
+                    if a.not_before_trustless {
+                        "so it was not prepared in advance, unless drand's threshold of operators colludes."
+                    } else {
+                        "a reference bound only: without the BLS check, freshness is not proven."
+                    },
                 );
                 if a.has_ots_sidecar {
                     println!(
@@ -1248,7 +1257,7 @@ pub fn emit_prose(
         }
     } else if record.is_some() {
         println!(
-            "         Trustless time bracketing requires an --anchor proof — not given here."
+            "         An independent time bracket requires an --anchor proof — not given here."
         );
     }
     if let Some(acct) = account {
@@ -1274,15 +1283,15 @@ pub fn emit_prose(
         // the bound is UNPROVEN, and saying otherwise is the overstatement forbidden.
         if account_chain_time_bracketed(checks, anchor.as_ref()) {
             println!(
-                "         This sealed account-state is committed in the seal above, which carries a trustless Bitcoin existed-by bound — so it provably existed by that time."
+                "         This sealed account-state is committed in the seal above, which carries a pin-authenticated Bitcoin existed-by bound — so it existed by that time, within Bitcoin's header-time tolerance."
             );
         } else if chain_is_account_bound(checks) {
             println!(
-                "         Committed in the anchor-named seal above, but that seal's trustless Bitcoin existed-by bound is UNPROVEN here (see the ⚠ checks) — the binding holds, the time bound does not."
+                "         Committed in the anchor-named seal above, but that seal's pin-authenticated Bitcoin existed-by bound is UNPROVEN here (see the ⚠ checks) — the binding holds, the time bound does not."
             );
         } else if root_bound {
             println!(
-                "         Bound to a sealed account-SMT root you trust; add --seal + --anchor (with a proven Bitcoin existed-by) to place it in a trustless time bound."
+                "         Bound to a sealed account-SMT root you trust; add --seal + --anchor (with a proven Bitcoin existed-by) to place it in an independent time bound."
             );
         } else {
             println!(
@@ -1306,15 +1315,15 @@ pub fn emit_prose(
         });
         if account_absence_time_bracketed(checks, anchor.as_ref()) {
             println!(
-                "         That root belongs to the seal above, which carries a trustless Bitcoin existed-by bound — so the absence provably held by that time."
+                "         That root belongs to the seal above, which carries a pin-authenticated Bitcoin existed-by bound — so the absence held by that time, within Bitcoin's header-time tolerance."
             );
         } else if chain_is_account_absence_bound(checks) {
             println!(
-                "         The root belongs to the anchor-named seal above, but that seal's trustless Bitcoin existed-by bound is UNPROVEN here (see the ⚠ checks) — the absence binds to the seal, not to a proven time."
+                "         The root belongs to the anchor-named seal above, but that seal's pin-authenticated Bitcoin existed-by bound is UNPROVEN here (see the ⚠ checks) — the absence binds to the seal, not to a proven time."
             );
         } else if root_bound {
             println!(
-                "         Bound to a sealed account-SMT root you trust; add --seal + --anchor (with a proven Bitcoin existed-by) to place the absence in a trustless time bound."
+                "         Bound to a sealed account-SMT root you trust; add --seal + --anchor (with a proven Bitcoin existed-by) to place the absence in an independent time bound."
             );
         } else {
             println!(

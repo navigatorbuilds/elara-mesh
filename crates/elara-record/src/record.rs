@@ -178,7 +178,7 @@ pub struct ValidationRecord {
     #[serde(default = "default_sig_algorithm")]
     pub sig_algorithm: u8,
     /// Algorithm ID for secondary signature, if present.
-    /// 0x02 = SLH-DSA-SHA2-192f (SPHINCS+). None for Profile B.
+    /// 0x02 = SPHINCS+-SHA2-192f (not FIPS 205). None for Profile B.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sphincs_algorithm: Option<u8>,
     /// Explicit zone assignment (wire format v3+).

@@ -1261,7 +1261,10 @@ pub async fn rpc_stamp(
     record.nonce = state.next_slot_nonce();
 
     // Auto-generate ZK proof for Private/Restricted stamps (Protocol §5.3).
-    // Content hash serves as the commitment — proves knowledge of content.
+    // Content hash serves as the commitment. Caveat (2026-09-25 self-audit):
+    // the blinding is SHA3(content_hash || identity_hash), derivable from
+    // public values, so the commitment hides nothing; the same holds for
+    // /rpc/stamp-private below (docs/KNOWN-LIMITATIONS.md §31).
     if matches!(classification, crate::record::Classification::Private | crate::record::Classification::Restricted) {
         let content_arr: [u8; 32] = content_bytes.clone().try_into().unwrap_or([0u8; 32]);
         let blinding = crate::crypto::hash::sha3_256(

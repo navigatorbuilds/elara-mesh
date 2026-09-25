@@ -50,7 +50,7 @@ The user's validated work history is accessible from any device by querying the 
 Reference implementations abstract this complexity:
 
 - First launch: "Create your Elara identity" (generates root key + first device key)
-- "Back up your recovery phrase" (12-word mnemonic encoding the root key, BIP-39 [25] compatible)
+- "Back up your recovery phrase" (design only, not built: a mnemonic encoding the root key, BIP-39 [25] compatible; at least 18 words, since 12 words carry only 128 bits)
 - Adding a device: scan QR code on existing device → DeviceAuthorization created automatically
 - Losing a device: "Remove device" from any other enrolled device
 

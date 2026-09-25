@@ -313,7 +313,12 @@ impl ZoneManager {
     /// 1. Minimum 100 beat staked
     /// 2. PoW identity with min 20-bit difficulty
     /// 3. 48-hour identity age
-    /// 4. ≤33% of zone stake from same entity/subnet
+    /// 4. ≤33% of zone stake from one organization (`WitnessInfo::organization`)
+    ///
+    /// No production path calls this yet (tests only), so these checks are not
+    /// enforced through it. Live push-path admission is a separate check in
+    /// `routes/sync.rs` and `pq_transport/router.rs`, and the 33% cap is
+    /// enforced nowhere (2026-09-25 self-audit).
     pub fn can_witness(&self, zone: &ZoneId, info: &WitnessInfo) -> AdmissionResult {
         // Check stake
         if info.stake < MIN_WITNESS_STAKE {

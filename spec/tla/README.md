@@ -29,10 +29,10 @@ cross-zone core, proving a sealed transfer is never stuck in-flight forever.
 | **SupplyInvariant** *(Phase D)* | beat **conservation**: the four-bucket supply sum `Σbal + in-flight + staked + pool` — the *exact* equation enforced in `apply_op` (`src/accounting/ledger.rs`) — is invariant. The **normal** lifecycle (lock/seal/claim, sealed-abort, unsealed-refund, stake/mint/burn) conserves on every reachable path. Crucially, Phase D also proves the two known **partition tails** are genuine supply-inflation breaks *without* their fixes — with **zero Byzantine nodes**: `MCConsRevertBreak` inflates supply by `Amt` when `XZoneRevert` is absent (it is design-only / unimplemented today); `MCConsReapBreak` inflates by `Amt` when the 30-day reap/claim exclusion is defeated by a >30-day partition. These are *guard-necessity* proofs, not threshold-tightness; Phase D does **not** claim the live protocol conserves under partition. | §4.4 |
 | **LiveFast** *(Phase E)* | Cross-zone **liveness**, fast path — the temporal DUAL of `NoAbortAndClaim`. With a live ≥2/3-honest zone-B committee AND partial synchrony (after GST), a sealed transfer eventually reaches a terminal state via the committee (Claimed or Aborted). This is the liveness dual of the Phase C bound: safety needs `f < 1/3` so Byzantine cannot forge TWO quorums; liveness needs `f < 1/3` so the honest remainder CAN form ONE. Convergence is *earned* (per-witness views resolved by weak-fair gossip-delivery actions after GST), not assumed by a global oracle. | §4.6 |
 | **LiveBackstop** *(Phase E)* | Cross-zone **liveness**, unconditional. A sealed transfer eventually reaches a terminal state in **every** scenario — even with no GST and even at `f = 2` — because the quorum-FREE 30-day stale-reap (`REAP_HORIZON_SECS`) refunds the lock. The code is explicit that without a quorum a sealed transfer "stays Locked indefinitely" (`try_sign_xzone_abort` in `src/network/epoch.rs`, `REAP_HORIZON_SECS` in `src/accounting/cross_zone.rs`), so the real *never-stuck-forever* guarantee is the reaper — it bounds the stuck window at ~30 days, NOT the abort quorum. This is the discriminating result: Byzantine/asynchrony can deny the fast path but cannot deny eventual reap. | §4.6 |
-| **LiveLocal** *(Phase E.2)* | In-zone **liveness**, committee path. A zone eventually PRODUCES its epoch seal when some honest proposer is eligible in the VRF rank ladder AND honest attesting stake reaches 2/3 under local GST. Covers both the rank-0 fast sub-case (`MCInZoneLiveSafe`) and the *ladder* sub-case (`MCInZoneLiveLadder`: rank-0 Byzantine, a later honest rank unlocks by elapsed and still seals). This is the precondition Phase E folds into its `Sealed == TRUE`. Broken by no-GST, all-Byzantine-proposers, or honest attesting stake < 2/3. | §4.5 |
+| **LiveLocal** *(Phase E.2)* | In-zone **liveness**, committee path. A zone eventually PRODUCES its epoch seal when some honest proposer is eligible in the hash rank ladder AND honest attesting stake reaches 2/3 under local GST. Covers both the rank-0 fast sub-case (`MCInZoneLiveSafe`) and the *ladder* sub-case (`MCInZoneLiveLadder`: rank-0 Byzantine, a later honest rank unlocks by elapsed and still seals). This is the precondition Phase E folds into its `Sealed == TRUE`. Broken by no-GST, all-Byzantine-proposers, or honest attesting stake < 2/3. | §4.5 |
 | **LiveWithEscalation** *(Phase E.2)* | In-zone **liveness** with the cross-zone escalation backstop. Even with **all** local proposers Byzantine, the zone still seals IF global GST holds and a 2/3-honest cross-zone quorum exists — modelled as an **explicit external committee**, not a `globalQuorumHealthy` flag (which would make it a vacuous two-state tautology). The headline asymmetry vs Phase E: there is **NO quorum-free in-zone floor** — an epoch seal *is itself* a 2/3 certificate, so global asynchrony (`MCInZoneLiveNoEscGST`) or global `f ≥ 1/3` (`MCInZoneLiveEscByz`) leaves the zone stuck, and the `staked < 3` freeze trap (`MCInZoneLiveBootstrap`) has no safety net at all. | §4.5 |
 | **RecurSealed** *(Phase E.3)* | Cross-epoch **liveness**: the chain seals *forever* (`[]<>sealed`), not just once. Phase E.2 bounds the worst *single* epoch; this proves the worst case cannot **recur** indefinitely. Holds whenever every epoch seals by some path (local when the beacon makes the committee viable, escalation otherwise). Violated only when a pinned worst-case recurs with **no** escalation floor (`MCRecurGrindStall`) — the cross-epoch restatement of the no-quorum-free-floor asymmetry. | §4.5 |
-| **RecurLocalSealed** *(Phase E.3)* | Cross-epoch **liveness**, fast path: the local committee path *recurs* (`[]<>(sealed ∧ ¬escalated)`). The headline contribution — it machine-checks that the **chained VRF beacon** (`chained_beacon`, `aggregator.rs`) re-randomizing proposer ranks each epoch is what keeps the protocol on its fast path. Holds under a re-randomizing beacon (`MCRecurSafe`, `MCRecurLadder`); **violated under a grindable / adversary-pinned beacon** (`MCRecurGrind`: the chain still seals, but only via escalation forever — a permanent liveness degradation). | §4.5 |
+| **RecurLocalSealed** *(Phase E.3)* | Cross-epoch **liveness**, fast path: the local committee path *recurs* (`[]<>(sealed ∧ ¬escalated)`). The headline contribution — it machine-checks that a beacon re-randomizing proposer ranks each epoch is what keeps the protocol on its fast path. The shipped `chained_beacon` (`aggregator.rs`) meets that assumption only while the previous sealer is honest (see *Phase E.3*). Holds under a re-randomizing beacon (`MCRecurSafe`, `MCRecurLadder`); **violated under a grindable / adversary-pinned beacon** (`MCRecurGrind`: the chain still seals, but only via escalation forever — a permanent liveness degradation). | §4.5 |
 
 `DiversitySoundness` is the load-bearing one: it is the property unique to
 Elara's correlation-discounted aggregation, and once it holds the classical BFT
@@ -179,7 +179,7 @@ Phase E assumes a sealed transfer; Phase E.2 (`Liveness.tla`) proves a zone
 eventually *produces* that seal. The in-zone mechanism is a **hybrid**, modelled
 faithfully (NOT the textbook leader/view-change the code does not have):
 
-1. **VRF rank ladder** (`proposer_rank`, `aggregator.rs`) — a per-(zone,epoch) order
+1. **Hash rank ladder** (`proposer_rank`, `aggregator.rs`) — a per-(zone,epoch) order
    where rank-k becomes eligible only after `elapsed ≥ (2^k − 1)·base` (collapsed
    to a monotone unit ladder `phase`, since only the *order* matters for
    liveness). `LiveLocal` holds in both the rank-0 fast case and the *ladder*
@@ -205,10 +205,11 @@ is therefore global GST + global `f < 1/3` (the escalation path); both
 **freeze trap** (`MCInZoneLiveBootstrap`) is a liveness counterexample with no
 safety net at all — the formal statement of the operational rule "never sit at 2
 stakers; re-genesis 1 → 3 atomically." Cross-epoch chain progress (`[]<>sealed`)
-rests on the chained VRF beacon re-randomizing ranks each epoch (anti-grinding) —
-machine-checked in **Phase E.3** below.
+rests on the beacon re-randomizing ranks each epoch — machine-checked in
+**Phase E.3** below, which also states where the shipped beacon falls short of
+that assumption.
 
-### Phase E.3 — cross-epoch seal recurrence: the chained VRF beacon
+### Phase E.3 — cross-epoch seal recurrence: the chained beacon
 
 Phase E.2 proves a *single* epoch eventually seals; a single epoch can be
 adversarially stuck (all low ranks Byzantine) and need escalation.
@@ -216,18 +217,22 @@ adversarially stuck (all low ranks Byzantine) and need escalation.
 the chain seals **forever** (`RecurSealed == []<>sealed`) and stays on its
 **fast local path forever** (`RecurLocalSealed == []<>(sealed ∧ ¬escalated)`).
 
-The mechanism under test is the **chained VRF beacon**
-`chained_beacon(prev_seal_hash, epoch, zone)` (`aggregator.rs`): proposer
-ranks are re-derived every epoch off the *previous* seal hash, which is not
-known until that epoch seals and is honest-influenced — so an adversary cannot
-predict or steer which identities land in eligible ranks next epoch, and so
-cannot grind or *sustain* a worst-case rank assignment. The model folds the
+The mechanism under test is the **chained beacon**
+`chained_beacon(prev_seal_hash, epoch, zone)` (`aggregator.rs`, a SHA3-256 hash,
+not a VRF): proposer ranks are re-derived every epoch off the *previous* seal
+hash, which is not known until that epoch seals. **The model assumes the beacon
+is not steerable, and the shipped beacon meets that only while the previous
+sealer is honest:** a sealer chooses fields of its own seal, so a Byzantine
+sealer can search them to influence the next epoch's rank order. Earlier
+versions of this README said an adversary cannot steer the beacon; that was
+wrong. An unsteerable beacon is planned; until then, escalation bounds the
+delay a Byzantine sealer can cause but does not stop it. The model folds the
 only liveness-relevant per-epoch fact — is the local committee path viable this
 epoch? (Phase E.2's proven `LiveLocal` precondition) — into one bit
 `LocalViable == epoch ∈ ViableEpochs`, with `epoch` a counter that **wraps mod
 `BeaconPeriod`**. `ViableEpochs` is therefore the beacon's coverage pattern over
-one rotation, and it is a **constant the adversary does not choose** (it is the
-hash output, not an adversary move). A deterministic wrapping counter is the
+one rotation, and it is a **constant the adversary does not choose** (the
+modelling assumption stated above). A deterministic wrapping counter is the
 canonical adversary-*independent* witness of "coverage that recurs"; modelling
 the choice as a fair non-deterministic action would be **wrong** — TLA+ weak
 fairness does not force a fair resolution of a non-deterministic existential, so
@@ -343,7 +348,7 @@ vote" is **exact**, not an abstraction (unlike the in-zone diversity math).
 - **In-zone epoch-seal liveness Phase E.2 — NOW MODELLED** (`Liveness.tla`,
   2026-06-28). The complementary in-zone liveness — that a zone's consensus
   eventually *produces* the seal Phase E folds into `Sealed == TRUE` — is
-  machine-checked via the actual hybrid mechanism (VRF rank ladder + leaderless
+  machine-checked via the actual hybrid mechanism (hash rank ladder + leaderless
   2/3 attestation + cross-zone escalation; the code has NO leader/view-change).
   Two sub-parts remain documented abstractions, not yet modelled: **(a) pre-GST
   multi-candidate attestation splitting** — competing per-rank seal candidates
@@ -353,10 +358,11 @@ vote" is **exact**, not an abstraction (unlike the in-zone diversity math).
   `claimGossiped` branch) — this sub-part remains a documented abstraction.
 - **Cross-epoch seal recurrence Phase E.3 — NOW MODELLED**
   (`LivenessRecurrence.tla`, 2026-06-29). `Liveness.tla` checks ONE epoch's
-  seal; chain progress across epochs (`[]<>sealed`) rests on the chained VRF
+  seal; chain progress across epochs (`[]<>sealed`) rests on the chained
   beacon (`chained_beacon(prev_seal_hash, …)`, `aggregator.rs`)
   re-randomizing proposer ranks every epoch so an adversary cannot *sustain* a
-  worst-case rank assignment. Phase E.3 machine-checks exactly that: under a
+  worst-case rank assignment — an assumption the shipped beacon meets only
+  while the previous sealer is honest. Phase E.3 machine-checks exactly that: under a
   re-randomizing beacon the fast local path **recurs** (`RecurLocalSealed`),
   and the grindable-beacon twin **violates** it (the chain degrades to
   escalation-only forever) — proving the beacon is load-bearing. See *Phase
@@ -397,7 +403,7 @@ PASS  MCXZoneLiveNoGST_Fast     (expected violation of LiveFast reproduced - GST
 PASS  MCXZoneLiveNoGST_Back     (LiveBackstop holds, 32 distinct states found)
 PASS  MCXZoneLiveByzStall_Fast  (expected violation of LiveFast reproduced - honest >= 2/3 is necessary for the fast path)
 PASS  MCXZoneLiveByzStall_Back  (LiveBackstop holds, 72 distinct states found)
---- Phase E.2: IN-ZONE epoch-seal liveness (VRF rank ladder + cross-zone escalation; NO quorum-free floor) ---
+--- Phase E.2: IN-ZONE epoch-seal liveness (hash rank ladder + cross-zone escalation; NO quorum-free floor) ---
 PASS  MCInZoneLiveSafe_Local      (LiveLocal holds, 96 distinct states found)
 PASS  MCInZoneLiveSafe_Esc        (LiveWithEscalation holds, 143 distinct states found)
 PASS  MCInZoneLiveLadder_Local    (LiveLocal holds, 76 distinct states found)
@@ -411,7 +417,7 @@ PASS  MCInZoneLiveByzWit_Esc      (LiveWithEscalation holds, 84 distinct states 
 PASS  MCInZoneLiveNoEscGST_Esc    (expected violation of LiveWithEscalation reproduced - no quorum-free floor: global GST is necessary)
 PASS  MCInZoneLiveEscByz_Esc      (expected violation of LiveWithEscalation reproduced - escalation needs a 2/3 cross-zone quorum)
 PASS  MCInZoneLiveBootstrap_Esc   (expected violation of LiveWithEscalation reproduced - staked<3 freeze trap has no safety net)
---- Phase E.3: CROSS-EPOCH seal recurrence ([]<>sealed) — the chained VRF beacon re-randomizes ranks ---
+--- Phase E.3: CROSS-EPOCH seal recurrence ([]<>sealed) — the chained beacon re-randomizes ranks ---
 PASS  MCRecurSafe_Any        (RecurSealed holds, 18 distinct states found)
 PASS  MCRecurSafe_Local      (RecurLocalSealed holds, 18 distinct states found)
 PASS  MCRecurLadder_Any      (RecurSealed holds, 16 distinct states found)
@@ -443,7 +449,7 @@ ALL MODELS BEHAVED AS EXPECTED
 - `MCXZoneLiveByzStall.tla` — liveness Byzantine-stall scenario (`f = 2`, Byzantine removed)
 - `MCXZoneLive*_Fast.cfg` — `LiveFast` per scenario (reap off): safe holds; no-GST / Byz-stall expected violations
 - `MCXZoneLive*_Back.cfg` — `LiveBackstop` per scenario (reap on): all three hold (the reaper always terminates)
-- `Liveness.tla` — in-zone epoch-seal LIVENESS spec (Phase E.2: `LiveLocal` + `LiveWithEscalation`, VRF rank ladder + leaderless 2/3 attestation + explicit cross-zone escalation quorum; the no-quorum-free-floor asymmetry vs Phase E)
+- `Liveness.tla` — in-zone epoch-seal LIVENESS spec (Phase E.2: `LiveLocal` + `LiveWithEscalation`, hash rank ladder + leaderless 2/3 attestation + explicit cross-zone escalation quorum; the no-quorum-free-floor asymmetry vs Phase E)
 - `MCInZoneLiveSafe.tla` — E.2 safe baseline (rank-0 honest, GST reachable)
 - `MCInZoneLiveLadder.tla` — E.2 ladder (rank-0 Byzantine, a later honest rank unlocks by elapsed)
 - `MCInZoneLiveNoGST.tla` — E.2 no-local-GST (FLP: committee path violated, escalation holds)
@@ -454,7 +460,7 @@ ALL MODELS BEHAVED AS EXPECTED
 - `MCInZoneLiveBootstrap.tla` — E.2 `staked < 3` freeze trap (no safety net)
 - `MCInZoneLive*_Local.cfg` — `LiveLocal` per scenario (escalation off): the committee path
 - `MCInZoneLive*_Esc.cfg` — `LiveWithEscalation` per scenario (escalation on): full path incl. backstop
-- `LivenessRecurrence.tla` — cross-epoch seal-recurrence LIVENESS spec (Phase E.3: `RecurSealed` + `RecurLocalSealed`, the chained VRF beacon re-randomizing ranks each epoch; the worst case cannot recur indefinitely)
+- `LivenessRecurrence.tla` — cross-epoch seal-recurrence LIVENESS spec (Phase E.3: `RecurSealed` + `RecurLocalSealed`, the chained beacon re-randomizing ranks each epoch; the worst case cannot recur indefinitely)
 - `MCRecurSafe.tla` — E.3 re-randomizing beacon, every epoch viable (both properties hold)
 - `MCRecurLadder.tla` — E.3 periodic worst-case epoch, escalation covers it (both hold — a captured rank cannot persist)
 - `MCRecurGrind.tla` — E.3 grindable / adversary-pinned beacon (`RecurSealed` holds via escalation; `RecurLocalSealed` violated — fast path lost forever)

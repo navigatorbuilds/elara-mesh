@@ -156,7 +156,7 @@ mod pyo3_bindings {
     }
 
     /// Sign a message with SPHINCS+. Returns signature bytes.
-    /// SLH-DSA sign requires both secret and public key.
+    /// SPHINCS+ sign requires both secret and public key.
     #[pyfunction]
     pub fn py_sphincs_sign<'py>(
         py: Python<'py>,
@@ -178,7 +178,7 @@ mod pyo3_bindings {
 
     /// Dual-sign a message with both Dilithium3 and SPHINCS+ in a single Rust call.
     /// Returns (dilithium_sig, sphincs_sig) as bytes tuples.
-    /// Both ML-DSA-65 and SLH-DSA require sk + pk pairs (FIPS 204 / pure-Rust impls).
+    /// Both ML-DSA-65 and SPHINCS+ require sk + pk pairs (pure-Rust impls).
     #[pyfunction]
     #[allow(clippy::too_many_arguments)]
     pub fn py_dual_sign<'py>(

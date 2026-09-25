@@ -22,7 +22,7 @@ cargo test --features node --test record_relay_v1 --test relay_by_hash \
 
 ```
 src/
-├── crypto/           # Post-quantum primitives — ML-DSA-65 (FIPS 204, "Dilithium3"), SLH-DSA ("SPHINCS+"), ML-KEM-768
+├── crypto/           # Post-quantum primitives — ML-DSA-65 (FIPS 204), SPHINCS+-SHA2-192f (pre-standard, not FIPS 205), ML-KEM-768 (FIPS 203)
 ├── accounting/       # beat ledger — custodial accounting (24 modules)
 ├── network/          # Node daemon (HTTP, WebSocket, gossip, consensus)
 ├── content_safety.rs # 6-layer content safety
@@ -38,7 +38,7 @@ tests/                # Integration tests (multi-node)
 
 ## Development Guidelines
 
-- **Run tests before committing:** `cargo test --features node --lib` — all 5,700+ lib tests must pass with 0 failures
+- **Run tests before committing:** `cargo test --features node --lib` — all 6,100+ lib tests must pass with 0 failures
 - **No unsafe code** — the entire codebase is safe Rust
 - **Clippy clean:** `cargo clippy --features node` should produce minimal warnings
 - **Security first:** read `SECURITY.md` and `docs/CONTENT-POSTURE.md` before touching security-related code

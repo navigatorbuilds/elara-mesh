@@ -1,16 +1,16 @@
 ## Abstract
 
-Every digital execution generates a trust gap. A robotic arm on a factory floor makes 10,000 decisions per shift with no post-quantum audit trail. A satellite transmits telemetry across light-speed delays with no offline validation capability. An autonomous vehicle computes hundreds of safety-critical decisions per second with no immutable provenance chain. A manufacturing line produces billions of sensor readings per day with no cryptographic proof that the data was not altered after collection. These are not theoretical problems — they are operational gaps in every defense contractor, every space agency, every semiconductor fabrication plant, every autonomous vehicle program operating today.
+Every digital execution generates a trust gap. A robotic arm on a factory floor makes 10,000 decisions per shift with no post-quantum audit trail. A satellite transmits telemetry across light-speed delays with no offline validation capability. An autonomous vehicle computes hundreds of safety-critical decisions per second with no immutable provenance chain. A manufacturing line produces billions of sensor readings per day with no cryptographic proof that the data was not altered after collection. Where such systems lack post-quantum provenance, these are operational gaps, not theoretical ones.
 
-Current systems for validating digital work — patents, copyright registries, blockchain timestamps — were designed for documents, not for industrial-scale digital execution. They are fragmented, expensive, jurisdiction-dependent, and vulnerable to quantum computing. No existing protocol validates work at this scale, across this range of devices, with this diversity of network conditions.
+Current systems for validating digital work — patents, copyright registries, blockchain timestamps — were designed for documents, not for industrial-scale digital execution. They are fragmented, expensive, jurisdiction-dependent, and vulnerable to quantum computing. We know of no existing protocol designed to validate work across this range of scale, devices, and network conditions.
 
-The Elara Protocol introduces a layered architecture for cryptographically validating all forms of digital execution and creation. Built on a novel data structure — the **Directed Acyclic Mesh (DAM)** — the protocol provides instant local validation and a partition-tolerant consensus design (exercised on small co-located testnets; cross-operator partition behavior is not yet demonstrated), and is designed for interplanetary operation without requiring a universal clock (the interplanetary path is specified but untested — see §7, §13). Structurally the DAM is a two-axis construct — **time-ordered within a zone, zone-partitioned across the mesh** — with concurrency expressed through parent edges of the underlying DAG rather than as a third independent axis (§3.3.4). Two orthogonal operational layers (classification-based projection, AI-assisted analysis) are projected over this structure as views, not as additional structural dimensions. The Phase 6: Native Hardware Architecture section (§13 Roadmap) explores a speculative hardware-native framing in which those operational projections can also be mapped to physical coordinates; on today's von Neumann substrate all five are logical, not physical.
+The Elara Protocol introduces a layered architecture for cryptographically validating all forms of digital execution and creation. Built on a data structure this paper calls the **Directed Acyclic Mesh (DAM)** — a composition of previously published parts, catalogued in Section 2.11 of the whitepaper — the protocol provides instant local validation and a partition-tolerant consensus design (exercised on small co-located testnets; cross-operator partition behavior is not yet demonstrated), and is designed for interplanetary operation without requiring a universal clock (the interplanetary path is specified but untested — see §7, §13). Structurally the DAM is a two-axis construct — **time-ordered within a zone, zone-partitioned across the mesh** — with concurrency expressed through parent edges of the underlying DAG rather than as a third independent axis (§3.3.4). Two orthogonal operational layers (classification-based projection, AI-assisted analysis) are projected over this structure as views, not as additional structural dimensions. The Phase 6: Native Hardware Architecture section (§13 Roadmap) explores a speculative hardware-native framing in which those operational projections can also be mapped to physical coordinates; on today's von Neumann substrate all five are logical, not physical.
 
-The protocol specifies post-quantum signatures and key exchange from genesis using NIST standards (FIPS 203/204/205), with dual-signature strategy and algorithm agility designed to produce proofs that outlive the protocol itself. This drives decisions (PQC from genesis, algorithm agility, no institutional dependency, self-describing data formats) that produce more resilient engineering. The longevity property is grounded in a specific architectural feature: validation proofs are self-contained mathematical relationships between signed records, not database entries or application state. They can be moved to any future medium and remain independently verifiable, because the proof lives in the mathematics, not in the infrastructure that created it. The protocol's self-describing data format follows the Rosetta Stone principle: every record carries its own schema, algorithm identifiers, and human-readable serialization — decodable by any future system without external documentation. No specific timeframe is claimed; longevity is bounded by the underlying cryptographic assumptions (see Section 12.1 and Section 14 for honest limitations). The zero-knowledge proof layer currently uses SHA3-256 hash commitments as a Phase-1 stand-in (these are commitments, not genuine zero-knowledge proofs — see §5.3), with a specified migration path first to classical zk-SNARK constructions and then to fully post-quantum ZKP constructions as lattice-based and hash-based proof systems mature (see Section 14.3 for an honest assessment of this gap). Consensus is achieved through Adaptive Witness Consensus (AWC) — a continuous trust model targeting Byzantine fault tolerance at the standard 1/3 bound (formal proof pending; see Section 14.6).
+The protocol specifies post-quantum signatures and key exchange from genesis using the NIST standards FIPS 203 (ML-KEM) and FIPS 204 (ML-DSA), plus a pre-standard SPHINCS+ signature (SPHINCS+-SHA2-192f, which is not FIPS 205), with dual-signature strategy and algorithm agility designed to produce proofs that outlive the protocol itself. This drives decisions (PQC from genesis, algorithm agility, no institutional dependency, self-describing data formats) that produce more resilient engineering. The longevity property is grounded in a specific architectural feature: validation proofs are self-contained mathematical relationships between signed records, not database entries or application state. They can be moved to any future medium and remain independently verifiable, because the proof lives in the mathematics, not in the infrastructure that created it. The protocol's self-describing data format follows the Rosetta Stone principle: every record carries its own schema, algorithm identifiers, and human-readable serialization — decodable by any future system without external documentation. No specific timeframe is claimed; longevity is bounded by the underlying cryptographic assumptions (see Section 12.1 and Section 14 for honest limitations). The zero-knowledge validation layer is specified, not built: Phase 1 attaches SHA3-256 commitments to classified records, but they are not yet bound to the record and every record still carries its plain content hash, so classified records do not yet hide their content (see §5.3). The specified path runs first to classical zk-SNARK constructions and then to fully post-quantum ZKP constructions as lattice-based and hash-based proof systems mature (see Section 14.3 for an honest assessment of this gap). Consensus is achieved through Adaptive Witness Consensus (AWC) — a continuous trust model targeting Byzantine fault tolerance at the standard 1/3 bound (bounded model checking of the consensus and transport cores ships with the runtime source; machine-checked proofs at unbounded scale remain ongoing — see Section 14.6).
 
 Enterprise, government, and defense deployments operate as private networks (Section 10.6) with no beat involvement. The optional beat layer applies exclusively to the public permissionless network. Private deployments use the same cryptographic protocol (Layer 1) and the same data structure (DAM) without any economic layer.
 
-The minimum viable network is one device. A factory sensor validates locally without any network dependency. The same protocol is designed to scale down to a $30 phone validating creative work offline, for free, with sub-second signing targeted on phone-tier hardware (untested on low-end devices), and the same cryptographic proof available to a Fortune 500 corporation. This paper presents the complete protocol specification across 16 sections: DAM architecture, post-quantum cryptography, zero-knowledge validation, identity, interplanetary operations, IoT integration, public network economics, governance, adversarial resilience analysis addressing 34 attack vectors, and an honest assessment of limitations and open problems.
+The minimum viable network is one device. A factory sensor validates locally without any network dependency. The same protocol is designed to scale down to a $30 phone validating creative work offline and for free, with the same cryptographic proof available to a Fortune 500 corporation; that is a design target, since signing has so far been measured only on desktop-class hardware (Section 4.2). This paper presents the complete protocol specification across 16 sections: DAM architecture, post-quantum cryptography, zero-knowledge validation, identity, interplanetary operations, IoT integration, public network economics, governance, adversarial resilience analysis addressing 34 attack vectors and design challenges, and an honest assessment of limitations and open problems.
 
 ---
 
@@ -18,7 +18,7 @@ The minimum viable network is one device. A factory sensor validates locally wit
 
 1. [Problem Statement](#1-problem-statement)
 2. [Related Work](#2-related-work)
-3. [Protocol Architecture](#3-protocol-architecture) — Layered design (Layer 1 / 1.5 / 2 / 3), DAM definition, node types, minimum viable validation
+3. [Protocol Architecture](#3-protocol-architecture) — Layered design (Layer 1 / 1.5 / 2 / 3), DAM definition, node types, minimum viable validation, genesis and network bootstrap
 4. [Post-Quantum Cryptography](#4-post-quantum-cryptography) — PQC primitives, dual signatures, algorithm agility, constrained device profiles
 5. [Zero-Knowledge Validation](#5-zero-knowledge-validation) — Classification levels, ZKP construction, selective disclosure
 6. [Identity and Attribution](#6-identity-and-attribution) — Self-sovereign identity, entity types, AI attribution, digital succession
@@ -63,7 +63,7 @@ Current validation systems were designed for documents, not for the volume of di
 - Robotic surgical systems require immutable audit trails for every action
 - Satellite networks generate telemetry across time delays of minutes to hours
 
-No existing protocol validates work at this scale, across this range of devices, with this diversity of network conditions.
+We know of no existing protocol designed to validate work across this range of scale, devices, and network conditions.
 
 ### 1.3 The Quantum Threat
 
@@ -89,7 +89,7 @@ The Elara Protocol addresses these failures with the following design goals:
 4. **Partition tolerance** — operate across network splits, including interplanetary distances
 5. **Privacy** — prove creation without revealing content
 6. **Universality** — validate any digital work, from a factory sensor reading to a satellite telemetry stream to a poem
-7. **Proof longevity** — validation proofs are designed to outlive the protocol itself, with no institutional dependency. Achievable because proofs are mathematical relationships, not application state — they survive the death of every system that created them and can be verified on any future medium. The protocol's algorithm agility (Section 4.7) and key rotation mechanism (Section 11.2) provide migration paths when cryptographic algorithms require replacement. No specific timeframe is claimed — longevity depends on the underlying cryptographic assumptions holding and the ability to evolve when they don't
+7. **Proof longevity** — validation proofs are designed to outlive the protocol itself, with no institutional dependency. Achievable because proofs are mathematical relationships, not application state — they survive the death of every system that created them and can be verified on any future medium. The protocol's algorithm agility (Section 4.4) and the specified key-rotation design (Section 11.2, not yet operational) are the intended migration paths when cryptographic algorithms require replacement. No specific timeframe is claimed — longevity depends on the underlying cryptographic assumptions holding and the ability to evolve when they don't
 8. **Accessibility** — run on devices from a $4 microcontroller (via gateway-delegated signing, Profile C) to a datacenter
 
 For enterprise, government, and defense deployments that require private operation with zero beat involvement, see Section 10.6 — Private Networks and Network Publication. These deployments use the same cryptographic protocol and data structure as the public network.
@@ -181,6 +181,66 @@ The Elara Protocol operates at a different layer than most existing systems — 
 
 ---
 
+### 2.10 Provenance, Timestamping, and Authority-to-Act
+
+The most direct way to situate the protocol against existing work is to answer the question a careful reviewer asks first: *why not simply compose OpenTimestamps with a post-quantum signature?* Composed, those two primitives prove exactly one thing — **"this key signed these bytes, and the bytes existed by this Bitcoin block."** That is *when* something happened and *which key* touched it. Neither primitive, alone or composed, carries any notion of **delegation, scope, or revocation**, so the pair structurally cannot express the proposition that matters when an autonomous agent acts on someone's behalf:
+
+> *Agent A was mandated by principal P to perform action X; the mandate was valid at the act's signing time; and it was later revoked.*
+
+Expressing that requires a third layer — an authority-and-accountability record that binds an act to the mandate under which it was performed and resolves, at verification time, whether that authority held when the act was sealed. The Elara Protocol provides that layer natively: post-quantum, offline-recomputable, and queryable as a time-aware ledger of *acts under authority* rather than a credential bolted onto a signature. Section 6.3 describes the AI-attribution use case the layer is built for; the reference runtime ships a dependency-free demonstration that reproduces every verdict discussed below from the same verification function the live node exposes over RPC.
+
+**The honest scope of "structurally cannot."** The claim above is true of the OpenTimestamps-plus-signature *strawman* — those two primitives and nothing else. It is **not** a claim that no system can express a mandate. Several can (see Verifiable Credentials below); anyone who adds the missing authority layer has built something that does what this layer does. The protocol's contribution is not the idea of authority-to-act but shipping it as one integrated, post-quantum, offline-verifiable mesh in which the authority record and the act share the same witnessed ledger. The remainder of this subsection compares the protocol against the specific systems most often proposed as substitutes, conceding what each does well and isolating the single capability — a queryable, post-quantum record of *acts under delegated, revocable authority* — that distinguishes it.
+
+**OpenTimestamps.** OTS proves that a single hash existed by a given Bitcoin block, and nothing about who produced it, under whose authority, or whether that authority was valid; its own documentation is explicit that it does not prove authorship. Calendar servers are queryable, but only to upgrade one commitment's Bitcoin proof — there is no queryable, time-aware history of *acts* or *authority*. The protocol *uses* OTS as one leg of its external anchor braid (an existed-by upper bound), not as a substitute for the authority layer.
+
+**A bare signature, post-quantum or classical.** A Dilithium3 / ML-DSA signature answers `Verify(pk, msg, σ) → {0,1}` — "the holder of key K signed these bytes." No signature standard introduces an issuer chain, a scope, a validity window, or revocation; that is precisely why credential layers exist on top of raw signatures.
+
+**W3C Verifiable Credentials and X.509 attribute certificates.** These *can* express delegated, scoped, revocable authority, and the protocol does not claim otherwise. Verifiable Credentials 2.0 (a W3C Recommendation since 2025) with a Bitstring Status List express a scoped, time-bounded, revocable grant; X.509 attribute certificates (RFC 5755) have encoded delegated privilege for years. If the goal is only to *express* a mandate, these are real options. The honest distinction is *what kind of artifact each is*. A verifiable credential or attribute certificate is a **credential format** — a statement one *presents*, answering "is this credential valid right now?"; the issuer hosts its own revocation/status service, and the credential is bolted onto the surrounding system. The protocol instead records the **act**: a witnessed, content-addressed, time-anchored ledger entry that *references* its mandate and answers a harder question — "was the authority valid at the exact, sealed moment this act was signed, given that revocation may have occurred afterward?" The authority record and the act live on the **same** witnessed ledger; revocation is evaluated at read time and is front-run-proof, keyed to the principal so that a non-principal's purported revocation is never consulted. The signing layer is post-quantum today, whereas W3C post-quantum cryptosuites remain experimental as of 2026.
+
+**sigstore.** sigstore is strong infrastructure for open-source supply chains, and the comparison must be precise about what it does today. It *can* verify offline: cosign bundles carry the Rekor inclusion proof and a signed timestamp, and `cosign verify --offline` is shipped. Its public instance is not yet post-quantum as of 2026, though experimental ML-DSA support is landing in the client and bundle tooling. What sigstore has no concept of is **authority-to-act**: a Fulcio certificate binds a signing identity (an OIDC token, a CI workflow) to a key, and Rekor logs the signing event, but neither states that *principal P authorized agent A, within scope S, revocably*. gitsign and attestations record *who signed an artifact*, not *who was authorized to*. sigstore is built for public transparency logs and internet OIDC, not for a long-running, possibly private, validation mesh; that authority gap — not offline-ness or post-quantum cryptography alone — is the difference.
+
+**C2PA / Content Credentials.** C2PA is media-provenance metadata under a consortium PKI. Plain manifests can be stripped by re-encoding or by platforms that discard metadata; C2PA 2.1 and later answer this with Durable Content Credentials (an invisible watermark, a perceptual fingerprint, and a cloud manifest lookup) designed to survive stripping — at the cost of reintroducing a hosted database and a network dependency, and the watermark is not invulnerable to adversarial editing. C2PA manifests *do* carry a time authority: the specification uses RFC 3161 TSA timestamps — a *trusted-authority* timestamp, not a trustless anchor. What C2PA is not is a consensus network, a validator quorum, or a queryable ledger of authorized acts; it attests *who made a piece of media and how it was edited*, not *who was authorized to perform an action, under what mandate*. The two compose cleanly: a C2PA manifest hash is a perfectly good thing to record on the protocol.
+
+**Certificate Transparency.** CT (RFC 6962 / 9162) is the closest structural cousin — an append-only Merkle log audited by public monitors. But CT logs certificate *issuance*: it proves that a CA issued a certificate, and by design not that a key was *authorized to perform an act*, with what scope, still valid at a later moment. CT is issuance transparency for the web PKI, on classical cryptography; the protocol is an append-only, post-quantum record of *acts under delegated authority*, with validity-at-signing and revocation as first-class, offline-recomputable ledger semantics. The problems are orthogonal.
+
+These comparisons converge on a single sentence:
+
+> OpenTimestamps proves *when* a hash existed and a post-quantum signature proves *which key* signed it, but neither — alone or composed — expresses whether that key was *authorized* to act. The Elara Protocol adds a post-quantum, queryable ledger that records each act's reference to a revocable, time-bounded mandate from a named principal and deterministically resolves — offline, re-runnable years later — whether that authority held at the act's signing time, on the same witnessed ledger as the act itself.
+
+**What this layer enforces today (honest-claims rule).** The mandate layer is an observational v0, and the protocol states its scope precisely rather than implying more. Enforced in v0 are the *who* (binding an act to a mandated agent identity), the *when* (the mandate's validity window), and **revocation** (evaluated at read time, front-run-proof, keyed to the principal). Acts outside their mandate are **recorded and flagged** with a typed taxonomy — `NO_CHAIN`, `AGENT_MISMATCH`, `LAPSED`, `NOT_YET_VALID`, `POST_REVOCATION`, `OVER_SCOPE` — and carry zero trust or consensus weight; a truth ledger records violations rather than silently discarding them. **Not yet enforced in v0:** operation-, zone-, and amount-level scope is *recorded but not yet checked*; consensus-weight enforcement (gating stake and committee standing on mandate validity) is the next implementation slice, and sub-delegation chain-walking follows it. The protocol never claims a scope check that the reference code does not perform.
+
+### 2.11 Prior Art for the Directed Acyclic Mesh
+
+Versions of this paper up to v0.7.35 called the DAM "a novel data structure". That claim was made without a prior-art search. A search was done on 12 September 2026, and the claim is withdrawn: each element of the DAM as built maps to published work, listed here so that a reader can check the mapping rather than take the paper's word for it. The list is what one search found; it is not a proof that nothing closer exists.
+
+| DAM element (as built) | Prior work | Year | Ref. |
+|---|---|---|---|
+| Content-addressed objects linked by hash to their parents | Git object model | 2005 | [39] |
+| The same, generalised as a Merkle DAG for arbitrary data | IPFS | 2014 | [32] |
+| A ledger with no blocks, where each new record references earlier records | IOTA Tangle | 2016 (v1.4.3: 2018) | [6], [40] |
+| Events carrying two parent hashes, consensus derived from the graph | Swirlds Hashgraph | 2016 | [41] |
+| A DAG of record batches as the mempool, with ordering layered on top | Narwhal and Tusk | 2021 | [42] |
+| Survey of DAG-based ledgers (the family as a whole) | SoK: Diving into DAG-based Blockchain Systems | 2020 | [43] |
+| Partitioning the network into shards that process records in parallel | Zilliqa | 2017 | [44] |
+| Adaptive state sharding with shard splitting and merging | MultiversX (formerly Elrond) | 2019 | [45] |
+| Checkpoints finalised by staked validators, overlaid on a base ledger | Casper the Friendly Finality Gadget | 2017 | [46] |
+| Concurrent updates that merge without coordination and converge | Conflict-Free Replicated Data Types | 2011 | [47] |
+| CRDTs whose logical clock is a Merkle-DAG | Merkle-CRDTs | 2020 | [48] |
+| Append-only Merkle log with inclusion proofs, independently auditable | Certificate Transparency | 2013 / 2021 | [49], [50] |
+| Signed statements recorded by a transparency service that issues receipts | SCITT architecture (RFC 9943) | 2026 | [51] |
+| Timestamps anchored to Bitcoin | OpenTimestamps | 2016 | [30] |
+| Publicly verifiable randomness rounds usable as a time beacon | drand (League of Entropy) | live service | [52] |
+| Logical time and causal order | Lamport clocks; Interval Tree Clocks | 1978; 2008 | [7], [13] |
+| Verifiable credentials that authorise an agent's action (mandates) | Agent Payments Protocol (AP2) | live spec | [53] |
+
+The three structural dimensions of Section 3.3 map onto this list directly: time as causal parents and concurrency as a graph rather than a chain are the Git, IPFS, Tangle and Hashgraph line; zone topology is the Zilliqa and MultiversX sharding line. Any sharded DAG ledger has all three.
+
+What the project still puts forward is the composition and the choices made inside it: a ledger that stores signed evidence of acts rather than balances, so that records from a healed partition are merged as a union rather than resolved by one side winning (Section 7.3); post-quantum signatures from genesis rather than as a later migration (Section 4); a standalone verifier that re-checks a record from bytes alone (`crates/elara-verify` in the runtime source); and the mandate bracket of Section 2.10, which records who authorised an act. None of these is claimed as novel either. No prior-art search has been done for them, and this section will be extended when one is.
+
+A US provisional patent application (No. 63/983,064) described the same composition. It was filed without a prior-art search, has not been examined, and is being allowed to lapse in favour of open publication (see the prior-art-and-priority note at the end of this document).
+
+---
+
 ## 3. Protocol Architecture
 
 ### 3.1 Design Philosophy
@@ -230,25 +290,25 @@ When a creator produces work, the node:
 
 1. Computes a cryptographic hash of the content (SHA3-256)
 2. Creates a validation record containing: content hash, creator's public key, timestamp, causal references to prior work, and classification level (public/private/restricted/sovereign)
-3. Signs the validation record with the creator's private key (ML-DSA (FIPS 204, formerly CRYSTALS-Dilithium))
+3. Signs the validation record with the creator's private key (ML-DSA, FIPS 204; formerly CRYSTALS-Dilithium)
 4. Appends the signed record to the local DAG
-5. Optionally wraps the content hash in a privacy commitment for private/restricted work (Phase 1: SHA3-256 commitment; a genuine zero-knowledge proof is design-stage — see §5.3)
+5. Optionally attaches a SHA3-256 commitment for private/restricted work (Phase 1; it does not yet hide the content hash, which every record carries — see §5.3; a genuine zero-knowledge proof is design-stage)
 
 This process completes in milliseconds on commodity hardware and requires no network connectivity. A validation created on an airplane, a submarine, or the surface of Mars is cryptographically valid the moment it is signed.
 
 #### Layer 1.5: Performance Runtime
 
-Layer 1 defines the protocol semantics — what a valid record is, how it is signed, how it references parents. Layer 1.5 provides a high-performance implementation of those same operations in Rust, with the same wire format and byte-identical output. Because the wire format is fixed, records are byte-identical regardless of which conformant implementation produced them — indistinguishable on the network.
+Layer 1 defines the protocol semantics — what a valid record is, how it is signed, how it references parents. Its reference implementation is the Rust runtime in the public source repository, and the record encoding is specified normatively in that repository's `docs/PROTOCOL-SPEC.md`, with test vectors. Because the encoding is fixed, every conformant implementation produces byte-identical records. An early Python prototype of Layer 1 (February 2026) was never published and is no longer maintained. Layer 1.5 names the performance features of the same Rust runtime.
 
 The Elara Runtime (Layer 1.5) implements:
 
-- A **DAM Virtual Machine** with all 9 primitive operations: `DAM_INSERT`, `DAM_QUERY`, `DAM_WITNESS`, `DAM_HASH`, `DAM_SIGN`, `DAM_VERIFY`, `DAM_MERGE`, `DAM_CLASSIFY`, `DAM_ANALYZE`
+- A **DAM Virtual Machine** with all 9 primitive operations: `DAM_INSERT`, `DAM_QUERY`, `DAM_WITNESS`, `DAM_HASH`, `DAM_SIGN`, `DAM_VERIFY`, `DAM_MERGE`, `DAM_CLASSIFY`, `DAM_ANALYZE`. The VM defines and tests the semantics of each operation; the node's own write path calls the storage layer directly rather than going through the VM.
 - **5-tuple dimensional addressing** `(T, C, Z, K, A)` — the same addressing model that native hardware will implement physically
 - **Tiled storage** with in-memory DAG index for sub-millisecond record lookup
 - **Parallel batch verification** via Rayon — verifying multiple signatures concurrently on multi-core hardware
-- **PyO3 bindings** — expose the Rust runtime to Python applications, transparent to the application layer
+- **PyO3 bindings** — key generation, signing and verification for both signature algorithms (including batch verification), SHA3-256, record encoding and decoding, and account and light-client helpers, callable from Python; the DAM VM operations are not exposed to Python
 
-Layer 1.5 is optional — a constrained device runs the Layer 1 semantics (hash, sign, DAG append) without the performance runtime. Layer 1 is the universal baseline, minimal enough to run on any device in any language. The Layer 1.5 Rust runtime is designed to provide significant performance improvements on capable hardware (laptops, servers, capable phones) — estimated 10–100x over a single-threaded reference implementation; measured cross-language benchmarks are forthcoming — bridging the gap between Layer 1's universality and native hardware performance. The progression is: Layer 1 semantics (language-agnostic) → Layer 1.5 Rust runtime (available now) → native hardware (FPGA prototyping 2027, ASIC 2029+).
+Layer 1.5 is optional. A constrained device needs only the Layer 1 semantics — hash, sign, append to its local DAG — which are small enough to implement in any language. The Layer 1.5 features target capable hardware (laptops, servers, capable phones). No cross-language performance comparison has been measured, so this paper claims no speed-up factor. The progression is: Layer 1 semantics (language-agnostic; Rust reference implementation available now) → Layer 1.5 runtime features (Rust, available now) → native hardware (FPGA prototyping 2027, ASIC 2029+).
 
 **No layer depends on the layers above it.** Layer 1 is universal. Layer 1.5 is an acceleration of Layer 1. Layer 2 requires connectivity. Layer 3 is optional.
 
@@ -262,23 +322,21 @@ When network connectivity is available, nodes propagate validation records to pe
 
 Consensus is achieved through **witness accumulation**: as more nodes receive and acknowledge a validation record, its trust score increases. A validation witnessed by 1 node is locally valid. A validation witnessed by 1,000 nodes across 50 countries is globally attested.
 
-Settlement provides threshold guarantees: once a record accumulates attestations from witnesses representing ≥2/3 of diversity-weighted stake, it is considered settled — the cost of reversal exceeds the value of any plausible attack. However, trust continues accumulating beyond settlement. A record with 100 diverse witnesses is more trusted than one with the minimum settlement threshold, even though both are settled. Trust is continuous, not binary. A record is always valid from the moment of local signing, with increasing levels of network attestation building confidence over time.
+Settlement provides threshold guarantees: once a record accumulates attestations from witnesses holding at least 2/3 of the zone's eligible stake (excluding the record's creator), it is considered settled; a conflicting record could settle only if witnesses holding at least one third of the stake attested to both. Diversity weighting is reported as a confirmation level and does not gate settlement in the current implementation. However, trust continues accumulating beyond settlement. A record with 100 diverse witnesses is more trusted than one with the minimum settlement threshold, even though both are settled. Trust is continuous, not binary. A record is always valid from the moment of local signing, with increasing levels of network attestation building confidence over time.
 
 #### Layer 3: AI Intelligence
-
-> **Scope:** this layer is a companion cognition substrate that is **feature-gated out of the node and the public mirror** (the `cognition` feature is off by default; it runs only in the standalone `elara-daemon` family of binaries, on a single machine). It **never participates in validation or consensus** — Layers 1 and 2 are fully functional without it. The capabilities below describe that single-machine companion engine; items requiring cross-node coordination are marked design-stage.
 
 The optional AI layer provides:
 
 - **Pattern recognition** — detecting anomalies in validation streams (e.g., a sensor producing physically impossible readings)
-- **Collective learning (design-stage)** — a planned mechanism in which consenting nodes could share anonymized patterns to improve fraud detection, failure prediction, and routing. Not implemented; today's cognition engine is single-node.
+- **Collective learning (design-stage)** — a planned mechanism in which consenting nodes could share anonymized patterns to improve fraud detection, failure prediction, and routing. Not implemented.
 - **Continuous autonomous thinking** — a 15-phase analysis engine that runs every 2 hours, covering pattern recognition, self-review, memory consolidation, and insight synthesis. Periodic "dream" modes (weekly, monthly, emotional) provide deeper analysis over longer timeframes. Inherited from Elara Core's existing cognitive architecture.
-- **Cognitive Continuity Chain** — cryptographic proof of unbroken cognitive experience via hash-chained, dual-signed state snapshots. Each snapshot captures a `CognitiveDigest` — mood vector, memory/model/prediction/principle/correction counts, active goals, allostatic load — and chains it to the previous snapshot via DAG parent references. Six trigger events (boot, shutdown, milestone, drift, manual, periodic) generate snapshots, rate-limited to prevent flooding. The chain is verifiable: walk the DAG backwards to confirm no gaps in the cognitive record. This makes the companion engine's cognition a cryptographically auditable trail rather than an opaque process.
-- **Natural language interface (planned)** — a future companion-tool capability for querying the validation history in human language; not part of the node.
+- **Cognitive Continuity Chain** — hash-chained, dual-signed state snapshots, designed to make a gap or alteration in an AI's recorded state detectable. Each snapshot captures a `CognitiveDigest` — mood vector, memory/model/prediction/principle/correction counts, active goals, allostatic load — and chains it to the previous snapshot via DAG parent references. Six trigger events (boot, shutdown, milestone, drift, manual, periodic) generate snapshots, rate-limited to prevent flooding. The chain is verifiable: walk the DAG backwards to confirm that no snapshot is missing or altered. The snapshots record summary state signed by the AI's own key, so the chain shows that the record is unbroken, not that the recorded state is accurate. (Built in the private Elara Core prototype; not part of the public release.)
+- **Natural language interface (planned)** — querying the validation history in human language; not implemented.
 
-Layer 3 is explicitly optional. The protocol is fully functional without AI. As noted above, it runs today only as the standalone single-machine companion engine — not inside the node — for operators who choose to run that companion alongside their node.
+Layer 3 is explicitly optional. The protocol is fully functional without AI. This layer is designed for nodes that choose to contribute computational resources in exchange for enhanced capabilities. **Implementation status:** the capabilities above are described from a private prototype, Elara Core, which is frozen. It is not part of the public source repository; the open-source release covers Layers 1 and 2 only.
 
-**Minimum capability completeness:** The three capability layers — validation (Layer 1), network consensus (Layer 2), and intelligence (Layer 3) — represent the minimum layering for a self-sustaining distributed validation system. This can be argued by elimination: validation without networking is isolated (no trust propagation); networking without intelligence is blind to cross-dimensional patterns (no anomaly detection, no learning); intelligence without validation has nothing trustworthy to reason about. Each layer eliminates a distinct failure mode, and removing any layer produces an incomplete system. This parallels the minimum dimensionality principle in rotating field theory: three phases (120° apart) is the minimum for smooth rotation because the roots of unity in Z/3Z sum to zero — each phase covers an orthogonal component of the rotating field, just as each capability layer covers an orthogonal failure mode of the distributed system. The three phases of the public network's beat economy (computation, storage, attention) mirror this structure — three resource types are the minimum for a self-sustaining economic cycle. Layer 1.5 (Rust performance runtime) is an acceleration of Layer 1, not a fourth capability — it implements the same 9 operations on the same 5-tuple addressing with byte-identical wire format. On native hardware, Layer 1.5's operations are absorbed directly into the instruction set.
+**Why three capability layers:** The three capability layers — validation (Layer 1), network consensus (Layer 2), and intelligence (Layer 3) — are the layering this design settled on, and each layer is there to remove a specific failure mode: validation without networking is isolated (no trust propagation); networking without intelligence has no anomaly detection and no learning; intelligence without validation has nothing trustworthy to reason about. This is a design rationale, not a theorem. It explains why each layer is present; it does not show that no other layering could work, and no proof of minimality is offered. Earlier versions of this paper called this "provable by elimination" and drew an analogy to three-phase rotating fields; both are withdrawn. Layer 1.5 (the Rust runtime's performance features) is an acceleration of Layer 1, not a fourth capability — it runs the same record semantics over the same wire format.
 
 ### 3.3 From DAG to DAM: The Directed Acyclic Mesh
 
@@ -399,17 +457,23 @@ Each validation record references one or more previous records (its "parents"). 
 ```
 ValidationRecord {
     id:            UUID v7 (time-ordered)
-    version:       protocol version
+    version:       wire format version
+    network_id:    network the record belongs to (wire format v6)
+    nonce:         per-account slot nonce (wire format v5)
     content_hash:  SHA3-256(content)
-    creator:       public key (ML-DSA (FIPS 204, formerly CRYSTALS-Dilithium))
-    timestamp:     local ISO-8601 + vector clock position
+    creator:       public key (ML-DSA-65, FIPS 204)
+    timestamp:     creator's clock, seconds since the Unix epoch
     parents:       [record_id, ...] (DAG references)
     classification: PUBLIC | PRIVATE | RESTRICTED | SOVEREIGN
-    zk_proof:      optional zero-knowledge proof (for non-PUBLIC)
     metadata:      extensible key-value (content type, device info, etc.)
-    signature:     CRYSTALS-Dilithium signature over all above fields
+    zk_proof:      privacy proof for PRIVATE and RESTRICTED (Phase 1: a SHA3-256 commitment; Section 5.3)
+    signature:     ML-DSA-65 signature over all above fields
+    sphincs_signature: optional SPHINCS+ signature (Profile A)
+    zone:          optional hierarchical zone path (wire format v3; not signed)
 }
 ```
+
+Nodes add causal-order stamps (`itc_stamp`, `zone_refs`; Section 11.9) outside the signature.
 
 #### 3.3.5 Dimensional Extensibility
 
@@ -442,21 +506,21 @@ The 5-tuple addressing scheme is designed to accommodate additional coordinates 
 ### 3.4 Node Types
 
 | Type             | Hardware Tier | Role | Stores Records? | Consensus? | Example |
-|------------------|-------------|------|----------------|------------|---------|
+|--------------|----------------|--------------------|--------------|----------|----------|
 | **Leaf node**    | Tier 1 (MCU) | Creates records, signs directly (Profile A/B) or delegates to gateway (Profile C) | No (submits to nearest relay/witness) | No | IoT sensor, $4 ESP32 |
 | **Relay node**   | Tier 2 (phone/laptop) | Light client, propagates records, verifies Merkle proofs, holds own records | Own records only | No | Phone app, laptop |
 | **Witness node** | Tier 3 (VPS) | Attests to epoch seals, validates records, holds subscribed zones on disk | Yes (subscribed zones) | Yes | Cloud VM, mini PC |
-| **Anchor node**  | Tier 3-4 (high-trust) | Witness + epoch seal proposer for assigned zones (VRF-selected) | Yes | Yes + proposes epochs | Hardened VPS, data center |
+| **Anchor node**  | Tier 3-4 (high-trust) | Witness + epoch seal proposer for assigned zones (stake-weighted hash rank) | Yes | Yes + proposes epochs | Hardened VPS, data center |
 | **Archive node** | Tier 4 (data center) | Full history for a region/industry, serves Merkle proofs and historical queries | Yes (broad/full) | Yes | Cold storage facility |
 | **Gateway node** | Tier 1-2 (IoT hub) | Bridges constrained devices (Profile C) to the network via delegation | Delegated | Delegated | Home hub, factory edge |
 
 Any node can serve multiple roles simultaneously. A laptop can be a relay and witness. A $4 microcontroller can only be a leaf, but that is sufficient for its purpose. Gateway nodes enable Profile C devices (too constrained for PQC key generation) to participate via delegated signing.
 
-**Node incentive mapping:** Light Node = relay. Full Node = witness/anchor. Storage Node = archive. Node-specific incentive structures are specified separately.
+**Node role mapping:** Light Node = relay. Full Node = witness/anchor. Storage Node = archive. Node incentive structures are described in Section 9.
 
 #### Node Types vs. Module Tiers vs. Storage Profiles
 
-A node's behavior on the Elara network is described by **three orthogonal axes** — confusing any two of them leads to operator-side miscapacity-planning. The Elara Core reference implementation (v0.15.0) introduces a **module tier system** that controls what cognitive capabilities a node activates. This is orthogonal to both the node's consensus role AND its storage profile: the tier controls what a node *thinks*, the consensus role controls what it *does on the network*, and the storage profile controls what it *retains on disk*.
+A node's behavior on the Elara network is described by **three orthogonal axes** — confusing any two of them leads to operator-side miscapacity-planning. The Elara Core prototype (private and frozen; not part of the public release) introduces a **module tier system** that controls what cognitive capabilities a node activates. This is orthogonal to both the node's consensus role AND its storage profile: the tier controls what a node *thinks*, the consensus role controls what it *does on the network*, and the storage profile controls what it *retains on disk*.
 
 | Axis | Values | Source of truth | Controls |
 |------|--------|-----------------|----------|
@@ -497,7 +561,7 @@ Step 2: The device produces data — a sensor reading, a firmware hash,
 
 Step 3: The device validates.
         → Computes SHA3-256 hash of the data
-        → Signs the hash with its private key (ML-DSA (FIPS 204, formerly CRYSTALS-Dilithium))
+        → Signs the hash with its private key (ML-DSA, FIPS 204; formerly CRYSTALS-Dilithium)
         → Creates a ValidationRecord with timestamp and device public key
         → Appends to local DAG
         → Done. Sub-second on commodity hardware.
@@ -533,9 +597,9 @@ The minimum viable network is not a cluster. It is not a quorum. It is one devic
 
 ### 3.6 Industrial Scale Deployment: From One Phone to One Million Sensors
 
-Section 3.5 shows the protocol at its smallest: one teenager, one phone, one poem. This section shows the same architecture at its largest: a factory with a million sensors generating billions of readings per day. The same cryptographic proof covers both.
+Section 3.5 shows the protocol at its smallest: one teenager, one phone, one poem. This section shows the same architecture at its largest: a hundred factories with a million sensors generating billions of readings per day. The same cryptographic proof covers both.
 
-**Scenario: Samsung semiconductor fabrication plant**
+**Scenario: a semiconductor fabrication plant**
 
 A single fabrication facility operates 10,000 sensors — vibration monitors on bearings, temperature probes in clean rooms, pressure gauges on gas lines, optical sensors on wafer alignments. Each sensor generates one reading per second.
 
@@ -584,9 +648,9 @@ Compression ratio: 1,000:1
 
 1. **Sensors don't run PQC.** A $4 vibration sensor sends HMAC-authenticated readings to a trusted gateway over CAN bus. The gateway does the cryptography. Profile C (Section 4.6) was designed for exactly this.
 
-2. **Batch signing collapses overhead by 1,000x.** Instead of 2.85 TB of signatures, the factory generates 2.85 GB — manageable on commodity hardware.
+2. **Batch signing collapses overhead by 1,000x.** Instead of 2.86 TB of signatures, the factory generates 2.86 GB — manageable on commodity hardware.
 
-3. **The Cognitive Continuity Chain runs at the factory AI level, not the sensor level.** Sensors don't think. The factory AI thinks — it analyzes patterns, makes predictions, detects anomalies. The CCC proves that this cognitive process was unbroken: no gaps, no tampering, no silent model replacement. A Tier 2 node generates ~30 cognitive checkpoints per day, each ~3-4 KB. Negligible.
+3. **The Cognitive Continuity Chain runs at the factory AI level, not the sensor level.** Sensors don't think. The factory AI thinks — it analyzes patterns, makes predictions, detects anomalies. The CCC is designed to make a gap or an altered checkpoint in the factory AI's record detectable: a missing or modified checkpoint breaks the hash chain (Section 11.35). The CCC exists today only in a private prototype, not in the open-source runtime. A Tier 2 node generates ~30 cognitive checkpoints per day, each about 42 KB with the two signatures of Section 11.35.1 — about 1.3 MB a day. Negligible next to the factory's 2.86 GB of batch signatures.
 
 4. **The private network is free.** The entire factory operates as a private network (Section 10.6). No beats, no witnesses, no Layer 2 fees. Layer 1 is always free.
 
@@ -594,7 +658,7 @@ Compression ratio: 1,000:1
 
 **Scaling to the enterprise:**
 
-Across 100 Samsung factories worldwide:
+Across 100 factories worldwide:
 
 ```
 100 factories × 864M readings/day = 86.4 billion readings/day
@@ -604,7 +668,7 @@ Storage: 86.4M × 3,309 bytes = ~286 GB/day in signatures
 
 That arithmetic projects to 286 GB/day of cryptographic signatures across 100 factories, validating 86.4 billion sensor readings — on commodity hardware, with post-quantum security and no blockchain fees. These figures are a worked projection of the Profile C batch-signing model, not a measured deployment: the protocol has not been run at this scale.
 
-If Samsung later decides to publish its validation history to the public network — a Network Publication event (Section 10.6.3) — the published records integrate into the global DAM with the same trust scoring that applies to every other record. The bearing vibration readings from a Pyeongtaek fabrication line sit alongside poems from Nairobi in the same data structure, with the same cryptographic guarantees, distinguished only by their content hashes and classification levels.
+If the manufacturer later decides to publish its validation history to the public network — a Network Publication event (Section 10.6.3) — the published records integrate into the global DAM with the same trust scoring that applies to every other record. The bearing vibration readings from one of its fabrication lines sit alongside poems from Nairobi in the same data structure, with the same cryptographic guarantees, distinguished only by their content hashes and classification levels. *(Implementation-status note: Network Publication is disabled in the current runtime (Section 10.6.3). The "same trust scoring" described here is the original design; the mechanism is being reframed to inert-import, which gives imported records no native standing.)*
 
 ---
 
@@ -628,9 +692,10 @@ None of the mechanisms below is theoretical. Each exists because a clean-slate l
 
 **Economic ignition.** Witness rewards draw from the conservation pool (Section 9), and the genesis allocation seeds that pool directly, so the first finalized record can pay its witnesses. Later top-ups, where policy allows them, are ordinary authority-signed records subject to the same finalization rules as everything else.
 
-**The launch sequence.** Assembled, a genesis ceremony is: (1) generate the genesis authority and validator identities; (2) fix the genesis configuration — authority, validator set, allocations, conservation-pool seed — and distribute it byte-identical to every launch node; (3) boot. The network mints its allocation, applies validator stakes at the baseline, discovers its first zones through the bootstrap path, seals, attests through its age-exempt validators, finalizes, and pays its first witness rewards from the seeded pool. After the first seal, every bootstrap mechanism is inert and the network runs on the ordinary rules alone.
+**The launch sequence.** Assembled, a genesis ceremony is: (1) generate the genesis authority and validator identities; (2) fix the genesis configuration — authority, validator set, allocations, conservation-pool seed — and distribute it byte-identical to every launch node; (3) boot. The network mints its allocation, applies validator stakes at the baseline, discovers its first zones through the bootstrap path, seals, attests through its age-exempt validators, finalizes, and pays its first witness rewards from the seeded pool. After the first seal, the network runs on the ordinary rules, with two exceptions: while fewer than three anchors hold stake, only the genesis authority proposes seals (the bootstrap carve-out of Section 11.12.3, Part B.2, of the whitepaper); and privileged actions, tombstones and zone transitions among them, are accepted only from the genesis authority key, a power the code does not expire.
 
 *Status note (honest-claims rule): the mechanisms in this section are implemented in the Rust runtime and were validated by repeated blank-slate launch rehearsals on a three-node development network (June 2026) — fresh network to self-funding finality in under four minutes, all nodes consistent. A mainnet-scale genesis (many validators, public ceremony) follows the same sequence but has not yet been exercised at that scale.*
+
 ## 4. Post-Quantum Cryptography
 
 ### 4.1 The Quantum Timeline
@@ -641,22 +706,22 @@ The threat model is "harvest now, decrypt later": adversaries can collect encryp
 
 ### 4.2 Cryptographic Primitives
 
-The Elara Protocol uses NIST-standardized post-quantum algorithms across **all** cryptographic surfaces — signatures, key exchange, randomness, zero-knowledge, hashes, AEAD, and key-derivation. The protocol is PQ-uniform: there is no classical-public-key primitive on any path that touches mainnet records, attestations, seals, transport, or proofs.
+The Elara Protocol uses post-quantum or hash-based primitives on every surface that carries security: ML-DSA-65 (FIPS 204) signatures, ML-KEM-768 (FIPS 203) key encapsulation, SHA3-256 (FIPS 202) hashing, a verifiable selection function built from ML-DSA (Dilithium3-VRF; not a full VRF, see below), and symmetric AEAD and key derivation. Two qualifications: the optional SPHINCS+ second signature is the NIST round-3 scheme, not FIPS 205; and the transport key exchange is a hybrid in which X25519 is a classical half added for defence in depth, never used alone. No classical public-key primitive protects records, attestations or seals; the opt-in drand time anchor, off by default, carries the beacon's BLS12-381 signatures as outside evidence. The zero-knowledge layer is specified, not built (Section 5.3).
 
 #### Signatures
 
-**CRYSTALS-Dilithium** (ML-DSA, FIPS 204) — Digital signatures
+**ML-DSA** (FIPS 204; derived from CRYSTALS-Dilithium) — Digital signatures
 - Used for: signing validation records, authenticating node identity
 - Security basis: Module Lattice-Based Digital Signature (ML-DSA-65, NIST Security Level 3)
 - Signature size: ~3.3 KB (3,309 bytes — the FIPS 204 final ML-DSA-65 value the implementation ships and enforces; the legacy liboqs Round-3 length of 3,293 bytes is rejected)
-- Signing speed: ~1 ms on the shipped pure-Rust implementation (measured in-tree, desktop-class release build; optimized AVX2 C implementations reach ~0.3 ms)
+- Signing speed: ~0.7 ms on the shipped pure-Rust implementation (verification ~0.19 ms), measured with `cargo bench --bench bench_crypto` on a 2014-era desktop CPU (Intel Xeon E5-1620 v3, 3.5 GHz)
 - Selected for: balance of security, performance, and signature size
 
-**SPHINCS+** (FIPS 205, SLH-DSA) — Hash-based signatures
-- Used for: long-term anchor signatures, seed vault attestation, root of trust, optional dual-sig under §4.3
-- Security basis: stateless hash-based signatures (SLH-DSA, no algebraic structure)
-- Signature size: ~35 KB (SPHINCS+-SHA2-192f / SLH-DSA-SHA2-192f)
-- Signing speed: ~130 ms on the shipped pure-Rust implementation (measured in-tree; verification ~7 ms) — two orders slower than Dilithium, acceptable for its low-frequency anchor / root-of-trust role
+**SPHINCS+** (pre-standard; not FIPS 205) — Hash-based signatures
+- Used for: an optional second signature on records (Section 4.3); epoch seals and witness attestations carry ML-DSA only. The seed vault named in earlier versions is not built
+- Security basis: stateless hash-based signatures. The shipped library implements the NIST round-3 SPHINCS+-SHA2-192f (SHA-256 throughout), which differs from FIPS 205's SLH-DSA-SHA2-192f and so is not FIPS 205; moving to a FIPS 205 parameter set (SLH-DSA-SHAKE-192f) is a planned wire change
+- Signature size: ~35 KB (SPHINCS+-SHA2-192f)
+- Signing speed: ~125 ms on the shipped pure-Rust implementation (verification ~6.7 ms), measured with `cargo bench --bench bench_crypto` on the same CPU — two orders of magnitude slower than ML-DSA-65, acceptable for an optional second signature that is not on the consensus path
 - Selected for: conservative security assumptions — if lattice-based cryptography fails, hash-based signatures remain secure under minimal hash assumptions
 
 #### Key encapsulation
@@ -670,7 +735,7 @@ The Elara Protocol uses NIST-standardized post-quantum algorithms across **all**
 #### Verifiable randomness
 
 **Dilithium3-VRF (alg = `0x11`)** — a post-quantum verifiable, unique, unforgeable selection function (sortition). This is **not a full RFC-9381 VRF**: it provides verifiability, uniqueness, and unforgeability, but **not output secrecy** (see security properties below).
-- Used for: epoch-seal entropy, per-zone witness committee selection (Efraimidis-Spirakis stake-weighted draw), fisherman jury selection
+- Used for: epoch-seal entropy, per-zone witness committee selection (a stake-weighted draw: each candidate's priority is a hash of the VRF output and its identity divided by the square root of its stake, and the lowest priorities win; Section 11.12), fisherman jury selection
 - Construction: `output = SHA3-256("elara-vrf-v1" || pk || alpha)` — a deterministic public function of the public key and input; `proof = Dilithium3 signature over output`. Verification recomputes the output from `(pk, alpha)` and checks the signature against `pk`. ML-DSA signing is randomized (FIPS 204), so the output is deliberately **not** derived from the signature — the signature serves only as the unforgeable authorization proof.
 - Algorithm tag: `0x11` in the proof wire format (single-byte prefix)
 - Security properties: **uniqueness** (exactly one valid output per `(pk, alpha)`, from the deterministic hash), **verifiability** (anyone checks with `pk`), **unforgeability** (no valid proof without `sk`, under ML-DSA hardness). **Not provided: output secrecy** — the output is publicly computable from `(pk, alpha)`, so a draw is unpredictable only insofar as `alpha` carries entropy not known in advance (e.g. a prior epoch seal). The primitive is not relied on for output pseudorandomness against a holder of `pk`.
@@ -685,10 +750,10 @@ The Elara Protocol uses NIST-standardized post-quantum algorithms across **all**
 > migration target** — there is no Groth16/STARK prover, verifier, or Cargo
 > feature in the tree. See §5.3 and whitepaper §14.3.
 
-**SHA3-256 commitment proofs (IMPLEMENTED)** — the Phase-1 privacy layer
+**SHA3-256 commitment proofs (IMPLEMENTED, no privacy yet)** — the Phase-1 stand-in for the privacy layer
 - Used for: balance-range proofs (PRIVATE classification), metadata-property proofs, content-commitment proofs
-- Construction: deterministic SHA3-256 commitments that prove a property of hidden data (e.g. balance ≥ threshold) without revealing the value. As `commitment.rs` states plainly, these are commitments — "not zero-knowledge, not post-quantum in the ZK sense" — a pragmatic Phase-1 stand-in for the circuits specified in §5.3
-- Verifier: fail-closed (`src/crypto/zk.rs`, `src/crypto/commitment.rs`); malformed proofs are rejected
+- Construction: SHA3-256 commitments. The proof bytes carry the opening (the committed value and its blinding factor), so a verifier recomputes the commitment and learns the value; they do not hide it. As `commitment.rs` states plainly, these are commitments — "not zero-knowledge, not post-quantum in the ZK sense" — a Phase-1 stand-in for the circuits specified in §5.3
+- Verifier: malformed proofs are rejected (`src/crypto/zk.rs`, `src/crypto/commitment.rs`), but a proof is not bound to the record it travels with, and every record carries its plain content hash whatever its classification (Section 5.3)
 
 **STARKs (FRI-based) — DESIGN-STAGE** — the post-quantum ZK target *(transition path: see §4.4 algorithm agility)*
 - Would be used for: the same three proof properties, with genuine zero-knowledge + post-quantum security
@@ -737,7 +802,7 @@ Every primitive below was considered and rejected for the mainnet node path. The
 | **ECDSA secp256k1** (Bitcoin/Ethereum signature curve) | Same Shor exposure as Ed25519. Never used in Elara runtime. Mentioned in OpenTimestamps anchoring (§ companion docs) for whitepaper prior-art only — not a runtime dependency. |
 | **ECDSA P-256 / NIST curves** | Same Shor exposure. Excluded from PQ transport, signature, and KEM paths. |
 | **RSA** (any modulus size) | Shor breaks RSA in polynomial time on a sufficiently capable CRQC. No Elara path uses RSA; PQ transport uses Kyber768 KEM, signatures use Dilithium3/SPHINCS+. |
-| **BN254 / BLS12-381 pairings** | Pairing-based curves are CRQC-breakable, so they are excluded from the node consensus, transport, and signature paths. BN254 appears only in the design-stage Groth16 construction (§5.3) — **no BN254/pairing code is in the tree**. BLS12-381 is used **only** by the optional `verify-cli` offline tool (`drand-verify`, to check drand randomness-beacon signatures on anchors), never by the node. |
+| **BN254 / BLS12-381 pairings** | Pairing-based curves are CRQC-breakable, so they are excluded from the node consensus, transport, and signature paths. BN254 appears only in the design-stage Groth16 construction (§5.3) — **no BN254 code is in the tree**, and no pairing code is in the node. BLS12-381 is used **only** by the optional `verify-cli` offline tool (`drand-verify`, to check drand randomness-beacon signatures on anchors), never by the node. |
 | **BLS threshold signatures** | Pairing-based threshold cryptography is CRQC-breakable. Phase 5.1 (cryptographically-blind mempool) is locked to lattice-based or hash-based threshold schemes — see §4F.3 decision 2026-04-19. No BLS threshold on the mainnet path, ever. |
 | **ECDH (any curve)** | Replaced by Kyber768 KEM for key agreement. PQ transport never falls back to ECDH. |
 | **NaCl / standalone X25519** | Not used as a *standalone* classical key-exchange and never for signatures. `x25519-dalek` **is** a dependency — but only as the classical half of the **hybrid ML-KEM-768 + X25519** transport key-exchange (defence-in-depth: the session key stays secret unless *both* the PQ and classical halves break). It is never a classical fallback. |
@@ -747,7 +812,7 @@ Every primitive below was considered and rejected for the mainnet node path. The
 | Cryptographic surface | Primitive | Standard | Quantum status |
 |---|---|---|---|
 | Record signatures | Dilithium3 | ML-DSA, FIPS 204 | PQ |
-| Anchor / dual-sig | SPHINCS+ | SLH-DSA, FIPS 205 | PQ |
+| Anchor / dual-sig | SPHINCS+ | pre-standard SPHINCS+-SHA2-192f (round 3; not FIPS 205) | PQ |
 | Session-key exchange | Kyber768 | ML-KEM, FIPS 203 | PQ |
 | Verifiable randomness | Dilithium3-VRF | derived from FIPS 204 | PQ |
 | Zero-knowledge proofs | SHA3-256 commitments (Phase-1); STARKs are the design-stage target (§5.3) | SHA3 commitments / FRI (design-stage) | Hash-based (PQ-acceptable); genuine ZK is design-stage |
@@ -761,12 +826,12 @@ The protocol is PQ across signatures, KEM, VRF, hashes, AEAD, and KDFs. The sess
 
 ### 4.3 Dual-Signature Strategy
 
-Critical validation records (anchor attestations, identity registrations, governance votes) carry dual signatures:
+A record can carry a second, SPHINCS+ signature alongside its ML-DSA signature (Profile A):
 
 1. **Primary:** ML-DSA (FIPS 204, formerly CRYSTALS-Dilithium) (fast, compact)
 2. **Secondary:** SPHINCS+ (conservative, hash-based)
 
-This provides defense-in-depth against cryptographic breakthroughs. Dilithium (lattice-based) and SPHINCS+ (hash-based) rely on fundamentally different mathematical assumptions — lattice problems and hash function preimage resistance, respectively. Breaking one does not weaken the other. If lattice-based cryptography falls to an unforeseen advance, the hash-based signature remains valid; if hash functions are weakened, the lattice signature still holds. Both must be broken simultaneously to forge a dual-signed record. The protocol's trust model degrades gracefully rather than failing catastrophically.
+The design goal is defense-in-depth against cryptographic breakthroughs: ML-DSA (lattice-based) and SPHINCS+ (hash-based) rely on different mathematical assumptions, so a dual-signed record should stay unforgeable unless both are broken. **The current implementation does not yet meet that goal.** A record's SPHINCS+ public key is taken from the record itself and is not bound to the signer's identity, so an attacker who can forge ML-DSA signatures can also attach a fresh SPHINCS+ key and signature of their own; and because the SPHINCS+ fields are not part of the record identifier, any relay can strip or replace them without changing it. Until the key is bound (a planned wire change), a dual-signed record is as strong as ML-DSA alone. Witness attestations and epoch seals carry a single ML-DSA signature in any case, so dual signing protects record authorship at most, never consensus.
 
 ### 4.4 Algorithm Agility
 
@@ -779,7 +844,7 @@ signature {
 }
 ```
 
-When new algorithms are standardized or existing ones are deprecated, the protocol can migrate without structural changes. Old records remain valid under their original algorithms; new records use updated algorithms. The DAG preserves the full cryptographic history.
+When new algorithms are standardized or existing ones are deprecated, the protocol can migrate without structural changes. The design intent is that old records remain verifiable under their original algorithms while new records use updated ones. The shipped verifier does not yet honor this: it rejects the signature length of Round-3 Dilithium3, the pre-standard predecessor of ML-DSA-65 (FIPS 204), and no longer decodes wire versions 1–3, so records in those formats cannot be verified by the current code. Keeping retired formats verifiable is open work. The DAG preserves the full cryptographic history.
 
 This agility is a core survival mechanism. A protocol that hardcodes today's best cryptography is guaranteed to become insecure. A protocol that specifies algorithms by identifier can evolve with the field.
 
@@ -793,7 +858,7 @@ This agility is a core survival mechanism. A protocol that hardcodes today's bes
 | DAG-based systems        | Ed25519 / hash-based OTS                        | Partial      | In progress      |
 | Elara Protocol           | ML-DSA (FIPS 204, "Dilithium") (all profiles) + SPHINCS+ (Profile A) | **Yes**      | **Native**       |
 
-The Elara Protocol's signature layer is post-quantum from genesis — there is no legacy migration burden. However, algorithm agility (Section 4.4) ensures the protocol can adopt future PQC standards as the field evolves; "quantum-safe at launch" is not the same as "cryptographically final." (The ZKP layer uses classical elliptic curves in Phase 1 — see Section 11.26 for the quantum migration path.)
+The Elara Protocol's signature layer is post-quantum from genesis — there is no legacy migration burden. However, algorithm agility (Section 4.4) ensures the protocol can adopt future PQC standards as the field evolves; "quantum-safe at launch" is not the same as "cryptographically final." (In Phase 1 the ZKP layer ships only SHA3-256 commitments, which do not yet hide anything (Section 5.3) and use no elliptic curves; the specified Groth16/BN254 construction is design-stage and is rejected on the wire until it lands. See Section 11.26 for the quantum migration path.)
 
 ### 4.6 PQC Size Penalty and Constrained Device Strategy
 
@@ -801,24 +866,26 @@ Post-quantum cryptography provides stronger security at a measurable cost in siz
 
 | Algorithm           | Key Size    | Signature Size | Classical Equivalent   |
 |---------------------|-------------|----------------|------------------------|
-| CRYSTALS-Dilithium3 | 1,952 bytes | 3,309 bytes    | ECDSA: 33 + 72 bytes   |
+| ML-DSA-65           | 1,952 bytes | 3,309 bytes†   | ECDSA: 33 + 72 bytes   |
 | SPHINCS+-SHA2-192f  | 48 bytes    | 35,664 bytes   | Ed25519: 32 + 64 bytes |
-| CRYSTALS-Kyber768   | 1,184 bytes | 1,088 bytes    | X25519: 32 bytes       |
+| ML-KEM-768          | 1,184 bytes | 1,088 bytes    | X25519: 32 bytes       |
 
-Dilithium signatures are **~46x larger** than ECDSA signatures (3,309 vs ~72 bytes). For a datacenter or laptop, this is negligible. For an ESP32 sending thousands of signed readings over LoRa (max payload ~242 bytes), it is prohibitive.
+†FIPS 204 ML-DSA-65 standard value (3,309 bytes). Earlier liboqs Round 3 implementations used 3,293 bytes.
+
+ML-DSA-65 signatures are **~46x larger** than ECDSA signatures (3,309 vs ~72 bytes). For a datacenter or laptop, this is negligible. For an ESP32 sending thousands of signed readings over LoRa (max payload ~242 bytes), it is prohibitive.
 
 **Solution: Tiered Cryptographic Profiles**
 
 The protocol defines three cryptographic profiles that devices select based on their capabilities:
 
 **Profile A: Full PQC (default)**
-- Dilithium3 signatures, Kyber768 key exchange, SPHINCS+ for anchoring
+- ML-DSA-65 signatures, ML-KEM-768 key exchange, optional SPHINCS+ second signature
 - For: servers, laptops, phones, gateways
 - Signature overhead: ~3.3 KB per record
 
 **Profile B: Compact PQC**
-- Dilithium3 (same parameter set as Profile A: 3,309 byte signatures, NIST Level 3)
-- No dual signatures (Dilithium only, no SPHINCS+)
+- ML-DSA-65 (same parameter set as Profile A: 3,309 byte signatures, NIST Level 3)
+- No dual signatures (ML-DSA only, no SPHINCS+)
 - For: Raspberry Pi, industrial controllers, modern IoT gateways
 - Signature overhead: ~3.3 KB per record (identical to Profile A primary signature)
 
@@ -834,7 +901,7 @@ The protocol defines three cryptographic profiles that devices select based on t
 
 All three profiles produce validation records that are interoperable on the DAM. The profile is specified in the record metadata, so verifiers know which security level applies.
 
-**Profile B Security Boundary (v0.7.1 clarification).** Profile B is Profile A minus SPHINCS+ — it uses the same ML-DSA-65 (Dilithium3, NIST Level 3) primary signature but omits the SLH-DSA secondary signature. Under the quantum adversary model of §11.12 / §12.1, Profile B records become forgeable if ML-DSA-65 is broken by a quantum adversary — unlike Profile A records which remain secure via the independent SPHINCS+ signature. Consequently, Profile B identities are treated as lower-trust for consensus purposes. The protocol recommends: (a) transfer limits for Profile B identities (e.g., max 1,000 beats per transaction), (b) settlement requires a minimum fraction of Profile A attestations (e.g., ≥50% of attesting stake from Profile A witnesses), and (c) high-value operations (staking >10K beats, governance votes) require Profile A identity.
+**Profile B Security Boundary (v0.7.1 clarification; corrected in v0.7.38).** Profile B is Profile A minus SPHINCS+: it uses the same ML-DSA-65 primary signature and omits the secondary SPHINCS+ signature. If ML-DSA-65 is broken, Profile B records become forgeable. The design intends Profile A records to stay secure in that case through the independent SPHINCS+ signature; as shipped they do not, because the SPHINCS+ key is not yet bound to the signer's identity (Section 4.3). Profile B identities should therefore be treated as lower-trust. The runtime caps a transfer or stake without a SPHINCS+ signature at 1,000 beats, but any SPHINCS+ signature lifts the cap, including one made with a freshly generated key. Two further measures are recommendations the runtime does not enforce: requiring a minimum fraction of Profile A attestations for settlement (witness attestations carry a single ML-DSA signature in any case) and requiring a Profile A identity for governance votes.
 
 **Future PQC Size Reduction: NIST Additional Signatures Project**
 
@@ -867,37 +934,37 @@ This section is normative. Implementations that ship classical TLS (rustls, Open
 
 #### 4.7.1 The Hybrid Handshake
 
-ElaraPQ uses a three-message hybrid handshake combining classical Curve25519 with the NIST-standardized ML-KEM-768 (FIPS 203). The handshake is:
+ElaraPQ uses a three-message hybrid handshake in the Noise XX style. Key agreement combines classical X25519 with the NIST-standardized ML-KEM-768 (FIPS 203); both peers authenticate with their long-term ML-DSA-65 (FIPS 204, "Dilithium3") identity keys. Each message travels in a frame with a 9-byte header: `ELPQ_MAGIC` (4 bytes), `WIRE_VERSION` (1), frame type (1) and a 3-byte big-endian payload length. The payloads are:
 
 ```
-msg1: initiator → responder
-  ELPQ_MAGIC(4) | WIRE_VERSION(1) | timestamp(8) |
-  initiator_dilithium3_pk(1952) | initiator_x25519_pk(32) |
-  initiator_kyber768_ct(1088) | initiator_dilithium3_sig_over_transcript(3309)
-  = 6394 bytes
+msg1 (Hello): initiator → responder
+  timestamp(8) | ephemeral_x25519_pk(32) | ephemeral_mlkem768_pk(1184)
+  = 1224 bytes
 
-msg2: responder → initiator
-  responder_x25519_pk(32) | responder_kyber768_ct(1088) |
-  responder_dilithium3_sig_over_transcript(3309) | aead_tag(16)
-  = 4445 bytes
+msg2 (Challenge): responder → initiator
+  ephemeral_x25519_pk(32) | mlkem768_ct(1088) |
+  AEAD(responder_mldsa65_pk(1952) | responder_sig_over_transcript(3309)) + tag(16)
+  = 6397 bytes
 
-msg3: initiator → responder
-  aead_handshake_finished(48)
-  = 48 bytes
+msg3 (Auth): initiator → responder
+  AEAD(initiator_mldsa65_pk(1952) | initiator_sig_over_transcript(3309)) + tag(16)
+  = 5277 bytes
 ```
 
-The session key is derived as:
+The responder rejects a msg1 whose timestamp is more than `MAX_HANDSHAKE_SKEW_SECS` from its own clock. The session keys are derived as:
 
 ```
-shared_x25519     = X25519(initiator_x25519_sk, responder_x25519_pk)
-shared_kyber768   = ML-KEM-768.Decapsulate(responder_kyber768_ct, sk)
-session_key       = HKDF-SHA256(salt = transcript_hash,
-                                ikm  = shared_x25519 || shared_kyber768,
-                                info = "elara-pq-session-v1",
-                                len  = 32)
+transcript_hash  = running SHA3-256 hash of the handshake, seeded with WIRE_VERSION
+x25519_ss        = X25519(own ephemeral secret, peer's ephemeral public key)
+mlkem768_ss      = ML-KEM-768 shared secret (the responder encapsulates to the
+                   initiator's ephemeral key; the initiator decapsulates)
+k_send, k_recv   = HKDF-SHA256(salt = transcript_hash,
+                               ikm  = x25519_ss || mlkem768_ss),
+                   expanded with the labels "ELPQ session v1 k_send" and
+                   "ELPQ session v1 k_recv", 32 bytes each
 ```
 
-The session key feeds ChaCha20-Poly1305 AEAD for all subsequent frames. The transcript signature binds both peers to the full handshake under their long-term ML-DSA-65 (FIPS 204, "Dilithium3") identity keys, preventing transcript-substitution attacks. The hybrid construction means a successful attack must break both X25519 (classical, trivially broken by Shor's algorithm) **and** ML-KEM-768 (post-quantum, lattice-based, currently no known attack) — the protocol fails open only if both substrates fall.
+The two keys feed ChaCha20-Poly1305 AEAD, one key per direction; they encrypt the identity blocks of msg2 and msg3 and every later frame. Each peer signs the running transcript hash with its ML-DSA-65 identity key, so impersonating a peer requires forging ML-DSA-65, and the identities never cross the wire in the clear. A dialing node that does not already know the peer's key pins the key presented on first contact (trust on first use). The hybrid key agreement means a passive attacker must break both X25519 (breakable by Shor's algorithm on a large quantum computer) **and** ML-KEM-768 (lattice-based, no known practical attack) to read the traffic.
 
 Constants are normative:
 
@@ -907,7 +974,7 @@ Constants are normative:
 | `WIRE_VERSION` | `0x02` | `crates/elara-pq-transport/src/frame.rs` |
 | `MAX_HANDSHAKE_SKEW_SECS` | `30` | `crates/elara-pq-transport/src/handshake.rs` |
 | `DEFAULT_HANDSHAKE_TIMEOUT` | `10s` | `src/network/pq_transport/stream.rs` |
-| `MAX_FRAME` | 4 MiB after AEAD | `crates/elara-pq-transport/src/frame.rs` |
+| `MAX_PAYLOAD` | 2^24 − 1 bytes (16 MiB − 1), the most the 3-byte length field can express | `crates/elara-pq-transport/src/frame.rs` |
 
 The Source column names the file, not a line: the constant's own name in column 1
 is the anchor. Three of the four line numbers here were stale by 2026-09-06, and
@@ -929,15 +996,15 @@ The protocol does not define a "classical-only" transport mode. Implementations 
 - HTTPS over TLS 1.3 with classical KEM (X25519, P-256, RSA) — forbidden as a node-to-node transport on mainnet.
 - HTTPS over TLS 1.3 with hybrid KEM (X25519+ML-KEM-768) negotiated by IETF draft-ietf-tls-hybrid-design — forbidden, because the draft is not yet a standard and Elara does not pin to any in-flight standardization process.
 - QUIC with the same primitives — forbidden on the same grounds.
-- Plaintext UDP (any form) — forbidden.
+- Plaintext UDP (any form) — forbidden as a node-to-node transport. Local discovery and NAT detection (mDNS, STUN and UPnP) do send plaintext UDP datagrams; they carry at most a node's identity hash, node type, software version and address, never records, attestations or seals.
 
-The protocol does permit a *bootstrap* exception (§11.14): light clients on first install retrieve a foundation-signed seed-peer list from a single foundation-operated HTTPS origin, used exactly once. After first contact, all subsequent traffic uses ElaraPQ.
+The protocol permits a *bootstrap* exception (§11.14) in its design: a light client on first install would fetch a signed seed-peer list from a single HTTPS origin, once, and use ElaraPQ for all later traffic. This is not implemented. Today a node takes its seed peers from its operator's configuration, and the light-client SDK talks to a configured seed over HTTP(S) on the public listener that testnet nodes keep open (`allow_public_https`, default true; a node configured with `network_id = "mainnet"` refuses to start with it on).
 
 Implementations that wish to integrate with non-Elara IoT or web infrastructure (MQTT bridges, CoAP gateways, HTTP REST APIs documented in §8.3) may use classical transports for that integration boundary. Those classical transports terminate at the gateway; the gateway then signs validation records with the device's PQ identity (Profile C, §4.6) and pushes them onto the DAM via ElaraPQ. The classical surface is a non-protocol boundary — outside the scope of this section.
 
 #### 4.7.4 Pluggable Transports for Censored Networks
 
-For deployments in jurisdictions that block direct ElaraPQ traffic, the protocol supports tunneling ElaraPQ frames inside other transports (Tor pluggable transports, WireGuard, Tailscale, SSH port-forwarding). The ElaraPQ handshake and AEAD remain unchanged; the outer wrapper is opaque to the protocol.
+For deployments in jurisdictions that block direct ElaraPQ traffic, an operator can carry ElaraPQ frames inside an external tunnel (WireGuard, Tailscale, SSH port-forwarding, or Tor), since the transport runs over ordinary TCP; no pluggable transport is built into the node (Section 11.16). The ElaraPQ handshake and AEAD remain unchanged; the outer wrapper is opaque to the protocol.
 
 What the protocol does **not** do: define a "domain-fronting mode" that masquerades as classical HTTPS to fool deep-packet-inspection middleboxes. Earlier drafts of this section described domain fronting as a censorship-resistance feature; that language is retired. Domain-fronting compromises the cryptographic transcript by accepting classical TLS framing on the outer layer, which leaks per-connection metadata (TLS ClientHello fingerprints, SNI when not encrypted via ECH, certificate chain timing) that defeat the transport's post-quantum forward-secrecy goal. Operators who need DPI-bypass should use Tor, Snowflake, or obfuscated VPNs as the carrier — not bake classical TLS into the protocol.
 
@@ -952,7 +1019,11 @@ A mainnet node operator can verify their deployment matches §4.7 by:
 
 These four checks are the operator-facing acceptance gates for §4.7 compliance.
 
+**Status:** these gates describe the mainnet target, and three of them cannot pass today. No mainnet build profile exists: the node build depends on `hyper` and `hyper-util` directly and on `rustls`, `tokio-rustls` and `rustls-pki-types` through `reqwest`, so check 4 fails. The `elara-capture-audit` tool named in check 2 has not been written. The grep in check 3 matches four source comments. Check 1 depends on `allow_public_https` being off, which testnet nodes do not do by default.
+
 ## 5. Zero-Knowledge Validation
+
+*Implementation-status note: throughout Section 5, "zero-knowledge proof" / "ZKP" describes the specified design. Phase 1 attaches SHA3-256 commitments to PRIVATE and RESTRICTED records; they are not zero-knowledge proofs and do not yet hide anything: each proof carries its opening, the proof is not bound to its record, and every record carries its plain content hash. The Groth16/BN254 and zk-STARK constructions are design-stage and rejected on the wire until a prover/verifier lands. Section 5.3 gives the full status; Section 11.26 describes the migration path and Section 14.3 its open risks.*
 
 ### 5.1 The Privacy Paradox
 
@@ -965,9 +1036,11 @@ Validation and privacy are traditionally in tension. To prove you created someth
 - Corporate R&D
 - Personal journals or private communications
 
-The Elara Protocol specifies zero-knowledge proofs (ZKPs) as the target privacy layer: cryptographic constructions that prove a statement is true without revealing the underlying data. Phase 1 ships SHA3-256 hash commitments as a stand-in (not genuine zero-knowledge — see §5.3); the zk-SNARK constructions described below are design-stage.
+The Elara Protocol specifies zero-knowledge proofs (ZKPs) as the target privacy layer: cryptographic constructions that prove a statement is true without revealing the underlying data. Phase 1 ships SHA3-256 hash commitments as a stand-in (not genuine zero-knowledge — see §5.3), and they do not yet hide anything: each proof carries its opening, and every record carries its plain content hash. The zk-SNARK constructions described below are design-stage.
 
 ### 5.2 Classification Levels
+
+*Phase 1 status: the levels below describe the design. In the current runtime every record, whatever its level, carries its plain content hash, and PRIVATE and RESTRICTED records add a SHA3-256 commitment that is checked only for form and is not bound to the record, so a classified record does not yet hide its content hash; SOVEREIGN is a label only (Section 5.3).*
 
 Every validation record carries a classification level that determines what the network can see:
 
@@ -991,7 +1064,10 @@ Every validation record carries a classification level that determines what the 
 > The Phase-1 runtime implements **SHA3-256 commitment proofs**
 > (`src/crypto/commitment.rs`, whose own doc-comment notes they are "not
 > zero-knowledge, not post-quantum in the ZK sense"): the three proof types
-> below are implemented as hash commitments, **not** as zk-SNARK circuits. The
+> below are implemented as hash commitments, **not** as zk-SNARK circuits, and
+> they do not hide the committed value: each proof carries its opening, the
+> proof is not bound to its record, and every record carries its plain content
+> hash whatever its classification. The
 > Groth16-on-BN254 construction this section specifies is the **migration
 > target** — there is no Groth16 prover, verifier, trusted setup, or Cargo
 > feature in the tree. See whitepaper §14.3 for the honest gap assessment. The
@@ -1037,11 +1113,13 @@ Poseidon parameters for BN254: rate=2, capacity=1, alpha=17, 8 full rounds + 57 
 **Phase-1 (IMPLEMENTED):** SHA3-256 commitment proofs. The wire format carries a
 version/type discriminator, the 32-byte commitment, the public inputs, and the
 commitment proof data; `src/crypto/commitment.rs` is the byte-level source of
-truth (version byte `0x03`). Groth16-format bytes (version `0x02`) are **rejected
+truth (version byte `0x03`). The proof data is the commitment's opening (the
+committed value and its blinding factor), so these proofs reveal what they
+commit to. Groth16-format bytes (version `0x02`) are **rejected
 fail-closed** at ingest, since no Groth16 verifier exists.
 
 **Specified Groth16 format (DESIGN-STAGE, not implemented):** 2 G1 points + 1 G2
-point ≈ 192 bytes compressed on BN254, verifiable in ~1 ms on commodity hardware
+point = 128 bytes compressed on BN254 (256 uncompressed), verifiable in a few milliseconds on commodity hardware
 once a prover lands. Version byte `0x02` is reserved for this future format.
 
 #### 5.3.3 PQC + ZK Orthogonal Composition
@@ -1051,7 +1129,7 @@ ZK proofs and post-quantum signatures serve orthogonal purposes and compose natu
 - **ZK proof = privacy** — hides content while proving properties about it
 - **PQC signature = authenticity** — proves the record was created by a specific identity
 
-ML-DSA-65 (FIPS 204, "Dilithium3") signature verification inside R1CS is infeasible: lattice operations produce millions of constraints, making proof generation take minutes and CRS generation hours. The pragmatic split keeps both properties without combining them inside a single circuit. A PRIVATE record carries both: a privacy proof (Phase 1: a SHA3-256 commitment; design-stage: a ZK proof — verifiable without learning the content) and a PQC signature (anyone can verify who created it).
+ML-DSA-65 (FIPS 204, "Dilithium3") signature verification inside R1CS is impractical: lattice operations produce millions of constraints, making proof generation take minutes and CRS generation hours. The pragmatic split keeps both properties without combining them inside a single circuit. A PRIVATE record carries both: a privacy proof (Phase 1: a SHA3-256 commitment, which does not yet hide the content hash — see §5.3; design-stage: a ZK proof — verifiable without learning the content) and a PQC signature (anyone can verify who created it).
 
 #### 5.3.4 Trusted Setup
 
@@ -1069,7 +1147,7 @@ For mainnet, a multi-party computation (MPC) ceremony would produce the CRS. Sec
 
 #### 5.3.5 Gossip Verification
 
-ZK proof verification dispatches on the first byte of `zk_proof`. In the Phase-1 runtime: SHA3-256 commitment proofs (version `0x03`, and legacy `0x01`) are verified by hash recomputation (`src/crypto/commitment.rs`, `src/crypto/zk.rs`); Groth16-format bytes (version `0x02`) are **rejected fail-closed** at ingest, since no Groth16 verifier exists. (In the design-stage Groth16 construction, `0x02` proofs would be verified against the CRS loaded at node startup.) WASM browser nodes relay proofs without verifying — native witness nodes verify before consensus acceptance.
+ZK proof verification dispatches on the first byte of `zk_proof`. In the Phase-1 runtime, SHA3-256 commitment proofs (version `0x03`) are verified by recomputing the commitment from the opening the proof carries (`src/crypto/commitment.rs`), and legacy `0x01` proofs are checked for structure only (`src/crypto/zk.rs`); neither is compared with the record the proof travels with; Groth16-format bytes (version `0x02`) are **rejected fail-closed** at ingest, since no Groth16 verifier exists. (In the design-stage Groth16 construction, `0x02` proofs would be verified against the CRS loaded at node startup.) WASM browser nodes relay proofs without verifying — native witness nodes verify before consensus acceptance.
 
 (Note: the BN254 curve in the design-stage construction provides ~100-bit security against classical attacks and is NOT post-quantum. See Section 14.3 for the migration timeline to post-quantum ZKP constructions.)
 
@@ -1249,7 +1327,7 @@ Interplanetary communication is expensive. The Deep Space Network allocates band
 
 **Bloom filters** — probabilistic data structures (~10 bytes per element) that answer "does this record exist in your zone?" with a small false-positive rate. Bloom filter exchange enables efficient detection of missing records before full synchronization begins.
 
-**Compression** — validation records use a compact binary encoding (not JSON or XML) with protocol-buffer-style varint encoding. A typical PUBLIC validation record is approximately 4–5 KB, dominated by the ML-DSA-65 (FIPS 204, "Dilithium3") signature (~3.3 KB).
+**Compression** — validation records use a compact binary encoding (not JSON or XML) with fixed-width length prefixes. A typical PUBLIC validation record is about 6 KB, most of it the creator's ML-DSA-65 (FIPS 204, "Dilithium3") signature (3,309 B) and public key (1,952 B); the optional SPHINCS+ signature of Profile A brings it to about 41 KB.
 
 ### 7.5 Zone Architecture
 
@@ -1260,19 +1338,21 @@ Zones use hierarchical semantic paths that reflect real-world organizational and
 ```
 "medical/eu/west/germany/bavaria"
 "finance/global"
-"iot/manufacturing/toyota/plant-7"
+"iot/manufacturing/automotive/plant-7"
 "personal/alice"
 ```
 
 **Record routing** is determined by the record's `zone_refs` field — records go to zones based on their purpose and context. A medical record from a Bavarian hospital naturally belongs in `medical/eu/west/germany/bavaria`.
 
-**Zone subscription** is voluntary — nodes choose which zones to store and process. A hospital server subscribes to `medical/eu/west`, a Toyota factory subscribes to `iot/manufacturing/toyota/*`, a phone subscribes only to its owner's personal zone. Nodes never store records for zones they don't subscribe to, enabling each node to hold a fraction of the global dataset.
+**Zone subscription** is voluntary — nodes choose which zones to store and process. A hospital server subscribes to `medical/eu/west`, a car factory subscribes to `iot/manufacturing/automotive/*`, a phone subscribes only to its owner's personal zone. Nodes never store records for zones they don't subscribe to, enabling each node to hold a fraction of the global dataset.
 
 **Consensus participation** is stake-gated — while any node can subscribe to store records, participating as a witness (attesting to epoch seals) requires:
 - Minimum 100 beats staked
-- PoW-verified identity with `min_pow_difficulty` (currently 16 bits)
+- PoW-verified identity with `min_pow_difficulty` (default 20 bits)
 - Identity age ≥ 48 hours
 - Diversity check: no single entity or /24 IP subnet may control >33% of a zone's total staked weight
+
+*Implementation-status note: the current runtime enforces these requirements only in part. Attestations pushed to a node are checked for the minimum stake and for identity age; attestations pulled from peers, or deferred until their record arrives, skip both checks. The age check requires one hour, not 48, counted from when the checking node first saw the identity, and exempts genesis validators. The `min_pow_difficulty` proof of work is checked when a node admits a peer to its peer table, not for the witness an attestation names; an attestation's own optional proof of work (PoWaS, Section 11.1) is verified when present, on the push paths and the batch pull. The diversity cap is defined in code but not applied. The runtime's `docs/KNOWN-LIMITATIONS.md` (limitations 23 and 34) gives the details.*
 
 This separates Sybil resistance from zone assignment. The earlier hash-based model (`SHA3-256(public_key) mod NUM_ZONES`) provided Sybil-resistant zone assignment but created semantically meaningless groupings — a hospital might share a zone with unrelated IoT sensors. At quintillion-record scale, zone-scoped gossip REQUIRES semantic grouping to bound bandwidth. Sybil defense now operates at the witness admission layer through the existing mechanisms (PoW, stake, age, diversity scoring) rather than at the zone assignment layer.
 
@@ -1280,36 +1360,7 @@ This separates Sybil resistance from zone assignment. The earlier hash-based mod
 
 **Wire format:** Zone identifiers use variable-length hierarchical paths (wire format v3), replacing the previous `u8 zone_id` which limited the network to 256 zones.
 
-#### 7.5.1.a Zone Transition Seals (v0.7.9+)
-
-A zone split or merge is not a local decision. It changes the mapping from record IDs to leaf zones, and any attestation produced under the old mapping must be verifiable under the new mapping — otherwise the network forks. The protocol defines a **TransitionSeal** as the authoritative, anchor-co-signed record of a split or merge event.
-
-A TransitionSeal is a record of kind `zone_transition` carrying:
-
-- `transition_id` — UUIDv7 identifying the event.
-- `kind` — `split` or `merge`.
-- `parent_zone` — the zone being split, or for a merge, the set of zones being unified.
-- `child_zones` — the resulting leaf zones. For a split, `|child_zones| ≥ 2`; for a merge, `|child_zones| = 1`.
-- `boundary_function` — the invariant that defines how account identities route to child zones. The canonical form is `account_belongs_to_child(account_hash, child_zone) = SHA3(account_hash || parent_zone) ∈ child_range(child_zone)`, where each child_zone is allocated a contiguous range over the 2^256 hash space. This is deterministic, stateless, and verifiable by any light client given the TransitionSeal.
-- `effective_epoch` — the epoch at which the transition takes effect. All records with timestamp `< effective_epoch × epoch_interval` route under the old mapping; records at or after route under the new mapping.
-- `proposer` — the anchor node proposing the transition.
-- `anchor_signatures` — an M-of-N ML-DSA-65 (FIPS 204, "Dilithium3") multi-signature over the canonical bytes, where M = 2/3 of the anchor pool at proposal time, and N is the pool size. Under 2^128 quantum attack models, M-of-N over Dilithium3 is the same security level as a single Dilithium3 signature (per §4.2), so the multi-sig is for trust distribution, not additional cryptographic strength.
-
-**Invariants.** A TransitionSeal is valid iff:
-
-1. `|child_zones| ≥ 2` (split) or `|parent_zones| ≥ 2 ∧ |child_zones| = 1` (merge).
-2. `anchor_signatures.len() ≥ ceil(2 × N / 3)`.
-3. Every signature in `anchor_signatures` verifies against a key in the anchor registry at `effective_epoch - dispute_window`.
-4. The `boundary_function` partitions the parent's account-hash space without overlap or gap.
-5. For a merge, the merged `child_zone` absorbs the union of every parent's records.
-
-**Dispute window.** A TransitionSeal has a 3-epoch dispute window starting at `effective_epoch`. During the window, any anchor or witness can submit a counter-TransitionSeal (same `effective_epoch`, incompatible `boundary_function` or `child_zones`). If a counter-seal with ≥ M valid anchor signatures arrives before `effective_epoch + 3`, the original is rejected and the network continues under the pre-transition mapping. Only after the dispute window closes does the transition become part of the canonical zone registry.
-
-**Replay through attestations.** Any attestation produced before `effective_epoch` attests to records under the pre-transition mapping. After `effective_epoch`, attestations are verified against the new mapping. A record created before `effective_epoch` but arriving at a peer after it is routed using a resolver: the peer walks the zone registry from the record's timestamp forward, applying each TransitionSeal's `boundary_function` in effective_epoch order. This is `resolve_current_leaf(record_id)` — O(log(transitions)) and free of locks.
-
-**Light-client verification.** A light client fetches TransitionSeals alongside epoch seals during header-only sync. Given any account identity and the TransitionSeal chain, a light client can deterministically compute the current leaf zone for that account without ever storing records — just apply the boundary functions in order.
-
-**Why M-of-N, not a single anchor signature.** A zone split redirects future records and retroactively re-partitions attestation validity. A compromised anchor could propose a malicious split to hijack a profitable zone's rewards. The 2/3-anchor threshold matches the witness-committee finality threshold and ensures no single anchor can unilaterally alter the zone topology.
+*Implementation-status note: the semantic routing and storage model above is design-stage. In the current runtime a record's zone is derived from a SHA3-256 hash of its record id, not from its purpose or context. A record may also carry an explicit zone path (wire format v3); it is not covered by the creator's signature. `zone_refs` are causal anchors that nodes add after signing (Section 11.9), not a routing input. A node configured with zone subscriptions rejects records for other zones; with none configured, the default, it accepts every zone. Zone splits and merges are proposed as transition seals (Section 7.5.3), not through a governance vote.*
 
 #### 7.5.2 Interplanetary Extensions (Aspirational)
 
@@ -1334,11 +1385,54 @@ Zone: Deep-Space
 └── Subzone: Voyager-Relay
 ```
 
-In this model, zone assignment transitions from hash-based to latency-based: nodes physically located on Mars would join the Mars zone because cross-planet consensus with Earth nodes is impractical at 3-22 minute one-way delays. The hash-based zone model described in Section 7.5.1 would operate *within* each planetary zone, providing intra-planet shard distribution. This architecture is specified but untested — it is included to demonstrate that the protocol's partition tolerance (Section 7.3) and asynchronous design accommodate interplanetary operation without structural changes.
+In this model, zone assignment transitions from semantic to latency-based: nodes physically located on Mars would join the Mars zone because cross-planet consensus with Earth nodes is impractical at 3-22 minute one-way delays. The semantic subscription model described in Section 7.5.1 would operate *within* each planetary zone, providing intra-planet zone distribution. This architecture is specified but untested — it is included to demonstrate that the protocol's partition tolerance (Section 7.3) and asynchronous design accommodate interplanetary operation without structural changes.
+
+#### 7.5.3 Zone Lifecycle: Activity-Driven Split and Merge (v0.7.7)
+
+> **PARTIALLY IMPLEMENTED — authority-gated, not autonomous.** The
+> `TRANSITION_SPLIT`/`TRANSITION_MERGE` seal types, their structural
+> validation, canonical signing encoding, and multi-anchor signature
+> verification ship in the runtime (`zone_transition_seal.rs`); what is not yet
+> live is autonomous account-rehoming across the split (see §14.8). Signed records carry no
+> zone binding in their signed bytes (wire format v6 added a network binding, not a
+> zone binding), so activating this mechanism safely
+> requires a wire-version transition that adds that binding first — a decided
+> one-way door, gated before any federation (see the MESH-BFT merge-semantics
+> design notes in the runtime repository). What *is* shipped is the zone
+> auto-scaling **decision engine** (activity tracking with hysteresis, split/merge
+> recommendations, and dynamic zone-count routing — the `elara-zone-autoscaler`
+> crate); the per-zone transition-seal protocol below is the design it will
+> eventually drive. See also the limitation in §14.8.
+
+**The problem:** Semantic zones are static in §7.5.1 — an operator picks `medical/eu/west` at creation time and the zone carries its full traffic forever. At 1M-zone scale, some zones will become hot (thousands of records per second) while others go cold (weeks between records). A single zone cannot scale past a single anchor's capacity; a cold zone wastes witness attention. The protocol needs a dispute-free mechanism to split hot zones and merge cold ones without interrupting finality.
+
+**Solution: Anchor-attested transition seals.**
+
+Each zone tracks its own activity: records-per-second over a rolling 1-hour window, average epoch inclusion count, and ledger account cardinality. Two configurable thresholds define the lifecycle:
+
+- **Split threshold** (shipped default: average zone rate above **40 rec/sec** — 2× the 20 rec/sec per-zone target rate — held for 4 consecutive scaler ticks) — zone forks into two child zones.
+- **Merge threshold** (shipped default: average zone rate below **2 rec/sec** — 0.1× the per-zone target — held for 4 consecutive scaler ticks; the design adds an account-cardinality floor not yet enforced) — sibling cold zones coalesce with their parent.
+
+**Split protocol:**
+
+1. The anchor observes its zone is above the split threshold. It computes a deterministic split key by SHA3-256 hashing the account_id of each account in the zone; accounts with `key[0] < 0x80` go to child A, the rest to child B. Account-hash redistribution is verifiable by anyone holding the zone's SMT (§ Stage 2, MESH-BFT).
+2. The anchor proposes a **transition seal** — an epoch seal with the special `TRANSITION_SPLIT` flag, containing: parent zone path, child A path, child B path, account→zone assignment Merkle root, parent ledger state at split epoch, child A opening balance_total, child B opening balance_total.
+3. The transition seal is attested by at least 2/3 of the parent zone's stake-weighted witnesses (standard epoch settlement rules). Once zone-settled, both child zones begin sealing epochs independently from the next epoch number.
+4. Clients rebuild their account→zone routing by walking the transition seal chain. Pending cross-zone transfers (whitepaper §11.22.2) targeting the parent zone are redirected to the correct child by account hash.
+
+**Merge protocol:**
+
+Symmetric to split. Two sibling zones under the merge threshold for 24 hours jointly propose a `TRANSITION_MERGE` seal signed by both anchors. The merge seal combines both ledger states; conservation is preserved because `merged.balance_total = sibling_A.balance_total + sibling_B.balance_total`.
+
+**Dispute-free property.** Transition seals are epoch seals — they inherit the safety properties of §11.12. There is no separate voting mechanism, no new attack surface. A Byzantine anchor proposing a bogus split produces a seal that witnesses will reject (the account→zone Merkle root will not match their independent computation).
+
+**Implementation status:** The activity-tracking and decision layer is shipped in the Elara Runtime (the `elara-zone-autoscaler` crate, re-exported through `auto_scale.rs`: hysteresis-gated split/merge recommendations and anchor-signed zone-count transition records with hash-based re-routing). The transition-seal protocol above — per-zone forking with account→zone assignment Merkle roots and balance-partition seals — is partially implemented: the runtime constructs, signs, and verifies `TRANSITION_SPLIT`/`TRANSITION_MERGE` seals (`zone_transition_seal.rs`, proposed via `POST /transitions/propose` and applied on the health tick), but the seals are authority-gated and autonomous account-rehoming across the split is not yet live (§14.8). A shipped seal is accepted on a fixed count of distinct, valid anchor signatures (four for a split, seven for a merge), not on the stake-weighted witness attestation of step 3. Existing tests cover the decision engine and seal validation, not end-to-end seal-based migration.
 
 ---
 
 ## 8. IoT and Hardware Integration
+
+*Implementation-status note: Section 8 describes the IoT design. The Rust runtime implements Profile C delegation records: a gateway identity authorizes and revokes child devices and signs records on their behalf, and a record signed with a registered child's own key is rejected. The hardware attestation level a gateway must meet is self-declared in its record's metadata; no hardware evidence is checked. The node serves an HTTP REST API. The MQTT, CoAP, gRPC, BLE, CAN and LoRaWAN integrations in Section 8.3, the device-to-gateway link, and the gateway-side firmware checks, anomaly detection and key rotation in Section 8.6 are design-stage.*
 
 ### 8.1 The Physical-Digital Bridge
 
@@ -1364,14 +1458,14 @@ The Elara Protocol extends validation from digital content to physical-world dat
 
 ### 8.3 Supported Protocols
 
-The Elara Protocol integrates with standard IoT communication protocols:
+The Elara Protocol is designed to integrate with standard IoT communication protocols. Only the HTTP/HTTPS REST API is implemented today; the other integrations are design-stage:
 
 | Protocol         | Use Case                         | Integration                             |
 |------------------|----------------------------------|-----------------------------------------|
 | **MQTT**         | Lightweight pub/sub messaging    | Signed payloads as MQTT messages        |
 | **CoAP**         | Constrained RESTful protocol     | Validation records as CoAP resources    |
 | **gRPC**         | High-performance RPC             | Native Elara service definitions        |
-| **HTTP/HTTPS**   | IoT-device → gateway integration only (NOT node-to-node — see §4.7) | Profile C delegated signing: device posts unsigned readings to a trusted gateway over HTTPS; gateway signs with PQ identity and forwards to the DAM via ElaraPQ |
+| **HTTP/HTTPS**   | General web integration          | REST API for validation records         |
 | **BLE**          | Short-range device communication | Signed readings via BLE characteristics |
 | **CAN**          | Automotive/industrial bus        | Signed frames on CAN bus                |
 | **LoRa/LoRaWAN** | Long-range, low-power            | Compact validation records for LPWAN    |
@@ -1414,7 +1508,7 @@ For the broader threat of device wipes, identity resets, and reputation escape t
 
 > **Scope: Public permissionless network only.** This section describes the incentive mechanism for coordinating a public network where participants have no pre-existing trust relationship. Enterprise, government, and defense deployments operate as private networks (Section 10.6) with zero beat involvement. Private networks use the same cryptographic protocol (Layer 1) and the same data structure (DAM) without any economic layer. Beats are not required for validation, signing, verification, or any cryptographic operation.
 
-> **Full specification:** The complete public network economic model — including supply mechanics, distribution, governance economics, storage markets, anti-centralization mechanisms, and regulatory analysis — is specified separately. This section provides a protocol-level summary.
+> **This section is the economic specification.** The public network's beat mechanics are specified here and in the related protocol sections — there is no separate economic document. Because the beat is an internal accounting unit and never a tradeable asset (Section 9.2), the protocol defines no token-sale, market-distribution, or securities-classification model. Supply mechanics, the participation faucet, governance weighting, and anti-centralization measures appear here and in Sections 10.3–10.4, 11.1, and 11.17.
 
 ### 9.1 Role of the Beat
 
@@ -1426,16 +1520,16 @@ The Elara Protocol **beat** is a utility unit that enables four protocol functio
 
 3. **Storage delegation** — nodes that cannot store records long-term pay storage-specialized nodes to hold them. The delegating node always retains its signed record header.
 
-4. **Governance participation** — beat holders participate in protocol governance through conviction voting (Section 10.3), subject to anti-centralization constraints (Section 10.4).
+4. **Governance participation** — beat stakers participate in protocol governance through conviction voting (Section 10.3), subject to the anti-centralization constraints detailed in Section 10.4.
 
 ### 9.2 Design Principles
 
 The beat economic model is guided by four principles:
 
-- **Conservation over inflation** — the protocol targets a fixed-supply model where beats circulate between producers (witnesses) and consumers (record submitters) rather than being continuously minted.
+- **Conservation over inflation** — the protocol targets a fixed-supply model where beats circulate between producers (witnesses) and consumers (record submitters) rather than being continuously minted. Supply mechanics are described in Section 11.17.
 - **No gas fees** — transaction costs are borne by the network's reciprocal witnessing model, not by per-transaction fees. At scale (millions of nodes), gas fees would be economically prohibitive.
 - **Layer 1 is always free** — local validation never has a cost (Section 3.5, Section 11.10). The beat economy applies only to Layer 2 network services.
-- **Utility, not speculation** — the beat is an internal accounting unit with network utility, never an investment vehicle. It is not offered, sold, or listed: no ICO, no pre-sale, no exchange listing.
+- **Utility, not speculation** — the beat is an internal protocol accounting unit, not an investment vehicle: it is never offered, sold, listed, or traded. No ICO, no pre-sale, no exchange listing, none planned.
 
 ### 9.3 Protocol Integration Points
 
@@ -1448,9 +1542,9 @@ The beat interacts with the protocol at these specific points:
 - **Zone health metrics** (Section 11.22) — total staked beats as a zone health indicator
 - **Storage delegation** — nodes delegate record storage to storage-specialized nodes in exchange for beats
 
-The complete economic model — including supply model, distribution schedule, anti-centralization mechanisms (diminishing returns, quadratic governance, trust-weighted committee selection), storage delegation markets, and Sybil cost analysis — is specified separately.
+The mechanisms summarized here are specified in detail elsewhere in this document: the supply model in Section 11.17, governance and anti-centralization measures in Sections 10.3–10.4, the participation faucet in Section 9.5 of the whitepaper, and Sybil-cost analysis in Section 11.1.
 
----
+**Validation beats are not a financial instrument — by design.** Beats exist only to meter participation — staking for sybil-resistance, witnessing, and storage delegation. They are never sold, issued for money, listed, or traded: no market, no price, no monetary claim. The unit is built for granular accounting, not value — each beat divides into **one billion base units** (10⁹ — nine decimal places), for a total of about **ten quintillion** base units (10¹⁹) across the whole network: enough to meter fractional work across billions of devices. Each base unit is economically meaningless **not because there are so many, but because beats are never traded** — they are accounting entries for work done, not an asset to hold. That is deliberate: a unit of account, never a store of value.
 
 ## 10. Governance
 
@@ -1481,33 +1575,37 @@ The Elara Protocol's governance is federated, not centralized:
 
 Cross-zone decisions use a **conviction voting** model [36] (inspired by conviction voting mechanisms pioneered by Commons Stack and 1Hive, 2019):
 
-- Beat holders express preferences by staking beats toward proposals
-- Voting weight accrues over time according to: conviction(t) = stake × (1 - e^(-t/τ)) where t is days staked and τ = 7 days (time constant). Weight reaches ~63% at 7 days, ~86% at 14 days, ~95% at 21 days, and ~98.6% (effectively full conviction) at 30 days. The exponential ramp makes flash-vote attacks economically pointless — meaningful conviction requires sustained commitment.
-- Proposals require both **supermajority** (>67% of conviction-weighted stake) and **quorum** (>25% of all staked beats participating)
+- Beat stakers vote For, Against or Abstain on proposals. A vote carries the voter's governance stake as it was when the vote was cast; stake delegated to the voter is added when the proposal is settled.
+- Voting weight accrues over time according to: conviction(t) = stake × (1 - e^(-t/τ)) where t is the time since the vote was cast and τ = 7 days (time constant). Conviction reaches ~63% of the stake at 7 days, ~86% at 14 days, ~95% at 21 days and ~98.6% at 30 days; after the square-root dampening of Section 10.4, a vote's weight reaches about 79%, 93%, 97.5% and 99.3% of its full value. The voting period is 14 days, so the ramp favours votes cast early in it. Staked beats cannot be unstaked until 7 days after they were staked, so a vote cannot be backed by beats borrowed and returned within a single transaction; the ramp itself does not keep the stake locked (Section 10.4).
+- Proposals require both a **supermajority** (For weight at least 67% of the For plus Against weight, after dampening and the per-identity cap; abstentions do not count) and a **quorum** (the stake behind the votes, before dampening, at least 25% of all beats staked for governance)
 - Implementation is delayed 30 days after passing (allowing zones to prepare)
 
-> **Note:** Additional governance mechanisms — including trust-weighted random committee selection, identity-based voting caps, and anti-pooling measures — complement the conviction voting model described here and are specified separately.
+> **Implementation status:** Governance does not yet work on a live network. A running node validates governance records when they arrive but does not apply them to its ledger. They are applied only when the node replays records into its ledger: a full rebuild applies them all, but a restart from a ledger checkpoint replays only records newer than the newest one already in the checkpoint, so earlier governance records are skipped. A vote therefore fails validation on any node that has not applied its proposal. Separately, the runtime settles a proposal when the first governance record after its voting deadline is applied, and computes the tally at that record's timestamp rather than at the deadline, so conviction keeps growing after the deadline. Both are open defects, listed in the runtime's docs/KNOWN-LIMITATIONS.md.
+
+> **Note:** The conviction-voting model described here is complemented by the identity-based voting cap (Section 10.4), which also applies to a delegate voting with delegated stake. Trust-weighted random committee selection for critical proposals is implemented in the governance state machine but not yet wired into the network.
 
 ### 10.4 Governance Attack Mitigations
 
 The conviction voting mechanism (Section 10.3) is designed to resist several known governance attacks:
 
-**Sybil resistance:** Voting power is proportional to staked beats, not identity count. Creating 1,000 identities with 1 beat each provides the same voting power as 1 identity with 1,000 beats — Sybil attacks gain nothing. The economic cost of acquiring sufficient beats to dominate governance scales with network value.
+**Sybil resistance:** Governance weight grows with the square root of stake (below), so it is *not* split-neutral: dividing a stake across k identities multiplies its total weight by up to √k. What limits this is the cost of each extra identity (Section 11.1), not the weighting; the runtime's docs/KNOWN-LIMITATIONS.md (limitation 26) records the same effect in proposer ranking. The economic cost of acquiring sufficient beats to dominate governance scales with network value.
 
-**Flash loan / flash vote attacks:** Conviction voting's time-weighted staking prevents an attacker from borrowing beats, voting, and returning them in a single transaction. The exponential conviction curve means beats staked for less than 7 days carry less than 63% weight, and full conviction (~98.6%) requires 30 days of sustained staking. This makes flash attacks economically pointless — the capital lockup cost exceeds any governance manipulation benefit.
+**Flash-vote attacks:** The 7-day unstaking cooldown prevents an attacker from borrowing beats, voting, and returning them in a single transaction: staked beats stay locked for at least 7 days. The conviction curve then discounts late votes: a vote cast less than 7 days before the tally carries less than 63% of its stake's conviction (less than about 79% of its full weight). The curve does not lengthen the lock: a vote keeps the weight of the stake it was cast with even if that stake is unstaked after the cooldown, so the capital an attacker must commit is a 7-day lock, not 30 days of sustained staking. Re-checking the voter's stake at settlement is an open defect.
 
-**Vote buying:** While the protocol cannot prevent off-chain vote buying, the 30-day implementation delay (Section 10.3) allows the community to detect and respond to suspicious voting patterns before changes take effect. Zones can invoke emergency veto (requiring >75% of anchor nodes) to block proposals that passed through suspected manipulation.
+**Vote buying:** While the protocol cannot prevent off-chain vote buying, the 30-day implementation delay (Section 10.3) allows the community to detect and respond to suspicious voting patterns before changes take effect. The design lets zones invoke an emergency veto (requiring >75% of anchor nodes) to block proposals that passed through suspected manipulation; the veto is not yet wired into the network (see below).
 
 **Plutocracy mitigation:** Raw beat-weighted voting favors wealthy participants. The protocol applies a **square-root dampening** to conviction weight. The combined governance weight formula is:
 
 ```
-governance_weight = min(√stake × (1 - e^(-t/τ)), (1/√N) × TOTAL_STAKED)
-where τ = 7 days, N = total active stakers, and the cap is per-identity
+governance_weight = min(√(stake × (1 - e^(-t/τ))), W / √N)
+where τ = 7 days, t = time since the vote was cast, N = number of identities
+voting on the proposal, W = the sum of all their weights before the cap,
+and the cap is per identity
 ```
 
-An entity staking 10,000 beats has √10 ≈ 3.16× the influence of an entity staking 1,000 beats, not 10×. The conviction curve then weights by lock duration (reaching ~98.6% at 30 days), and the scaling cap ensures no single identity exceeds `1/√N` of total governance weight regardless of stake size (where N = total active stakers — at 100 stakers the cap is 10%, at 10,000 it's 1%, at 1M it's 0.1%). Extended analysis of pool-centralization risks and additional anti-centralization mechanisms is specified separately.
+An entity staking 10,000 beats has √10 ≈ 3.16× the influence of an entity staking 1,000 beats, not 10×. The conviction curve then weights each vote by the time since it was cast (a vote's weight reaches about 99.3% of its full value at 30 days), and the cap limits any single identity's weight to `1/√N` of the proposal's total weight before the cap (N = identities voting on the proposal — at 100 voters the cap is 10%, at 10,000 it's 1%, at 1M it's 0.1%; a proposal with a single voter has no cap). The cap is per identity, so a holder who splits stake across identities can exceed it in total.
 
-**Emergency veto abuse:** The emergency veto (>75% of anchor nodes) is a powerful mechanism that could itself be gamed. Constraints: (1) a veto can only block, never propose — it cannot be used to force changes, only prevent them; (2) vetoes are rate-limited to 2 per zone per quarter; (3) any veto triggers a mandatory public disclosure of the veto rationale within 72 hours; (4) if a vetoed proposal passes a second vote with >80% conviction after the disclosure period, the veto is overridden. This ensures the veto is a circuit breaker, not a permanent kill switch.
+**Emergency veto abuse:** The emergency veto (>75% of anchor nodes) is a powerful mechanism that could itself be gamed. Constraints: (1) a veto can only block, never propose — it cannot be used to force changes, only prevent them; (2) vetoes are rate-limited to 2 per zone per quarter; (3) any veto triggers a mandatory public disclosure of the veto rationale within 72 hours; (4) if a vetoed proposal passes a second vote with >80% conviction after the disclosure period, the veto is overridden. This ensures the veto is a circuit breaker, not a permanent kill switch. **Status:** the runtime's governance state machine implements the veto threshold and constraints (1) and (2), but no record type carries a veto signal yet, so the veto cannot be invoked on the network; constraints (3) and (4) are not implemented.
 
 ### 10.5 Graceful Divergence
 
@@ -1553,7 +1651,7 @@ These organizations benefit from the cryptographic properties (post-quantum secu
 Private networks exist on a spectrum from fully closed to fully public:
 
 | Mode | Description | Trust Model | Beat Involvement |
-|------|-------------|-------------|-------------------|
+|-----------|----------------|--------------|--------------|
 | **Fully private** | Closed network, no external connections | Internal hierarchy | None |
 | **Federated** | Bilateral sharing between partner organizations | Mutual trust agreements | Optional (cross-org settlement) |
 | **Selective publication** | Some record types published to public network | Hybrid: internal + public | For published records only |
@@ -1563,7 +1661,7 @@ An organization may operate at different points on this spectrum for different r
 
 #### 10.6.3 The NETWORK_PUBLISH Protocol
 
-> **Status (2026-06-22): the NETWORK_PUBLISH / Validation-IPO transition described in this section is DISABLED in code** (`NETWORK_PUBLISH_ENABLED = false`, compile-time guarded in `src/network/publish.rs`). The per-record publication model — imported records *entering* public consensus and gaining *retroactive* public attestations — was found unsound: a `ValidationRecord`'s signed bytes carry no realm/network binding (Assumption A8, `docs/MESH-BFT-MERGE-SEMANTICS.md`), so an imported record is consensus-indistinguishable from a native one, and MESH-BFT's single-network safety theorem does not cover adopting a foreign network's records as native settlement parents. The mechanism is being reframed to **inert-import**: public consensus will attest only that a publication *bundle* (source root + Merkle root of the imported set + completeness proof + external time anchors) existed at an anchored time — conferring **zero native standing** (no settlement-parent role, no stake, no witness weight, no cross-zone debit basis). The text below describes the original design and is retained for reference pending that reframe and a proven multi-root merge theorem.
+> **Implementation-status note (honest-claims rule): the NETWORK_PUBLISH transition described in this section is DISABLED in the current runtime** (`NETWORK_PUBLISH_ENABLED = false`, compile-time guarded). The per-record model below — imported records *entering* public consensus and gaining *retroactive* native standing (step 5 and §10.6.4) — was found unsound: when it was disabled, a validation record's signed bytes carried no realm/network binding (Assumption A8 of the MESH-BFT merge semantics), so an imported record was consensus-indistinguishable from a native one, and the single-network safety theorem does not cover adopting a foreign network's records as native settlement parents. (Since wire format v6 each new record signs its network identifier and a node rejects a record that names a different network; records at v4 and v5, which nodes still accept, and records that name no network, carry no binding.) The mechanism is being reframed to **inert-import** — public consensus attests only that a publication *bundle* (source root + Merkle root of the imported set + completeness proof + external time anchors) existed at an anchored time, conferring **zero native standing** (no settlement-parent role, no stake, no witness weight, no cross-zone debit basis). This section documents the original design, retained for reference pending that reframe and a proven multi-root merge theorem.
 
 When a private network transitions records to the public network — partially or fully — the protocol defines a **NETWORK_PUBLISH** record type:
 
@@ -1580,6 +1678,10 @@ Fields:
   transition_mode      enum      SNAPSHOT | STREAMING | GRADUAL
   completeness_proof   bytes     Optional Merkle proof that published set is complete
                                  relative to the source DAG (prevents selective omission)
+  anchor_trail         AnchorProof[]  Chain of external state-root commitments made
+                                 DURING private operation (public-mesh seals, independent
+                                 timestamping services, or other widely-witnessed media).
+                                 Determines the age credibility of the published history.
 ```
 
 **Transition modes:**
@@ -1594,13 +1696,18 @@ When the public network receives published records:
 
 1. **Signature verification.** Every record's post-quantum signature is verified independently. Signatures are self-contained — they do not depend on network state.
 2. **Causal chain verification.** Parent references are followed to ensure the DAG structure is internally consistent. Missing parents (unpublished records referenced by published records) are flagged as known gaps, not errors.
-3. **Temporal consistency.** Timestamps are checked for monotonicity within causal chains. A child record cannot have a timestamp earlier than its parent.
+3. **Temporal consistency (internal only).** Timestamps are checked for monotonicity within causal chains — a child cannot predate its parent. This proves internal ordering only, **never calendar time**: every clock and key inside a private network belongs to its operator, so a fabricated DAG can satisfy this check perfectly.
 4. **Completeness check.** If a completeness proof is provided, it is verified against the published record set. This proves the organization is not selectively omitting unfavorable records from a subtree.
 5. **Retroactive witnessing.** Public nodes can witness historical records, adding new trust attestations that reference the original (unchanged) records.
+6. **Anchor-trail verification.** Each `anchor_trail` entry is verified against its external medium (a public-mesh epoch seal, an independent timestamp proof). Each verified anchor proves the committed state — and every record beneath it — **existed by** the anchor's time.
+
+**Age credibility and the anchor-density law.** External anchoring is the *only* mechanism that makes a published history's age verifiable. Internal evidence cannot prevent backdating (a fabricator controls all keys and clocks in its own realm); beacon references at key generation prove only freshness (*no older than*), while anchors prove existence (*no younger than*) — age claims require the latter. The maximum undetectable backdating window equals the largest gap between consecutive anchors, so **publication credibility is proportional to anchor density**. A private network that never anchored may still publish: its records receive structural verification (steps 1–4) and prospective trust from retroactive witnessing (step 5), but the network MUST treat its declared age as zero. Operators intending a future Validation IPO should anchor from day one.
+
+**Anchor-media requirements (no single foundation).** An anchor's evidentiary value MUST rest on hash structure — a Merkle path into a widely-replicated hash chain — never on the host medium's signatures. Quantum adversaries break signature schemes (Shor), not 256-bit hash preimages (Grover leaves ~2^128 work), so a hash-bound anchor survives even the collapse of its host's signature economy; witnesses whose value rests on a signature (e.g., RFC 3161 credits) diversify the set but MUST themselves be re-wrapped by hash-based media over time. Anchors MUST span multiple independent media; verifiers SHOULD archive the host-chain headers their proofs traverse, removing dependence on the host's future availability or canonical-chain consensus. Finally, the running state root MUST be re-anchored continuously: each new anchor re-witnesses the entire history beneath it under every newer, stronger medium — including, eventually, the public mesh itself — which is how the system migrates off any bootstrap medium without losing its past.
 
 #### 10.6.4 Governance Implications
 
-> **Status (2026-06-22): DISABLED in code** — these governance events follow from the NETWORK_PUBLISH transition of §10.6.3, which is compile-time disabled (`NETWORK_PUBLISH_ENABLED = false`) pending the inert-import reframe. The retroactive-witnessing and IPO-style "public trust bootstrapping" described below do not occur on the live protocol. Retained for reference. See §10.6.3 and `docs/MESH-BFT-MERGE-SEMANTICS.md`.
+> **Implementation-status note: DISABLED in the current runtime.** The governance events below follow from the NETWORK_PUBLISH transition of §10.6.3, which is compile-time disabled (`NETWORK_PUBLISH_ENABLED = false`) pending the inert-import reframe. The retroactive trust-bootstrapping and IPO-style governance weight described here do not occur on the live protocol; retained for reference. See §10.6.3.
 
 Private-to-public transitions create governance events:
 
@@ -1608,11 +1715,11 @@ Private-to-public transitions create governance events:
 
 **Trust bootstrapping.** Published historical records carry internal trust (accumulated from private witnesses) but zero public trust. Public trust accumulates through retroactive witnessing. A 10-year-old published record may reach high public trust within weeks if many public nodes verify and witness it.
 
-**Representation.** Once published, the organization's nodes become public network participants with governance weight proportional to their staked beats and accumulated conviction (Section 10.3). A large organization entering the public network could represent significant governance weight — the square-root dampening and 5% cap per identity (Section 10.4) limit this concentration.
+**Representation.** Once published, the organization's nodes become public network participants with governance weight proportional to their staked beats and accumulated conviction (Section 10.3). A large organization entering the public network could represent significant governance weight — the square-root dampening (Section 10.4) limits this concentration. Earlier versions of this paper also named a "5% cap per identity" here; no such cap is specified anywhere in this document, and the phrase is withdrawn.
 
 **The analogy to traditional markets is deliberate:** a private network choosing to publish is structurally similar to a company filing an IPO — historical records are disclosed, public trust is established based on track record, and the entity gains access to the broader ecosystem's resources (public witnessing, storage delegation, cross-network attestation) in exchange for transparency.
 
-Detailed analysis of the economic dynamics of this transition — including beat demand modeling, anti-gaming mechanisms, and the long-term implications of dual-direction network growth — is specified separately.
+Section 11.34 analyzes the economic dynamics and failure modes of this transition, including ingestion rate-limiting as an anti-gaming mechanism.
 
 ---
 
@@ -1667,7 +1774,7 @@ Witness attestation is not free. To attest to a validation record, a witness nod
 
 ```
 puzzle_input  = SHA3-256(record_id || witness_pubkey || nonce)
-difficulty    = BASE_DIFFICULTY × (1 / sqrt(stake_amount))
+difficulty    = BASE_DIFFICULTY × 1000 / sqrt(stake_base_units)
 target        = 2^256 / difficulty
 valid_if      = puzzle_input < target
 ```
@@ -1676,15 +1783,15 @@ The difficulty is inversely proportional to the square root of the witness's sta
 
 ```
 effective_difficulty = clamp(difficulty, MIN_DIFFICULTY, MAX_DIFFICULTY)
-where MIN_DIFFICULTY = BASE_DIFFICULTY / 100 (no one gets a free pass)
-      MAX_DIFFICULTY = BASE_DIFFICULTY × 10   (minimum stake is viable)
+where MIN_DIFFICULTY = BASE_DIFFICULTY / 10 (no one gets a free pass)
+      MAX_DIFFICULTY = BASE_DIFFICULTY × 10 (minimum stake is viable)
 ```
 
-A witness staking 1,000 beats solves a puzzle ~32x easier than a witness staking 1 beat, but the bounds ensure that very large stakers still perform meaningful computation and very small stakers are not excluded entirely. This creates a combined economic-computational barrier: attacking cheaply requires massive computation; attacking with minimal computation requires massive stake.
+With stake measured in base units (10⁹ per beat), the unclamped inverse-sqrt curve differentiates only sub-floor stakes: every witness at or above the 100-beat admission floor clamps to MIN_DIFFICULTY, so all admitted witnesses perform the same minimum work — the curve's differentiation is a property of the sub-floor band, not of the admitted set. The bounds ensure that very large stakers still perform meaningful computation and very small stakers are not excluded entirely. This creates a combined economic-computational barrier: attacking cheaply requires massive computation; attacking with minimal computation requires massive stake.
 
-Difficulty adjusts per-zone every epoch to maintain a target attestation rate (~10 attestations per second per zone). This prevents both under-utilization (too hard) and spam (too easy).
+Per-zone, per-epoch difficulty retargeting toward a target attestation rate is a design-stage extension — the shipped runtime uses the static clamp above, and difficulty does not currently adjust at runtime.
 
-An adversary creating a million Sybil nodes would need to acquire beats for each (economic barrier), solve puzzles for each attestation (computational barrier), and build reputation over time for each node (temporal barrier). The cost of attack scales linearly; the defense is multiplicative. Detailed Sybil cost analysis and diminishing returns per entity are specified separately.
+An adversary creating a million Sybil nodes would need to acquire beats for each (economic barrier), solve puzzles for each attestation (computational barrier), and build reputation over time for each node (temporal barrier). The cost of attack scales linearly; the defense is multiplicative.
 
 **Layer 2: Social Graph Analysis**
 
@@ -1730,7 +1837,7 @@ Once published, the revocation record is immutable on the DAM. All future signat
 
 This is the harder problem. The protocol handles it through **pre-committed recovery keys:**
 
-At identity creation, the user can (and is strongly encouraged to) generate a **recovery keypair** stored separately — written on paper, saved on a USB drive, held by a trusted person. The recovery key's public half is embedded in the original identity record.
+At identity creation, the user can (and is strongly encouraged to) generate a **recovery keypair** stored separately — written on paper, saved on a USB drive, held by a trusted person. The design embeds a commitment to the recovery key in the original identity record. (Status: the runtime defines the succession data model and record formats, but no node path processes them yet; recovery is specified, not operational.)
 
 Only the recovery key can:
 - Override a fraudulent revocation
@@ -1743,7 +1850,7 @@ If no recovery key was pre-committed, the dispute becomes a social/legal matter 
 
 **Key rotation:**
 
-The protocol supports scheduled key rotation without identity loss. A rotation record — signed by both the old and new keys — maintains continuity. All past work remains attributed to the identity; all future work uses the new key. This limits the damage window of any compromise.
+The protocol **specifies** scheduled key rotation without identity loss: a rotation record — signed by both the old and new keys — would maintain continuity, keeping all past work attributed to the identity while future work uses the new key, limiting the damage window of a compromise. **This mechanism is specified but not yet operational** (an identity is currently addressed by the hash of its active key, so a rotated key resolves to a different account — see §14 and KNOWN-LIMITATIONS). Today, key **revocation** (the compromised-key tombstone) is the live compromise-recovery path; rotation lands with a versioned identity→active-key index.
 
 Note: deliberate key destruction through device wipes — where the goal is to sever accountability rather than steal identity — is a distinct attack vector addressed in Section 11.33.
 
@@ -1755,11 +1862,11 @@ Note: deliberate key destruction through device wipes — where the goal is to s
 
 The DAM maintains a Merkle tree over all validation records. A light client can verify any specific record with:
 
-1. The validation record itself (~4-5 KB)
+1. The validation record itself (~6 KB, or about 41 KB with the optional SPHINCS+ signature)
 2. A Merkle proof path (~log2(N) × 32 bytes — for a billion records, this is ~960 bytes)
 3. The Merkle root (32 bytes, published by anchor nodes)
 
-Total verification payload for a single record: **under 6 KB**, regardless of how large the DAM grows.
+Total verification payload for a single record: **about 7 KB** (about 42 KB with the SPHINCS+ signature), regardless of how large the DAM grows.
 
 **Trust headers:**
 
@@ -1807,7 +1914,7 @@ Genesis anchors actively attest to new nodes' identity registrations. Early part
 - Participation in testnet validation (proving reliability)
 - Contribution to the codebase, documentation, or tooling (proof of commitment)
 
-Beat incentives during this phase are elevated — early validators earn disproportionate rewards to compensate for the network's low utility. The distribution schedule and bootstrap economics are specified separately.
+Beat incentives during this phase are elevated — early validators earn disproportionate rewards to compensate for the network's low utility. The bootstrap distribution (participation faucet) is described in Section 9.5 of the whitepaper.
 
 **Phase 3: Decentralization Threshold (nodes 1,000–10,000)**
 
@@ -1821,38 +1928,24 @@ At 1,000 active witness nodes across at least 10 geographic regions, the protoco
 
 The network effects take over. Developers build on the protocol because users are there. Users join because developers have built tools. Institutions adopt because the network is too large to ignore.
 
+*Status: Phases 3 and 4 describe the plan. In the current implementation the genesis authority's privileged powers have no expiry and no decentralization threshold is detected (Section 11.12.3 of the whitepaper).*
+
 The bootstrap problem is real, but it is a solved problem in practice. The challenge is not technical — it is social. The protocol must be useful enough that the first 1,000 people choose to run nodes. Section 3.5 (Minimum Viable Validation) is the answer: the protocol is useful to a single person with a single device before anyone else joins.
 
-#### 11.4.1 Epoch-Indexed State Snapshots (v0.7.9+)
+**Fast Snapshot Sync for Onboarding (v0.7.7)**
 
-Once a network accumulates 10M+ records across its zones, replaying the DAG from genesis to derive ledger state becomes cost-prohibitive for new joiners and for any node recovering from a storage wipe. The protocol solves this with **epoch-indexed snapshots**: archive-profile nodes emit signed snapshots at epoch boundaries (default: every 10 epochs, retention 20), published at deterministic paths of the form `/snapshot/epoch/{N}` and listed via `/snapshot/epochs`.
+Once a zone has sealed its first few hundred epochs, genesis replay becomes impractical for new full nodes. A 10M-record zone with 100K epoch seals takes hours to reconstruct from scratch. The protocol addresses this with **epoch-indexed state snapshots** served by archive nodes:
 
-A snapshot is authoritative state, not a replay hint. It includes:
+1. Archive nodes (node_profile = Archive, §11.3) emit a signed state snapshot every `archive_snapshot_every_n_epochs` (default 10). Each snapshot is a JSON artifact at `epoch-{N:012}.json` — zero-padded for lexicographic ordering equals numeric ordering — containing: epoch number, SHA3-256 checksum of the contained state, full ledger snapshot, per-zone epoch cursors, zone registry root, Merkle tree roots, and the archive node's signature over the checksum (ML-DSA-65, FIPS 204, named "Dilithium3" in the code, always; a second SPHINCS+ leg is added when the archive runs signing Profile A — the SPHINCS+ fields are absent otherwise).
+2. Retention is bounded: archives keep the last `archive_snapshot_retention` snapshots (default 20) and prune older files. At the default cadence of 10 epochs per snapshot (10 min at the default 60 s epoch interval), 20 retained snapshots cover about 3.3 hours of state history. The adaptive 5–60 s interval (Section 11.12; its sealing gate is off by default) would shorten this to as little as about 17 minutes under sustained load.
+3. A new node onboards by: (a) fetching the snapshot index from a peer via `GET /snapshot/epochs` (returns sorted epoch list); (b) downloading the latest snapshot via `GET /snapshot/epoch/{N}`; (c) verifying the signatures and the checksum, and accepting the snapshot only if its signer is the genesis authority or an operator-configured trusted signer (by default the genesis authority alone); (d) comparing its checksum with the same epoch's snapshot from up to three other connected peers that offer it, aborting on any mismatch; (e) applying the snapshot to its local state; (f) fetching only records produced *after* epoch N via the standard delta sync path (§11.22.1 Merkle proofs + gossip). Onboarding time collapses from hours to minutes.
+4. Snapshot emission resumes from the highest on-disk epoch on archive restart — the archive does not re-emit snapshots it has already written. Snapshot *emission* is archival-only — full-zone and light nodes never produce snapshots; *consumption* is open to any onboarding node (step 3 above), after which non-archive nodes pull records directly.
 
-- The complete ledger (`total_supply`, per-account balances, active stakes, staked totals, trust scores, continuity scores) as of the snapshot boundary.
-- The set of record IDs whose beat ops have already been applied to that ledger (`applied_record_ids`). This set is what lets a bootstrapping node seed its `CF_APPLIED` dedup column family, so any pre-snapshot record re-delivered via delta sync or gossip is recognized as already-accounted-for and skipped at the ledger-apply gate — no double-apply, regardless of gossip redelivery order.
-- The finalized-record set, last-seal metadata per zone, genesis state, and bootstrap phase.
-- A snapshot timestamp (`snapshot_timestamp`), which is the cursor the subsequent delta-sync loop resumes from.
-- A ML-DSA-65 (FIPS 204, "Dilithium3") signature over the canonical serialization, signed by the emitting archive node's identity key. The signer's public key is embedded so verifiers need no out-of-band trust.
+**Safety under compromised archive:** A signature proves who produced a snapshot, not that its state is correct, so a joining node accepts snapshots only from the genesis authority or from signers its operator has configured — by default the genesis authority alone. It also compares the snapshot's checksum with the same epoch's snapshot from up to three other connected peers that offer it and aborts on any mismatch; a peer that does not offer the epoch is not a disagreement, so a network with a single archive is accepted on the signature alone. Snapshots never replace the attested epoch seal chain; they are an acceleration mechanism for consensus-identical state.
 
-**Bootstrap algorithm.** A joining node:
+**Scale limit:** a snapshot carries the set of already-applied record ids only while the serving chain has at most one million applied records; above that the set is sent empty, and the joining node's protection against re-applying a pre-snapshot record is best-effort (a bounded watermark that removes this limit is designed but not yet built).
 
-1. Queries `/snapshot/epochs` from its seed peers and selects the highest-numbered epoch that is available on at least two independent peers.
-2. Downloads the full snapshot from the primary peer via `/snapshot/epoch/{N}`.
-3. Cross-verifies the snapshot's Merkle checksum against up to three other peers' `/snapshot/epoch/{N}/checksum` endpoints. Any mismatch (primary says root `R` but another peer says `R' ≠ R`) aborts the bootstrap. Silence (peer has no snapshot for `N`) is not a disagreement.
-4. Verifies the Dilithium3 signature against the embedded public key and checks the signer satisfies the local trust policy (anchor, archive, or allow-listed peer).
-5. Applies the snapshot as authoritative state: the ledger replaces any partial local ledger; `CF_APPLIED` is bulk-seeded with the snapshot's `applied_record_ids`; the finalized set, genesis state, and bootstrap phase are restored; and the `pull_catchup_cursor` is advanced to `snapshot_timestamp`.
-6. From that cursor, delta sync fetches only records newer than the snapshot — the ~9.99M pre-snapshot records on a 10M-record chain are never downloaded.
-
-**Profile-scoped behavior.** The cursor-advance in step 6 is conditional on node profile. `Light` and `FullZone` profiles seed the cursor and skip pre-snapshot record fetches entirely — the snapshot is authoritative for all state they need; retention policy would prune old records anyway. `Archive` profiles — the historical source of truth — do **not** seed the cursor, so delta sync backfills pre-snapshot records from timestamp zero for DAG completeness. CF_APPLIED dedup still prevents any ledger double-apply; Archive just additionally retains the record bytes and DAG edges.
-
-**Why signed and cross-verified, not just signed.** A single archive node's signature vouches that _it_ computed this state at that epoch — not that the state is correct. A colluding peer could serve a forged snapshot signed with its own legitimate key. Cross-peer Merkle-root verification protects against that class of attack: an honest peer that emitted its own snapshot at the same epoch will have a different root if the primary's snapshot is forged. Silence is allowed because not every peer is configured as an archive emitter; disagreement is not. This matches the pattern used for super-seal verification in §11.12.
-
-**Retention and liveness.** Archive nodes hold the last `retention` snapshots (default 20) and prune older ones lazily to bound disk growth at `20 × snapshot_size`. Snapshots are emitted every `every_n_epochs` (default 10) — at a 60-second P50 epoch, that's a new bootstrap anchor every ten minutes, with a ~200-minute window of historical bootstrapping options.
-
-#### 11.4.2 Storage Tiers and Snapshot Pricing
-
-See §12.2 for how snapshot emission interacts with the Light / FullZone / Archive retention profiles, and how the delegated-storage market in §12.2 prices snapshot serving alongside cold-tier record serving.
+**Testnet status:** Epoch-indexed snapshots are implemented in the Elara Runtime (public `v0.2.0` release, `archive_snapshot_loop`); an archival anchor node has been observed emitting epoch-indexed snapshots (e.g. `epoch-000000004004.json`) under the default 10-epoch cadence.
 
 ### 11.5 Immutability vs. Right to Deletion (GDPR)
 
@@ -1876,7 +1969,7 @@ The actual content — the poem, the document, the sensor reading — is stored 
 
 3. **The DAM retains only:** an orphaned hash signed by a revoked pseudonymous key. This satisfies GDPR's erasure requirement because no personal data remains — only mathematical artifacts that cannot be linked to a natural person.
 
-**For PRIVATE and SOVEREIGN classifications**, the situation is even cleaner: the content hash was never visible on the DAM in the first place. Only a SHA3-256 commitment proof exists (Phase-1; genuine ZK is design-stage). Revoking the key makes the proof unattributable.
+**For PRIVATE, RESTRICTED and SOVEREIGN classifications**, the design keeps the content hash off the DAM and stores only a zero-knowledge proof, so revoking the key makes the proof unattributable. The current implementation does not yet do this: every record carries its content hash, and the proof attached to a PRIVATE or RESTRICTED record carries the committed value in the clear (Section 5.3). Until that changes, the analysis above applies to classified records too, and values placed in such a proof should be treated as public.
 
 **For IoT and device data**, GDPR applies only to personal data. Sensor readings from industrial equipment or environmental monitors are not personal data and are not subject to erasure rights.
 
@@ -1968,7 +2061,7 @@ Courts already understand this distinction — a notarized document proves the d
 
 ### 11.8 Storage Growth and DAM Sustainability
 
-**The problem:** "Nothing is ever deleted" combined with IoT-scale validation creates unbounded storage growth. A single factory with 10,000 sensors producing readings every second generates ~864 million records per day. At ~4.5 KB per validation record (dominated by the PQC signature), that is **~3.9 TB per day from one deployment.** At planetary scale, the DAM would grow by petabytes daily.
+**The problem:** "Nothing is ever deleted" combined with IoT-scale validation creates unbounded storage growth. A single factory with 10,000 sensors producing readings every second generates ~864 million records per day. At ~4.5 KB per validation record (dominated by the PQC signature), that is **~3.9 TB per day from one deployment.** (A measured record signed with ML-DSA-65 alone is about 6 KB (Section 11.32), which raises this figure to about 5 TB per day; the projections below are low by the same factor, about 1.3.) At planetary scale, the DAM would grow by petabytes daily.
 
 No single node can store this. The protocol must handle it.
 
@@ -2088,7 +2181,7 @@ This is the foundational principle of the protocol. Layer 1 never has a cost, on
 
 **Layer 2: Free propagation, paid priority.**
 
-When a node syncs to the network, its validation records propagate through the gossip protocol. Basic propagation is free — relay nodes forward records as part of their normal operation (they benefit from a well-connected DAM, so relaying is incentive-compatible).
+When a node syncs to the network, its validation records propagate through the gossip protocol. Basic propagation is free — relay nodes forward record announcements as part of their normal operation (they benefit from a well-connected DAM, so relaying is incentive-compatible).
 
 What costs beats is **priority**: requesting faster propagation, higher witness counts, or guaranteed inclusion in the next epoch summary. Free-tier records propagate and accumulate witnesses organically. Paid-tier records get expedited service.
 
@@ -2115,11 +2208,11 @@ Free-tier records propagate for free, get witnessed by community-funded anchors,
 
 **Earn-by-participation:**
 
-Nodes that contribute resources (relay bandwidth, storage, compute) earn beats. The teenager's phone, by relaying other users' records, earns enough beats to request priority witnessing if she ever needs it. The protocol pays its participants. The complete tiered economic model, storage delegation markets, and earn-by-participation mechanics are specified separately.
+Nodes that contribute resources (relay bandwidth, storage, compute) earn beats. The teenager's phone, by relaying other users' records, earns enough beats to request priority witnessing if she ever needs it. The protocol pays its participants.
 
 ### 11.11 zk-SNARK Trusted Setup
 
-> **Implementation status — DESIGN-STAGE.** This chapter analyses the trusted setup for the *specified* Groth16 zk-SNARK construction (§5.3), which is not built. The Phase-1 runtime uses SHA3-256 commitments, which need **no trusted setup**. The ceremony design below applies to a future Groth16 deployment.
+> **Implementation status — DESIGN-STAGE.** This chapter analyses the trusted setup for the *specified* Groth16 zk-SNARK construction (§5.3), which is not built. The Phase-1 runtime uses SHA3-256 commitments, which need **no trusted setup**. The ceremony design below applies to a future Groth16 deployment; no ceremony has been conducted or scheduled.
 
 **The problem:** the specified zk-SNARKs (for PRIVATE and RESTRICTED classifications — design-stage, §5.3) would require a trusted setup ceremony — a one-time generation of cryptographic parameters (Common Reference String). If the setup is compromised, an attacker can forge proofs. Who performs this ceremony, and how is it decentralized?
 
@@ -2138,7 +2231,7 @@ The Elara Protocol's ceremony will:
 
 **Phase 2: Progressive migration to zk-STARKs**
 
-zk-STARKs (the specified SOVEREIGN path — design-stage, §5.3) require NO trusted setup. They are transparent — all parameters are derived from public randomness. The tradeoff is larger proof sizes (~100 KB vs ~288 bytes for SNARKs).
+zk-STARKs (the specified SOVEREIGN path — design-stage, §5.3) require NO trusted setup. They are transparent — all parameters are derived from public randomness. The tradeoff is larger proof sizes (~100 KB vs 128–256 bytes for a Groth16 SNARK on BN254).
 
 As hardware improves and STARK proof compression advances, the protocol will migrate PRIVATE and RESTRICTED classifications from SNARKs to STARKs:
 
@@ -2156,17 +2249,17 @@ Research into post-quantum zero-knowledge proofs is active. The protocol's algor
 
 **The gap:** "Witness accumulation" is described conceptually throughout this paper but not formally specified. A reviewer expects Byzantine fault tolerance analysis, safety and liveness guarantees, and formal proofs or at minimum, precise algorithm specification.
 
-**Specification: Adaptive Witness Consensus (AWC) — diversity-discount BFT on a DAG**
+**Specification: Adaptive Witness Consensus (AWC)**
 
-The Elara Protocol uses a consensus mechanism designed for its unique properties: threshold settlement with continuous trust accumulation, partition tolerance. AWC is an **Attestation-Weighted Consensus** layered over a DAG ledger with a diversity-weighted discount (§11.15) on correlated stake; it is internally also called **MESH-BFT** in code and tests (the `mesh-bft` cluster in the runtime is this mechanism).
+The Elara Protocol uses a consensus mechanism designed for its unique properties: threshold settlement with continuous trust accumulation, partition tolerance. AWC is an **Attestation-Weighted Consensus** layered over a DAG ledger with a discount on correlated attestors (the correlation discount defined below); it is internally also called **MESH-BFT** in code and tests (the `mesh-bft` cluster in the runtime is this mechanism).
 
 **How it relates to prior art.** AWC is not a new Byzantine-fault-tolerance family; it is a composition of three well-studied building blocks applied to a DAG-sealed ledger:
 
-1. **Stake-weighted probabilistic witness selection** — weighted reservoir sampling via Efraimidis & Spirakis (2006, *Information Processing Letters* 97(5)), used here for per-zone VRF committee picks (§11.18) without floating-point drift (u128 cross-multiplication).
-2. **Per-record / per-epoch Byzantine agreement at the 1/3 safety bound** — directly descended from Castro & Liskov's Practical Byzantine Fault Tolerance (OSDI 1999), adapted so the "primary" is replaced by a VRF-selected witness committee and the "replicas" are the attestors of a given epoch seal.
-3. **Two-layer finality** — a settlement/finality split analogous to Buterin & Griffith's finality gadget (Casper FFG, 2017): Layer-1 is per-record causal attestation (optimistic, ~seconds), Layer-2 is epoch-seal settlement at ≥2/3 diversity-weighted attested stake (durable, ~epoch interval).
+1. **Stake-weighted pseudo-random witness selection** — each candidate's priority is a hash of the epoch's VRF output and its identity divided by a stake weight, the lowest priorities win, and the arithmetic is integer (u128), so every node computes the same committee without floating-point drift. The shipped committee divides by the square root of stake, which is not split-neutral: splitting stake across identities raises the chance of selection (Section 11.12.3 of the whitepaper). An alternative that divides by stake itself (`use_committee_v2`, off by default) is modelled on the weighted sampling of Efraimidis & Spirakis (2006, *Information Processing Letters* 97(5)) but does not reproduce it: their key, −ln(u)/w, selects in proportion to stake, while u/w favours larger stakes more than proportionally.
+2. **Per-record / per-epoch Byzantine agreement at the 1/3 safety bound** — directly descended from Castro & Liskov's Practical Byzantine Fault Tolerance (OSDI 1999), adapted so the "primary" is replaced by a stake-ranked proposer (ranked by a beacon chained from the previous seal, Section 11.12.3 of the whitepaper) and the "replicas" are the attestors of a given epoch seal.
+3. **Two-layer finality** — a settlement/finality split analogous to Buterin & Griffith's finality gadget (Casper FFG, 2017): Layer-1 is per-record attestation, durable once attesting stake reaches at least 2/3 of the zone's eligible stake, excluding the creator; Layer-2 is epoch-seal settlement at ≥2/3 diversity-weighted attested stake (~epoch interval), which is not live in the current implementation (see the safety guarantee below).
 
-AWC's novel contribution is (4) the **diversity discount** `d(n, W)` (§11.15): a scalar in [0, 1] that shrinks effective stake as the attestor set shows correlation in `WitnessProfile` fields (same org, same ASN, same subnet). A correlated-stake attacker with a majority of raw stake but a single profile collapses to a minority of *effective* stake, so the 2/3 threshold they cross is not a safety threshold. This is what makes AWC a meaningful strengthening of stake-weighted BFT for open-membership DAM deployments, not a rebrand of PBFT.
+AWC's distinguishing addition is (4) the **diversity discount** `d(n, W)` (defined below): a factor in (0, 1] that lowers the weight of attestors that share an organization, subnet or location. The organization, subnet and location fields of a `WitnessProfile` are self-reported; the node also observes each witness's network prefix and provider. The discount does not raise the 1/3 bound against an adversary whose identities are spread across distinct organizations, subnets and locations. In the current implementation it is reported as a confirmation level and does not gate finality, so the safety bound is the stake-weighted one: Byzantine stake below one third.
 
 **Definitions:**
 
@@ -2189,11 +2282,11 @@ Where d(n, W) is a **correlation discount** factor in (0, 1] that reduces a witn
 ```
 d(n, W) = 1 / (1 + Σ corr(n, m) for all m ≠ n in W(r))
 
-corr(n, m) = α × same_org(n,m) + β × same_subnet(n,m) + γ × same_zone(n,m)
-             where α=0.5, β=0.3, γ=0.2
+corr(n, m) = α × same_org(n,m) + β × same_subnet(n,m) + γ × same_geo(n,m)
+             where α=0.5, β=0.3, γ=0.2 (ramped — see below)
 ```
 
-Witnesses from the same organization, IP subnet, or geographic zone contribute progressively less marginal trust. This prevents trust inflation through correlated attestation (e.g., a company running 1,000 witness nodes in one datacenter).
+Witnesses from the same organization or IP subnet contribute progressively less marginal trust. This prevents trust inflation through correlated attestation (e.g., a company running 1,000 witness nodes in one datacenter). The third term weights *geographic* overlap (`same_geo`), not consensus-zone membership: a zone-membership discount would be meaningless because all epoch-seal attestors necessarily share a consensus zone. The shipped runtime sets γ=0.2 with an honest-degradation ramp — γ reads 0 with fewer than 2 distinct geographic buckets (or no more than 2 witnesses), rises linearly with witness-set size, and reaches the full 0.2 at 12 or more witnesses, so a thin witness set never manufactures a false diversity signal. A fully-correlated witness pair reaches the maximum discount α+β+γ = 1.0. (This supersedes the v0.7.3 "audit E2" text that set the third term to 0.0 as a zone-membership discount; the geographic meaning is detailed under "Correlation discount in zone-scoped attestation" below.)
 
 This formulation means:
 - Zero witnesses → T = 0 (local only)
@@ -2219,7 +2312,7 @@ The per-record trust formula T(r) applies here. Each witness that validates a re
 
 **Layer 2 — Epoch Finalization (per-batch, anchor-proposed):**
 
-Each zone designates anchor nodes (high-trust witnesses with sealing authority, selected by VRF). At regular intervals (the anchor's seal loop ticks at a fixed configured interval, default 60s; a load-driven per-zone *adaptive* interval of 5–60s is computed and displayed but does not yet gate sealing, so quiet zones currently seal at the fixed interval — load-driven per-zone cadence is a design-stage item), the anchor proposes an epoch seal:
+Each zone designates anchor nodes (high-trust witnesses with sealing authority; which anchor proposes is set by the stake-weighted rank of Section 11.12.3 of the whitepaper). At regular intervals (the anchor's seal loop ticks at a fixed configured interval, default 60s; a load-driven per-zone *adaptive* interval of 5–60s is computed and displayed; a gate that applies it to sealing is implemented but off by default (`ELARA_USE_ADAPTIVE_SEAL_GATE`), so with default settings every zone seals at the fixed interval), the anchor proposes an epoch seal:
 
 ```
 EpochSeal {
@@ -2240,7 +2333,7 @@ The anchor proposes which records are in the epoch. Witnesses verify: (a) they h
 
 The epoch boundary is deterministic by construction — the anchor's proposal defines what's in the epoch. Records arriving after the proposal go into the next epoch. This eliminates clock-drift consensus failures.
 
-A record's status advances to **Sealed** upon inclusion in a proposed epoch seal, and to **Finalized** when the epoch seal accumulates attestations from witnesses controlling >67% of the zone's staked weight.
+A record's status advances to **Sealed** upon inclusion in a proposed epoch seal, and to **Finalized** when the epoch seal accumulates attestations from witnesses controlling at least 2/3 of the zone's staked weight. (Status: seal settlement is not live in the current implementation — see the safety guarantee below; records finalize through per-record settlement.)
 
 **Layer 3 — Post-Epoch Challenges (per-record, fisherman):**
 
@@ -2256,18 +2349,16 @@ After an epoch is sealed, fisherman nodes can challenge individual records withi
 |-------|-----------|
 | **Pending** | Layer 1 validated, not yet in an epoch seal |
 | **Sealed** | Included in an anchor-proposed epoch seal |
-| **Finalized** | Epoch seal has >67% stake-weighted diverse attestations |
+| **Finalized** | Epoch seal has ≥ 2/3 stake-weighted diverse attestations |
 | **Anchored** | Finalized + challenge window elapsed with no upheld challenges |
 
 **Safety guarantee:**
 
-An epoch seal attested by witnesses controlling >67% of staked weight in a zone is considered **zone-settled**. All records within a zone-settled epoch are finalized. No conflicting epoch seal (different Merkle root for the same epoch number) can achieve settlement — the standard BFT bound applies to epoch seals exactly as it applied to per-record attestation. The MESH-BFT diversity-weighted safety property (stated as Theorem 1 in the formal specification; a TLA+ machine-checked proof is pending — see the implementation-status box below) is expected to hold because the diversity function d(n, W) applies to the set of epoch seal attestors.
+An epoch seal attested by witnesses controlling at least 2/3 of staked weight in a zone is considered **zone-settled**. All records within a zone-settled epoch are finalized. No conflicting epoch seal (different Merkle root for the same epoch number) can achieve settlement — the standard BFT bound applies to epoch seals exactly as it applied to per-record attestation. The MESH-BFT diversity-weighted safety theorem (Theorem 1 of the companion paper) holds because the diversity function d(n, W) applies to the set of epoch seal attestors. Theorem 1 holds only while Byzantine stake stays below one third. **Status:** seal settlement is not live in the current implementation: with default configuration a seal with two or more attesters cannot reach the diversity-weighted threshold, and a stuck seal does not escalate. Records finalize through per-record settlement.
 
-**Liveness guarantee (honest-majority, observed):**
+**Liveness guarantee:**
 
-Under honest-majority (>50% of staked weight in a zone held by honest, online, non-correlated nodes) and partially-synchronous network assumptions, epoch seals reach 2/3 diversity-weighted attestation in **O(log_d N) × epoch_interval**, where `d` is the average out-degree of the gossip overlay and `N` is the zone's attestor count. The anchor-proposed model ensures deterministic epoch boundaries even under network asynchrony; seal propagation and quorum accumulation are the dominant terms.
-
-*Observed on the testnet (2026-04-22 to 2026-04-23, 129-sample reading):* P50 seal settlement was ~2 × `epoch_interval` in practice (mean ~365s against the then-default 120s epoch; the default/cap has been 60s since 2026-04-29), with a long tail of witness-propagation lag on NAT'd peers. The `O(log_d N)` bound is the asymptotic ceiling under honest majority; the 2× observed constant is the small-network operational cost of gossip propagation rather than a violation of the bound. See the §11.12 implementation-status box and the seal-attestation-latency histogram on each node's `/metrics`.
+As long as >50% of staked weight in a zone is held by honest, online nodes, new epochs will be sealed and attested within one epoch interval, provided the proposer ranking cannot be steered by the previous sealer, which the shipped beacon does not guarantee (Section 11.12.3 of the whitepaper). Seal *finality* is not live in the current implementation (see the safety guarantee above). The anchor-proposed model ensures deterministic epoch boundaries even under network asynchrony. Note the gap between the two thresholds: with honest-online weight between 50% and 2/3, the zone keeps *producing* seals but cannot *finalize* them (finalization requires ≥ 2/3 attesting weight) — safety is preserved while finality liveness degrades until enough weight returns.
 
 **Partition behavior:**
 
@@ -2282,26 +2373,24 @@ During a network partition, each partition continues sealing epochs independentl
 
 - **Agreement:** If honest node A considers epoch E zone-settled, all honest nodes in the same zone will eventually consider E zone-settled (assuming partition heals)
 - **Validity:** Only records signed by valid keypairs can be included in epoch seals
-- **Termination:** Every record propagated to honest nodes will be included in an epoch seal within bounded time — O(log_d N) × epoch_interval under honest majority; observed P50 was ~2 × epoch_interval on the testnet
+- **Termination:** Every record propagated to honest nodes will be included in an epoch seal within bounded time (one epoch interval)
 - **Partition safety:** Epochs settled before a partition remain settled in all resulting partitions
 
-**Formal-proof status (honest).** This section is a *specification*, not a formal proof. Three safety/liveness properties are targeted for machine-checked proof work:
+These properties are those of the design. Agreement and partition safety assume Byzantine stake below one third; termination assumes an unsteered proposer ranking, which the shipped beacon provides only while the previous sealer is honest (Section 11.12.3 of the whitepaper). As shipped, seal settlement is not live (safety guarantee above), so Agreement and Partition safety currently hold trivially for epoch seals.
 
-1. **Diversity-weighted safety** — correlated adversaries with k ≥ 2 Sybil identities sharing a `WitnessProfile` cannot achieve double settlement regardless of stake, because the diversity discount reduces effective stake exponentially.
-2. **Post-quantum safety under one-algorithm break** — dual-algorithm signing (ML-DSA-65 + SLH-DSA) keeps consensus safe even if one of the two primitives is completely broken, with composite security λ_d + λ_s.
-3. **Per-record causal finality** — under the layered model, records reach confirmation in O(1) epoch rounds and O(log n) wall-clock time, independent of total network size.
+Formal proofs are provided in the companion paper: "MESH-BFT: Diversity-Weighted Post-Quantum Byzantine Fault Tolerance for Directed Acyclic Meshes" (Vasic, 2026). The companion paper states four theorems. Theorems 1–3 carry proofs (Theorem 1 relies on a slot-mutex lemma that is only sketched); Theorem 4, bounded-view liveness (Section 11.12.3, Part F, of the whitepaper), has a proof sketch only. As corrected in v0.7.38: (1) *safety* — two conflicting records cannot both settle while the total stake of Byzantine identities stays below one third of all stake. Diversity weighting lowers the weight of witnesses that share an organization, subnet or location; it does not raise the 1/3 bound against an adversary whose identities are spread across distinct ones; (2) *post-quantum unforgeability of Profile A records* — the AND-composition of ML-DSA-65 and SPHINCS+ is at least as strong as the stronger scheme (about 192 bits), assuming each SPHINCS+ key is bound to its identity (not yet done; Section 4.3). Witness attestations carry one ML-DSA-65 signature, so if ML-DSA-65 is broken, attestations and therefore settlement can be forged; Profile A protects record authorship, not consensus; (3) *per-record causal finality* — records achieve confirmation in O(1) epoch rounds and O(log n) wall-clock time, independent of total network size. The theorem's settlement rule is diversity-weighted; the current implementation settles on eligible stake without the diversity weighting (Section 3.2, Layer 2). A Monte Carlo safety simulation (`tools/mesh-bft-sim` in the reference implementation: a 64-combination adversary grid — network sizes 10–500, Byzantine fraction up to 0.33, sybil cluster size up to 50 — with zero double-settlement violations) supports the diversity-discount result; it runs at the companion paper's original correlation parameterization (γ = 0.1), and re-validation at the shipped runtime constants (γ = 0.2, correlation cap 1.0) is pending.
 
-A TLA+ specification and Monte Carlo simulator are queued as follow-on artifacts (target 4Q 2026); a companion paper will be published alongside the formal specification once proofs are mechanized. Until then readers should treat §11.12 as the protocol's *design intent* under the honest-majority / diversity-weighted assumption, and audit a testnet's observed behavior (AWC settlement rate, seal-attestation-latency histogram, diversity counters on `/metrics`) for empirical evidence. No "simulation, 3600 scenarios, 0 violations" result is claimed here — the simulator has not been run on this codebase yet.
+Bounded instances are model-checked in TLA+ (`spec/tla/`, a 36-model gate). The liveness models use uniform stake, set the record creator's stake to zero and let Byzantine proposers only withhold; their passing configurations assume an unsteerable beacon, and their failing twins show that the fast path is lost when the beacon can be steered, as the shipped one can.
 
-**Correlation discount in zone-scoped attestation:** Within a zone, the same_zone correlation discount (γ=0.2) does not apply to epoch seal attestation — all witnesses are necessarily in the same zone. The same_org (α=0.5) and same_subnet (β=0.3) discounts remain active and prevent trust inflation from correlated witnesses within a zone. Cross-zone diversity is achieved through the zone registry mechanism and cross-zone Merkle proof verification, not through within-zone attestation diversity.
+**Correlation discount in zone-scoped attestation:** The γ term weights *geographic* overlap, not consensus-zone membership (all epoch-seal attestors necessarily share a consensus zone, which would make a zone-membership discount meaningless). The shipped runtime sets γ=0.2 over geographic buckets with an honest-degradation ramp: γ reads 0 when fewer than 2 distinct geographic buckets (or no more than 2 witnesses) are present, ramps linearly with witness-set size, and reaches the full 0.2 at 12 or more witnesses — a thin witness set never manufactures a false diversity signal. The same_org (α=0.5) and same_subnet (β=0.3) discounts remain active and prevent trust inflation from correlated witnesses within a zone; a fully-correlated witness pair reaches the maximum discount α+β+γ=1.0. Cross-zone diversity is additionally achieved through the zone registry mechanism and cross-zone Merkle proof verification.
 
-**Scalability:** Consensus state is bounded by `pending_epochs × subscribed_zones`, not by total records. If the design targets of 10T records/day across 1M zones are reached, epoch length adapts within a 5-second floor (saturated zones above ~20 rec/s) to 60-second ceiling (quiet zones) band: a quiet zone produces 1,440 epoch seals per day, a saturated zone at most 17,280. A witness node in 3 saturated zones tracks at most ~52,000 epoch seals/day — trivially manageable, since only `pending_epochs` are unsettled at any moment and each seal is a small fixed-size record.
+**Scalability:** Consensus state is bounded by `pending_epochs × subscribed_zones`, not by total records. If the design targets of 10T records/day across 1M zones are reached, and once the adaptive interval gates sealing (its gate is off by default; see Layer 2 above), epoch length adapts between a 5-second floor (saturated zones, above ~20 rec/s) and a 60-second ceiling (quiet zones): a quiet zone produces 1,440 epoch seals per day, a saturated zone at most 17,280. A witness node in 3 saturated zones tracks at most ~52,000 epoch seals/day, and only `pending_epochs` are unsettled at any moment.
 
 **Super-seal checkpoint consolidation (v0.7.9+).** Per-epoch seals are still O(time) — at 60-second P50 epochs, a zone produces 1,440 seals per day and 525,600 per year. Light clients verifying historical state from genesis to today would need to fetch every seal. The protocol consolidates seals into **super-seals**: every `N` epochs (default N=64, the `SUPER_SEAL_INTERVAL` constant), the anchor pool aggregates the Merkle roots of those N epoch seals into one super-seal, Dilithium3-signed once over the combined root. A light client verifying super-seals skips `(N-1)/N` signature verifications — at N=64, that's 63/64 ≈ 98.4% fewer signatures, or ~64× compression for a year-long chain. A super-seal includes: `super_seal_id`, `zone`, `start_epoch`, `end_epoch`, `epoch_seal_merkle_root` (SHA3-256 root over the N epoch seals' canonical bytes), `creator_public_key`, and the Dilithium3 signature. Super-seals are emitted by anchors and propagated like any other record. Light clients doing cold-start fetch `/super-seals/latest`, verify the signature against the anchor registry, then fetch per-epoch Merkle proofs for only those records they care about (e.g., their own account). The composition is sound under §4.2 post-quantum assumptions: SHA3-256 is treated as a random oracle, Dilithium3 is EUF-CMA-secure under MLWE, and a super-seal's `epoch_seal_merkle_root` being a correct commitment to N valid epoch seals reduces (by Merkle-tree soundness) to the verifier seeing at most 2^128 effective bits of adversarial work.
 
 **Super-seal cross-peer verification.** A bootstrapping light client cross-verifies each super-seal's `epoch_seal_merkle_root` against up to 3 secondary peers' `/super-seals/{id}/integrity` endpoint. A peer with an incompatible root at the same `(zone, start_epoch, end_epoch)` triggers rejection — the client aborts the cold-start and retries with a different primary. Silence (peer has no super-seal for that range) is not disagreement. For tamper-resistance beyond Merkle-root agreement, the client also fetches the super-seal's wire bytes via `/records/fetch`, recomputes `record_hash`, and verifies the Dilithium3 signature against `creator_public_key` — this catches a colluding-seed set that all agree on a forged root but whose signatures don't verify. If record-bytes fetch fails, the skip is aborted rather than proceeding with unverified marks.
 
-> **Implementation status:** AWC/MESH-BFT is implemented in the Elara Runtime (Rust, ~350k LOC, 5,700+ tests in the full suite). A multi-node testnet validated zone-based consensus with correlation discounting, dual-signature verification (Dilithium3 + SPHINCS+), gossip propagation (p50≈250ms, p90≈500ms on the small co-located testnet), beat transfers and staking, snapshot-based bootstrap (~3 seconds), and failure recovery; all nodes maintained identical supply (10B beats) across kills and restarts. The layered epoch-seal model is implemented: the first layered seal reached 2/3 diversity-weighted settlement on the testnet, and the Layer-2 settlement histogram accumulates samples while the same-zone diversity discount γ sits at its automatic honest-degradation value of 0 — for a single-bucket witness set γ is 0 by construction (`gamma_effective_scaled`: γ activates only once the witness set spans ≥2 distinct geographic buckets and ramps to its full 0.2 by 12 witnesses), so it engages automatically as the set diversifies toward mainnet. ZK proof scaffolding is in place with a fail-closed verifier; the STARK / lattice migration is tracked separately and is not yet deployed.
+> **Implementation status:** AWC/MESH-BFT is implemented in the Elara Runtime (Rust, ~410k lines, 7,000+ tests). A multi-node development testnet (since retired) validated: zone-based consensus with correlation discounting (zone_count=2 forced), dual-signature verification (ML-DSA-65 + SPHINCS+), gossip propagation (p50=250ms, p90=500ms), ZK proof scaffolding with a fail-closed verifier, beat transfers and staking, checkpoint-based startup (31µs replay), cross-zone transfers, and failure recovery. All nodes maintained identical supply (10B beats) across kills, restarts, partitions, and re-genesis, with 12K–21K settled records per node across 5+ days of continuous operation. The layered consensus model — epoch sealing, multi-anchor proposals, differentiated fisherman penalties, peer liveness probes, zone-scoped gossip, cross-zone transfers, batch consensus processing, per-peer attestation watermarks, and priority eviction — is implemented. Epoch-seal settlement is implemented but not yet live (Section 11.12, safety guarantee). The current test network has one staked node, the genesis authority, so it tolerates no Byzantine fault yet; below three staked anchors only the genesis authority proposes seals (bootstrap carve-out, Section 11.12.3 Part B.2 of the whitepaper).
 
 ### 11.13 Dispute Resolution
 
@@ -2353,19 +2442,16 @@ The Elara Protocol uses a three-layer peer discovery system:
 
 **Layer A: Bootstrap Nodes**
 
-At installation, every Elara client ships with a hardcoded list of bootstrap nodes — geographically distributed servers operated by the foundation and early community members. These serve one purpose: introducing new nodes to the network. They are not privileged in any other way.
+Every Elara client ships with a configurable bootstrap-node list — the seed peers a new node dials to be introduced to the network. In the current public release this list is **empty by default** (`TESTNET_SEED_PEERS = []`): there are no foundation-run public endpoints, and operators set their own seeds (`seed_peers` / `ELARA_SEEDS`; see `docs/JOIN-DEVNET.md`). Seed nodes serve one purpose — introducing new nodes — and are not privileged in any other way.
 
 ```
 Bootstrap list (example):
-  bootstrap-eu.elara.network:4001
-  bootstrap-us.elara.network:4001
-  bootstrap-asia.elara.network:4001
-  bootstrap-africa.elara.network:4001
+  seed-1.example.org:9473
+  seed-2.example.org:9473
+  seed-3.example.org:9473
 ```
 
-The bootstrap list is updatable through protocol governance. If all bootstrap nodes go offline simultaneously, nodes that already know peers continue operating — bootstrap is only needed for first contact.
-
-All bootstrap traffic uses the ElaraPQ transport defined in §4.7 — including the very first packet from a freshly-installed client. The hybrid Curve25519 + ML-KEM-768 handshake is the *only* node-to-node wire protocol on mainnet; bootstrap is not a special case. The bootstrap list itself is signed by the foundation reserve multisig and embedded in the binary tarball, so a client can verify peer authenticity before sending its first frame.
+Operators change the bootstrap list in their node configuration; it is not a governance parameter. If all bootstrap nodes go offline simultaneously, nodes that already know peers continue operating — bootstrap is only needed for first contact.
 
 **Layer B: Kademlia DHT (Distributed Hash Table)**
 
@@ -2374,30 +2460,63 @@ Once connected to at least one peer, nodes join a Kademlia-based DHT (a widely d
 - O(log n) lookup for any node in the network
 - Self-healing: the routing table automatically repairs when nodes leave
 - Resistance to targeted attacks: no single node is critical for routing
-- NAT traversal via hole-punching, where every UDP datagram carries an ElaraPQ-encrypted payload (§4.7); plain unencrypted UDP is forbidden on mainnet
+- NAT handling: at startup a node with no configured advertise address uses STUN to learn its NAT type and external address and asks the router for a UPnP port mapping. It advertises an address only when that address is publicly reachable (a public IP, a UPnP mapping to a public IP, or a full-cone NAT); otherwise it takes part by dialing out and pulls twice as often. Hole-punching and relay fallback are planned, not implemented.
 
-Each node maintains a routing table of ~20 × log2(N) entries. For a million-node network, this is ~400 entries — negligible memory.
+Each node keeps at most 8 peers per k-bucket, about 8 × log2(N) entries in practice. For a million-node network this is about 160 entries, and the table is capped at 2,048 — negligible memory.
 
 **Layer C: Local Discovery**
 
 For devices on the same local network (IoT deployments, mesh networks), the protocol uses mDNS/DNS-SD (multicast DNS / Service Discovery) for zero-configuration local peer discovery. A sensor and its gateway find each other without any internet connectivity.
 
-For Bluetooth-capable devices, BLE advertisements enable peer discovery within ~100 meters. This enables the mesh-networking scenarios described in the Emergency Protocols (Section 12.3).
+For Bluetooth-capable devices, BLE advertisements would enable peer discovery within ~100 meters, for the mesh-networking scenarios described in the Emergency Protocols (Section 12.3). BLE discovery is planned and not implemented; mDNS discovery is implemented and on by default.
 
 **Gossip Protocol for Record Propagation:**
 
 Once peers are discovered, validation records propagate via an epidemic gossip protocol:
 
 1. Node creates or receives a new record
-2. Node selects √n random peers from its routing table (where n = number of known peers)
-3. Node forwards the record to selected peers
-4. Recipients repeat the process for records they haven't seen
+2. Node selects peers: every eligible peer when there are fewer than 10, otherwise √n of them chosen pseudo-randomly per record (n = eligible peers); at 100 or more eligible peers, the k peers closest to the record ID instead (content routing, below)
+3. Node pushes the full record to the selected peers
+4. Separately, after each pull a node announces its own recent records to that peer in compact form (record ID, content hash, creator hash, classification, zone, timestamp, size; a few hundred bytes each), and the peer requests only the records it lacks (pull-on-demand)
 
-With √n fan-out, theoretical propagation completes in ~2-3 rounds. In practice, duplicate messages, network latency, and partial peer overlap increase this to ~6-10 gossip rounds for 1 million nodes — projected under 15 seconds on Earth-zone networks (modelled from epidemic-gossip theory; untested at this scale).
+With √n fan-out, theoretical propagation completes in ~2-3 rounds. Duplicate messages, network latency and partial peer overlap are expected to raise this to ~6-10 gossip rounds for 1 million nodes — projected under 15 seconds on Earth-zone networks (an estimate; untested at this scale).
+
+**Zone-Scoped Gossip Filtering (v0.7.3):**
+
+Records are only relayed to peers subscribed to the record's zone. This prevents bandwidth waste — a node subscribed to `medical/eu/west` does not receive or relay `iot/manufacturing/automotive` records. Three kinds of record bypass zone filtering: epoch seals, beat (ledger) operations and governance operations are relayed globally, as they affect cross-zone state (zone registry, supply conservation, network parameters). Nodes with empty zone subscriptions accept all records (backward compatibility with pre-zone nodes).
+
+**Content-Routed DHT above 100 peers (v0.7.7):**
+
+Flood-gossip with `√n` fan-out works well for small networks but becomes wasteful above 100 peers: every record reaches every subscribed node regardless of whether that node stores or serves it. At 10K+ nodes per zone, the protocol uses a **content-routed overlay** layered on the same Kademlia DHT that handles peer discovery.
+
+Each record is routed to a deterministic responsibility set by XOR distance in the DHT keyspace, keyed on SHA3-256 of its `record_id` (usually a UUIDv7 chosen by the creator):
+
+```
+responsible_nodes(record_id) = k-closest Kademlia peers to SHA3-256(record_id)
+                               where k = content_routing_k (default 5)
+```
+
+A record is gossiped once to its `k` responsible nodes instead of flood-forwarded. If fewer than 3 of the closest peers are eligible, the node falls back to √n flood. Retrieval by a Kademlia lookup against `record_id` is planned and not implemented; nodes currently obtain records they lack through pull sync with their peers. Responsibility rotates naturally as peers join and leave — Kademlia's self-healing property applies unchanged.
+
+**Fallback rule.** Below 100 peers in a zone, flood-gossip remains active (the overhead of content routing exceeds its savings at small scale). At 100+ peers, the overlay activates automatically. The threshold is not a governance parameter — it is a per-node heuristic so partitioned or bootstrapping nodes gracefully degrade.
+
+**Safety.** Content routing changes only the propagation topology, not the consensus model. Epoch seal attestation, slot mutex (§11.12 v0.7.6), and cross-zone proofs (§11.22.1) all operate identically. A record that arrives via content-routed DHT is indistinguishable from one that arrived via flood-gossip — ingest validation is invariant.
+
+**Testnet status:** Content-routed placement above 100 peers is implemented in the Elara Runtime (public `v0.2.0` release; content-routing threshold default 100 in `config.rs`). The testnet runs under the threshold, so flood-gossip is the active path; overlay testing is pending testnet expansion.
+
+**Peer Liveness Probes (v0.7.3):**
+
+Nodes periodically probe peers via `POST /probe` — a three-in-one protocol that combines liveness checking, record exchange, and trust scoring in a single round-trip. The probe interval scales with network size:
+
+```
+interval = 300s × √(peers / 5), clamped to [60s, 3600s]
+```
+
+At 5 peers: 300s. At 20 peers: 600s. At 500 peers: ~3000s. This keeps the network alive with zero user traffic while avoiding probe storms in large peer sets. A failed probe carries no penalty. Separately, a peer whose connections fail three times in a row is marked stale and backed off exponentially, which drops it from gossip fan-out once a node knows 10 or more peers.
 
 ### 11.15 Zero-Knowledge Proof Feasibility on Constrained Devices
 
-> **Implementation status — DESIGN-STAGE.** The proving-cost figures below are projections for the *specified* zk-SNARK construction (§5.3), not measurements of running code. The Phase-1 SHA3-256 commitment scheme generates proofs in microseconds on every device class; this analysis governs a future zk-SNARK deployment.
+*Implementation-status note: this section plans for the specified zk-SNARK layer, which is design-stage (Section 5.3). The current runtime attaches SHA3-256 commitments, which any device that can hash can produce, to PRIVATE and RESTRICTED records; they are not zero-knowledge proofs and do not yet hide anything (each proof carries its opening, and every record carries its plain content hash). SOVEREIGN is a label only; its zk-STARK construction is not implemented. The timings below are estimates, not measurements of Elara code.*
 
 **The problem:** generating a zk-SNARK proof (in the specified construction) requires significant computation:
 
@@ -2414,7 +2533,7 @@ The Kenya teenager's $30 phone can generate a proof, but it takes up to a minute
 **Solution: Layered Privacy by Device Capability**
 
 **Capable devices (phones, laptops, servers):**
-Generate privacy proofs locally (Phase 1: SHA3-256 commitments; the zk-SNARK path is design-stage per the banner above). PRIVATE, RESTRICTED, and SOVEREIGN classifications supported.
+Would generate ZK proofs locally once the zk-SNARK layer lands, supporting PRIVATE, RESTRICTED, and SOVEREIGN classifications. Today they attach the SHA3-256 commitments described above, which do not yet hide anything.
 
 **Constrained devices (IoT, ESP32):**
 Three options for privacy-preserving validation:
@@ -2442,12 +2561,13 @@ The protocol's algorithm agility ensures that as ZKP technology improves, constr
 
 **Defense Layer 1: Traffic Obfuscation**
 
-The protocol supports tunneling ElaraPQ frames inside outer carriers so that deep-packet-inspection middleboxes cannot easily fingerprint Elara traffic. The ElaraPQ handshake and AEAD (§4.7) remain unchanged in every case; only the outer wrapper differs:
+The design allows for **pluggable transports** — the same concept used by Tor to operate in jurisdictions with restrictive internet policies. None is built into the current node; an operator can already carry node traffic through an external tunnel (WireGuard, SSH or Tor), since the transport is ordinary TCP:
 
-- **Tor pluggable transports:** Elara nodes can speak ElaraPQ inside a Tor obfs4 / Snowflake / meek tunnel, hiding the fact that the underlying traffic is Elara at all.
-- **WireGuard / Tailscale / SSH tunneling:** ElaraPQ inside a WireGuard datagram or SSH port-forward — useful in network environments where the outer protocol is allowlisted.
-- **Steganographic encoding:** Validation records embedded in innocent-looking traffic (images, video calls, DNS queries) for extreme cases. Per-message overhead is high; reserved for one-shot record exfiltration, not bulk gossip.
-- **Bridge relays:** Unlisted relay nodes operated by volunteers outside the censoring jurisdiction, accessible via out-of-band key exchange. The bridge speaks ElaraPQ inward and any allowlisted outer transport outward.
+- **Tunnels:** Elara traffic carried inside an allowlisted outer protocol (WireGuard, SSH, or a Tor pluggable transport such as obfs4 or Snowflake)
+- **Steganographic encoding:** Validation records embedded in innocent-looking traffic (images, video calls, DNS queries)
+- **Bridge relays:** Unlisted relay nodes operated by volunteers outside the censoring jurisdiction, accessible via out-of-band key exchange
+
+The techniques are proven at scale by the Tor Project and Signal; for Elara, steganographic encoding and bridge relays are designs, not implemented.
 
 The protocol explicitly does **not** support a "domain-fronting mode" that masquerades as classical HTTPS to a permitted CDN. Earlier drafts of this section listed domain fronting as a pluggable transport; that recommendation is retired by §4.7. Domain fronting requires a classical TLS outer layer, which leaks per-connection metadata (TLS ClientHello fingerprints, SNI when not encrypted via ECH) and breaks the post-quantum forward-secrecy goal of the transport. Operators who need DPI bypass in a censored environment should use the carriers above, not bake classical TLS into the protocol.
 
@@ -2464,31 +2584,42 @@ A government can slow the network. It cannot kill records that already exist on 
 
 **Defense Layer 3: Mesh Networking Fallback**
 
-In extreme censorship scenarios (internet shutdown), devices can form local mesh networks:
+In extreme censorship scenarios (internet shutdown), devices could form local mesh networks. These are design directions; Bluetooth and LoRa meshes are not implemented:
 
 - **Bluetooth mesh:** Phone-to-phone, ~100 meter range, chain across a city
 - **LoRa mesh:** 10+ km range, low bandwidth but sufficient for compact validation payloads (full PQC records require gateway relay)
-- **Sneakernet:** Physical transfer of DAM data via USB drives, SD cards — the protocol supports offline sync by design
+- **Sneakernet:** Physical transfer of DAM data via USB drives, SD cards. Records are self-contained signed objects that verify offline (`elara-verify`), and a node can export its records (`/admin/export`) for another to ingest (`POST /records`); a dedicated offline sync tool is not built yet
 
 Records validated during an internet blackout propagate when any node in the mesh eventually reaches the global network. The DAM is patient. It can wait.
 
 **Defense Layer 4: Geographic Distribution of Anchor Nodes**
 
-The protocol requires anchor nodes on at least 3 continents for the decentralization threshold (Section 11.4). Once that threshold is reached, no single government can compel all anchor nodes to comply — though the pre-launch network currently runs on a single-region development fleet and has not yet reached it. Even if a government seizes all domestic anchor nodes, the global DAM continues — and the domestic zone's records are already replicated internationally.
+The design places anchor nodes on at least three continents at network launch (roadmap, Phase 2), and Section 11.4 sets the decentralization threshold at 1,000 active witness nodes across at least 10 geographic regions; neither is enforced in code, and the pre-launch network, which runs on a single-region development fleet, has not reached either. Once they hold, no single government can compel all anchor nodes to comply. Even if a government seizes all domestic anchor nodes, the global DAM continues — and the domestic zone's records are already replicated internationally.
 
 ### 11.17 Beat Supply Model
 
 > **Scope: Public permissionless network only.** This section applies to the public permissionless network. Private deployments have no beat supply.
 
-> **Full specification:** The complete beat supply model — including supply mechanics and conservation economics — is specified separately. This section addresses only the adversarial implications.
+> **Scope.** This section describes the public network's beat supply model — a fixed-supply conservation system — and its security implications. See Section 9 for the protocol-level economic summary.
 
 The public network's beat supply model is designed as a **conservation system** — beats circulate between producers (witnesses) and consumers (record submitters) rather than being continuously minted. This design choice has specific security implications:
 
 - **No inflationary dilution attack** — because supply is fixed, an attacker cannot devalue existing stakes by inflating the supply
-- **MEV prevention** — witness attestation order does not affect outcome (trust scores are order-independent — the same witnesses produce the same trust score regardless of when they attest). This eliminates Maximal Extractable Value by design. There is nothing to extract from reordering.
+- **MEV prevention** — witness attestation order does not affect outcome (trust scores are order-independent — given the same attestations and ledger state, the same witnesses produce the same trust score whatever order they attest in). This eliminates Maximal Extractable Value by design. There is nothing to extract from reordering.
 - **No gas fee exploitation** — because the protocol does not charge per-transaction gas fees, there is no fee market to manipulate
 
-The complete supply model, distribution schedule, and economic equilibrium analysis are specified separately.
+**Genesis allocation.** The fixed supply (10 billion beats) is partitioned at genesis into six internal accounting pools. Only the bootstrap pool has an active distribution path (the participation faucet, Section 9.5 of the whitepaper); the others are reserved genesis balances. Consistent with Section 9.2, **no pool is sold, listed, auctioned, or made tradeable** — this is internal accounting, not a token distribution.
+
+| Pool | Share | Distribution path |
+|------|------:|-------------------|
+| Bootstrap | 30% | **Active** — earned by participating nodes via the faucet (whitepaper §9.5) |
+| Development | 20% | Reserved genesis balance; a 3-of-5 multisig for protocol development is planned, not implemented; no market |
+| Community | 20% | Reserved genesis balance; control by conviction voting (§10.3–10.4) is planned, not wired to this pool; no market |
+| Team | 15% | Reserved genesis balance — **no active distribution path** |
+| Contributors | 10% | Reserved genesis balance — **no active distribution path** |
+| Reserve | 5% (+ rounding remainder) | Reserved genesis balance; a 4-of-5 multisig emergency reserve is planned, not implemented; no market |
+
+The split is computed with exact integer arithmetic and a conservation check (the six pools sum to the total supply — no minting beyond genesis). Because beats are never tradeable, these shares confer no monetary claim; they bound how much internal staking/accounting weight each pool may hold, not a financial position.
 
 ### 11.18 Protocol Upgrade Mechanism
 
@@ -2545,7 +2676,7 @@ ARCHIVED   → algorithm documented in protocol history, old records still verif
              through algorithm agility (Section 4.4)
 ```
 
-No algorithm is ever deleted from the protocol's specification. A record signed with Dilithium3 in 2026 must be verifiable in 3026 — even if Dilithium3 was deprecated in 2050. The verification code for every algorithm ever used is preserved in the protocol's reference implementation, explicitly tagged as archival.
+No algorithm is ever deleted from the protocol's specification. A record signed with Dilithium3 in 2026 must be verifiable in 3026 — even if Dilithium3 was deprecated in 2050. The verification code for every algorithm ever used is preserved in the protocol's reference implementation, explicitly tagged as archival. The shipped code does not yet follow this rule: it rejects Round-3 Dilithium3 signatures, has removed its EC-VRF verifier, and no longer decodes wire versions 1–3.
 
 ### 11.19 Spam and Denial-of-Service Prevention
 
@@ -2553,22 +2684,34 @@ No algorithm is ever deleted from the protocol's specification. A record signed 
 
 This is the cost of "Layer 1 is always free." Free creation means free spam.
 
-**Defense 1: Propagation Rate Limiting**
+**Defense 1: Stake-Scaled Propagation Rate Limiting**
 
-Layer 1 (local validation) is unrestricted — an attacker can fill their own local DAG with garbage. But Layer 2 (network propagation) applies rate limits:
+Layer 1 (local validation) is unrestricted — an attacker can fill their own local DAG with garbage. But Layer 2 (network propagation) applies rate limits per identity:
 
-- Each identity is allowed **N records per hour** via the gossip protocol (default: 100)
-- Records exceeding the rate limit are queued, not rejected — they propagate eventually, but slowly
-- Witness nodes prioritize attestation of records from identities within their rate limit
-- Rate limits scale with identity trust score — a trusted, long-standing identity gets higher limits
+$$\text{effective\_limit} = \text{base\_rate} + \left\lfloor \frac{\text{staked\_base}}{\text{stake\_ratio} \times 24} \right\rfloor$$
 
-An attacker generating 1 million records per hour from a fresh identity would see 100 propagate immediately and 999,900 enter a slow queue. By the time they propagate, the identity's anomalous behavior is flagged.
+Where `base_rate` is the unstaked floor (default: 120 records/hour, a governance parameter; a node never applies less than its configured floor, default 100) and `stake_ratio` is base units of stake (10^9 per beat) per daily record (default: 100,000,000 = 0.1 beats, governance-adjustable). The formula converts the daily stake allowance to an hourly propagation ceiling.
 
-**Cross-zone enforcement of global rate limits.** Rate limits are per-identity GLOBALLY (10/50/200 records/day by trust tier), but with zone-scoped gossip a node in zone A only sees zone A traffic. An identity creating 200 records/day spread across 10 zones is within the per-zone window everywhere yet exceeds the global limit. Global enforcement is reconciled at epoch boundaries: each zone's epoch seal includes per-identity record counts for that epoch. A monitoring process (or fisherman) detects identities exceeding global limits by summing their per-identity counts across zone epoch seals and submits a challenge. Global enforcement therefore rides on the existing seal stream — no synchronous cross-zone coordination is required, and the check is eventually-consistent over a one-epoch window.
+| Stake | Hourly Limit | Records/sec | With 60× Batch |
+|-------|-------------|-------------|-----------------|
+| 0 beats (unstaked) | 120 | 0.03 | 2/sec |
+| 100 beats | ~161 | ~0.04 | ~3/sec |
+| 1,000 beats | ~536 | ~0.15 | ~9/sec |
+| 10,000 beats | ~4,286 | ~1.19 | ~71/sec |
+
+Key properties:
+
+- **Unstaked identities get the base floor.** Fresh or anonymous identities can still participate — 120 records/hour is sufficient for individual use. This preserves the "Layer 1 is always free" guarantee.
+- **Stake scales linearly.** No tiered jumps. Staking 100 beats and staking 101 beats produce proportionally different limits. Industrial users get throughput in proportion to what they stake.
+- **Batching multiplies effective throughput.** A single record can contain multiple data points (Protocol §4.2 batch records). Combined with stake-scaling, a factory staking 1,000 beats with 60-reading batches achieves ~9 verified data points per second (~770,000 per day).
+- **Gossip relay is exempt.** Records arriving via gossip pull or push relay from known peers are not rate-limited — only direct submissions from the record creator. This prevents sync failures between nodes with different propagation histories.
+- **Both parameters are governance parameters.** Beat stakers can vote to change `stake_ratio`, or to raise `base_rate` above each node's configured floor, without protocol upgrades, adapting to network growth or shifts in beat earning economics.
+
+An attacker generating 1 million records per hour from an unstaked identity would see 120 propagate and the rest rejected. To sustain that rate, they would need to stake ~2.4 million beats — a real economic commitment. (No slashing offence covers a creator's own records in the current runtime; slashing covers epoch-seal equivocation and challenged witness misbehaviour.)
 
 **Defense 2: Proof-of-Work for Burst Propagation**
 
-If a node needs to propagate more than its rate limit (legitimate use case: IoT gateway syncing a batch of sensor readings), it can solve a lightweight proof-of-work puzzle for each excess record. The puzzle difficulty is calibrated so that:
+If a node needs to propagate more than its rate limit (legitimate use case: IoT gateway syncing a batch of sensor readings), the design lets it solve a lightweight proof-of-work puzzle for each excess record (not implemented: the current node rejects records over the limit; staking raises the limit instead). The puzzle difficulty would be calibrated so that:
 
 - Normal usage (under rate limit): zero computational cost
 - Moderate burst (2–10x limit): seconds of compute
@@ -2578,7 +2721,7 @@ This is the same approach used by Hashcash [24] (email anti-spam, 2002) and late
 
 **Defense 3: Content-Independent Duplicate Detection**
 
-Bloom filters at the zone level detect records with identical content hashes. If the same hash is submitted by different identities simultaneously (a classic spam pattern — resubmitting the same garbage with different keys), only the first propagation proceeds. Subsequent duplicates are annotated as conflicts but not relayed further.
+Zone-level Bloom filters would detect records with identical content hashes. If the same hash were submitted by different identities simultaneously (a classic spam pattern — resubmitting the same garbage with different keys), only the first propagation would proceed; subsequent duplicates would be annotated as conflicts but not relayed further. (Design; not implemented. The current node's entropy check looks at each identity's own submissions; it does not hold back a record because another identity submitted the same content hash.)
 
 **Defense 4: Economic Filtering at Layer 2**
 
@@ -2611,7 +2754,7 @@ Record flagged as spam/anomaly:             -10 reputation
 
 A witness that attests to everything — including spam and disputed records — rapidly loses reputation. Reputation loss reduces the weight of future attestations (Section 11.12), reducing earned rewards. Indiscriminate witnessing is therefore economically irrational.
 
-A witness that carefully evaluates records before attesting — checking for rate limit compliance, duplicate content, identity trust, and causal consistency — maintains high reputation and earns more. Selective, honest witnessing is the Nash equilibrium. The complete witness incentive model and reward mechanics are specified separately.
+A witness that carefully evaluates records before attesting — checking for rate limit compliance, duplicate content, identity trust, and causal consistency — maintains high reputation and earns more. Selective, honest witnessing is the Nash equilibrium. The witness reward mechanics are specified in Section 9.4 of the whitepaper.
 
 The related problem of **reputation escape** — where an entity destroys a damaged identity to start fresh — is addressed in Section 11.33, which introduces identity continuity scoring and organizational binding as countermeasures.
 
@@ -2769,11 +2912,11 @@ End users see a simple app: create, validate, browse. The underlying DAM complex
 
 **Estimation by component:**
 
-**Layer 1 (local validation):** Negligible. Hashing + signing = milliseconds of CPU time. Energy cost: ~183 μJ (~50.8 nWh) per validation on a smartphone. Orders of magnitude less than sending a text message.
+**Layer 1 (local validation):** Negligible. Hashing + signing takes under a millisecond of CPU time with ML-DSA-65 on desktop-class hardware, or about 125 ms when the optional SPHINCS+ signature is also added (Section 4.2). Energy per validation has not been measured.
 
 **Layer 2 (network propagation + witnessing):**
 
-- **Gossip propagation:** Network traffic comparable to a peer-to-peer file-sharing swarm. Each node sends/receives a compact record announcement (~1 KB header + hash, not the full ~4.5 KB record) to √n peers per hop; full records are fetched on demand by interested nodes. Records propagate within their zone (Section 7), not globally — zone partitioning bounds the effective fanout. For a zone with ~10,000 active nodes, epidemic gossip is projected to converge in ~4 rounds of √n fan-out (modelled from epidemic-gossip theory; untested at this scale). Most records are created by leaf nodes and propagated to their zone's witness set, not broadcast to the entire network. The energy estimate below uses network-wide averages accounting for zone partitioning and leaf-node locality.
+- **Gossip propagation:** Network traffic comparable to a peer-to-peer file-sharing swarm. Each node sends/receives a compact record announcement (~1 KB header + hash, not the full ~6 KB record) to √n peers per hop; full records are fetched on demand by interested nodes. Records propagate within their zone (Section 7), not globally — zone partitioning bounds the effective fanout. For a zone with ~10,000 active nodes, epidemic gossip is projected to converge in ~4 rounds of √n fan-out (modelled from epidemic-gossip theory; untested at this scale). Most records are created by leaf nodes and propagated to their zone's witness set, not broadcast to the entire network. The energy estimate below uses network-wide averages accounting for zone partitioning and leaf-node locality.
 
 - **Witness attestation (PoWaS):** The proof-of-work component is calibrated to be lightweight — ~0.1 seconds of CPU per attestation (vs. ~10 minutes of ASIC-scale computation in proof-of-work blockchains). Energy per attestation: ~0.005 Wh. For 1,000 witnesses per record: ~5 Wh total.
 
@@ -2800,7 +2943,7 @@ End users see a simple app: create, validate, browse. The underlying DAM complex
 | Proof-of-stake platforms       | ~1,500–2,600 MWh           |
 | **Elara Protocol (estimated)** | **~14,400 MWh**            |
 
-The Elara Protocol at full scale would consume roughly **10,000x less energy than proof-of-work blockchains** (a projection at the design-target scale of ~1M nodes — the network does not yet operate at that scale, and both sides of the comparison are estimates). It consumes approximately 6x more than proof-of-stake platforms in absolute terms, but the comparison is not apples-to-apples: proof-of-stake networks process financial transactions (~30 TPS), while the Elara Protocol is designed to validate all forms of digital work at IoT scale (millions of records per day — a design target, not measured throughput) with quantum-safe cryptography. Layer 1 validation energy is negligible (~183 μJ per operation) — the dominant costs are network propagation, witness consensus, and optional AI analysis.
+The Elara Protocol at full scale would consume roughly **10,000x less energy than proof-of-work blockchains** (a projection at the design-target scale of ~1M nodes — the network does not yet operate at that scale, and both sides of the comparison are estimates). It consumes approximately 6x more than proof-of-stake platforms in absolute terms, but the comparison is not apples-to-apples: proof-of-stake networks process financial transactions (~30 TPS), while the Elara Protocol is designed to validate all forms of digital work at IoT scale (millions of records per day — a design target, not measured throughput) with quantum-safe cryptography. Layer 1 validation energy is small (a millisecond or less of CPU time per ML-DSA-65 signature; its energy has not been measured) — the dominant costs are network propagation, witness consensus, and optional AI analysis.
 
 The PoWaS component is the largest contributor. If the Sybil resistance proves achievable without PoW (through reputation and staking alone), the energy footprint drops to ~9,400 MWh. Without optional Layer 3 AI, it drops further to ~2,100 MWh — comparable to proof-of-stake networks.
 
@@ -2828,28 +2971,30 @@ The protocol implements eight independent defense layers, applied at the record 
 
 | Layer | Type | Action | Applied At |
 |-------|------|--------|------------|
-| 1. Metadata key allowlist | Structural | Reject unknown keys | Ingestion |
+| 1. Metadata key discipline | Structural | Reject blocked/malformed keys; admit unknown keys as inert | Ingestion |
 | 2. Text field byte limits | Structural | Reject oversized text | Ingestion |
 | 3. URL rejection | Structural | Reject URLs in text | Ingestion |
-| 4. Tombstone suppression | Reactive | Suppress gossiped records | Post-storage |
+| 4. Tombstone marker | Reactive | Mark a record for suppression (propagation filter designed, not yet implemented) | Ingestion |
 | 5. Browser-side enforcement | Defense-in-depth | Client-side validation | Pre-submit |
-| 6. Propagation bounds | Structural | 24 entries, 2KB values | Ingestion |
+| 6. Propagation bounds | Structural | 64 entries, 8 KB values | Ingestion |
 | 7. Identity ban list | Proactive | Block all records from identity | Ingestion (first check) |
 | 8. Content blocklist | Proactive | Block records matching terms | Ingestion |
 
 Layers 1–3 and 6 are **structural constraints** — they limit the protocol's capacity to carry content, like TCP's maximum segment size limits the payload of a single packet. They are engineering constraints, not content judgments.
 
-Layers 4, 7, and 8 are **operator tools** — they give node operators the means to comply with their jurisdiction's laws and protect themselves from criminal liability. They are not centralized censorship.
+Layers 7 and 8 are **operator tools** — they give node operators the means to comply with their jurisdiction's laws and protect themselves from criminal liability. They are not centralized censorship. Layer 4 is not an operator tool: only the genesis authority can create tombstones (Section 11.25.14 states what that implies).
 
 Layer 5 is **defense-in-depth** — client-side validation that prevents user confusion but is not a security boundary. Server-side enforcement is authoritative.
 
-#### 11.25.2 Metadata Key Allowlist (Layer 1)
+#### 11.25.2 Metadata Key Discipline (Layer 1)
 
-Every metadata key in a validation record must appear in the protocol's allowlist. The allowlist contains the complete set of keys used by all protocol operations: beat transfers, staking, governance, disputes, fisherman challenges, key rotation, algorithm sunset, epoch management, versioning, tombstoning, and collaboration.
+The runtime maintains an allowlist covering the complete set of keys used by all protocol operations: beat transfers, staking, governance, disputes, fisherman challenges, key rotation, algorithm sunset, epoch management, versioning, tombstoning, and collaboration. The allowlist is a **producer-side schema registry**: continuous-integration meta-tests enforce that every in-tree record builder registers its keys in the same change that introduces them.
 
-Records with unknown keys are rejected at ingestion — they are never stored, never gossiped, never processed. This prevents arbitrary data injection through the metadata layer.
+At ingestion, key discipline is enforced structurally. Key names are frozen to a permanent character set — lowercase `[a-z0-9_]`, at most 128 bytes — and records violating it are rejected. Keys on the blocked list (below) are rejected outright. Unknown keys that satisfy the structural rules are **admitted and treated as inert**: the record is stored and gossiped, its unknown values subject to every size, count, sanitization, and URL bound in this section, but no execution path reads them — protocol logic dispatches only on keys it explicitly recognizes, never by iterating a record's metadata. An operator counter tracks admitted unknown keys, so a node running behind the current schema is visible in monitoring long before it matters.
 
-Six anti-rehypothecation keys are explicitly blocked: `derivative_op`, `wrap_op`, `collateral_op`, `tokenize_op`, `synthetic_op`, `lend_op`. Records containing these keys are rejected at ingestion.
+This forward-compatible admission rule is what keeps mixed-version fleets synchronized. A strict reject-unknown gate would couple every deployed binary to the newest schema: the first additive metadata key would make older nodes reject every newer record — epoch seals included — freezing them at their last synchronized epoch while the network advances. Admission-with-inertness lets an older binary carry newer fields untouched and stay in consensus. The compatibility boundary is explicit and narrow: any key a node must *interpret* to remain in consensus (seal semantics, quorum logic, state transitions) is introduced behind a wire-format version bump with a documented migration, never as a silently added field.
+
+Six anti-rehypothecation keys are explicitly blocked — beats cannot be wrapped, tokenized, or collateralized into a tradeable instrument: `derivative_op`, `wrap_op`, `collateral_op`, `tokenize_op`, `synthetic_op`, `lend_op`. Records containing these keys are rejected at ingestion, and changing the blocked list is itself a consensus-affecting change carrying the same version discipline.
 
 #### 11.25.3 Text Field Byte Limits (Layer 2)
 
@@ -2888,24 +3033,24 @@ This prevents records from serving as a link directory for illegal content. A re
 
 Hard limits at the gossip layer constrain record size:
 
-- **Maximum metadata entries:** 24 per record
-- **Maximum value size:** 2 KB per metadata value
+- **Maximum metadata entries:** 64 per record — sized so a fully-populated epoch seal (~26 keys today) carries years of additive headroom, while staying under the wire decoder's independent 256-entry bound
+- **Maximum value size:** 8 KB per metadata value (sized so hex-encoded Dilithium3 public keys and VRF proofs fit)
 - **Maximum record size:** 64 KB total wire size
 
-Theoretical maximum: 24 entries × 2 KB = 48 KB per record. In practice, most records are 200–500 bytes (a few metadata keys plus a signature). These bounds prevent weaponization of the metadata layer as a distributed storage system.
+The binding cap is the 64 KB total record size — the per-field limits intentionally sum above it, so the aggregate bound is what holds. In practice, a record with a few metadata keys is about 6 KB, most of it the ML-DSA-65 signature and public key, or about 41 KB with the optional SPHINCS+ signature (Section 11.32). These bounds prevent weaponization of the metadata layer as a distributed storage system.
 
 #### 11.25.6 Tombstone Mechanism (Layer 4)
 
-The genesis authority can suppress records from future propagation by creating a tombstone record:
+The genesis authority can mark a record for suppression by creating a tombstone record. The design suppresses the target from future propagation; the shipped runtime does not yet do so (third bullet):
 
 - Tombstone records contain `tombstone_op: "remove"` and `tombstone_target: "<record_id>"`
 - Only the genesis authority identity can create tombstones
-- Tombstoned records remain in storage (immutability is preserved) but are excluded from gossip responses and API queries
+- Tombstoned records remain in storage (immutability is preserved). In the shipped runtime the tombstone marker is consulted only at the ingest ledger gate; exclusion from gossip responses and API queries is designed but not yet implemented, so a tombstoned record still propagates and is still served today
 - Tombstone records themselves propagate normally, so all nodes learn about suppression decisions
 
-**Limitation — race condition:** If a target record propagates to a node before the tombstone arrives, that node will have already stored and indexed the record. The tombstone prevents future propagation but does not un-index already-processed records. Identity bans (Layer 7) are the primary proactive defense; tombstoning is reactive cleanup.
+**Limitation — race condition:** If a target record propagates to a node before the tombstone arrives, that node will have already stored and indexed the record. Even once propagation filtering is built, the tombstone will prevent future propagation only; it will not un-index already-processed records. Identity bans (Layer 7) are the primary proactive defense; tombstoning is reactive cleanup.
 
-**Immutability guarantee:** Tombstoning does NOT delete records. The record remains in storage as an audit trail. Tombstoning suppresses propagation — it controls what the network carries forward, not what it has already stored. This distinction preserves the immutability guarantee of Section 11.5.
+**Immutability guarantee:** Tombstoning does NOT delete records. The record remains in storage as an audit trail. Tombstoning is designed to suppress propagation — to control what the network carries forward, not what it has already stored. This distinction preserves the immutability guarantee of Section 11.5.
 
 #### 11.25.7 Identity Ban List (Layer 7)
 
@@ -2980,7 +3125,7 @@ The protocol explicitly commits to decentralizing content moderation governance 
 #### 11.25.13 What the Protocol Will NOT Do
 
 - It will not implement a centralized, default-shipped blacklist of forbidden content hashes. Hash-based blacklists are content-agnostic censorship mechanisms that will inevitably be abused. Operator-configured term filters on metadata text fields are a different mechanism — transparent, jurisdiction-specific, and under operator control.
-- It will not allow retroactive deletion of validation records. Immutability is a core guarantee. Tombstoning suppresses propagation; it does not delete storage. Records that have been stored remain stored.
+- It will not allow retroactive deletion of validation records. Immutability is a core guarantee. Tombstoning is designed to suppress propagation (not yet implemented; Section 11.25.6); it does not delete storage. Records that have been stored remain stored.
 - It will not ship default content blocklist terms. The protocol does not encode a single cultural standard. Operators configure their own nodes according to their own legal obligations.
 
 #### 11.25.14 Honest Position
@@ -2990,7 +3135,7 @@ Earlier versions of this document stated: "A protocol that can censor harmful co
 The protocol's defense against misuse is structural:
 
 - **Structural constraints (Layers 1–3, 6) cannot be weaponized.** A 256-byte memo limit does not censor political speech. A metadata key allowlist does not suppress dissent. URL rejection does not block ideas. These are engineering constraints that limit the protocol's capacity to carry content — any content, harmful or benign.
-- **Operator tools (Layers 4, 7, 8) are decentralized.** Each node operator controls their own tombstones, bans, and blocklist. There is no central authority that can order all nodes to suppress a record. A record rejected by one node may be accepted by another. The global DAM is the union of all nodes' records — suppression on one node does not suppress on the network.
+- **Operator tools (Layers 7, 8) are decentralized; Layer 4 is not.** Each node operator controls their own bans and blocklist. Tombstones (Layer 4) are the exception: only the genesis authority identity can create them (Section 11.25.6), which makes the genesis authority a single suppression authority at this stage of the network — stated here rather than hidden. Outside Layer 4, there is no central authority that can order all nodes to suppress a record. A record rejected by one node may be accepted by another. The global DAM is the union of all nodes' records — suppression on one node does not suppress on the network.
 - **No default terms are shipped.** The protocol does not decide what is harmful. Operators do, according to their jurisdiction.
 
 The infrastructure does judge certain properties of the payload — its size, its key structure, the presence of URL patterns in text fields. It does not judge the meaning. This is the same architectural boundary observed by SMTP (which rejects messages over a size limit but does not read them) and DNS (which enforces label length limits but does not evaluate domain semantics).
@@ -3003,20 +3148,20 @@ The Elara Protocol chooses structural hostility to content distribution over eit
 
 **The gap:** The protocol's signatures are post-quantum (ML-DSA (FIPS 204, "Dilithium"), SPHINCS+). But the zero-knowledge proofs *specified* for PRIVATE and RESTRICTED classifications (Section 5.3) would rely on zk-SNARKs — which typically use elliptic curve pairings (BN254, BLS12-381). These pairings are **not quantum-safe.** Shor's algorithm breaks them.
 
-This means: a quantum adversary could forge zero-knowledge proofs, creating fake PRIVATE validations that appear genuine. The signature is quantum-safe, but the proof is not. This is a real gap.
+This means: once zk-SNARKs land, a quantum adversary could forge zero-knowledge proofs, creating fake PRIVATE validations that appear genuine. The signature is quantum-safe, but the proof is not. This is a real gap in the specified design.
 
 **Solution: Quantum-Safe ZKP Migration Path**
 
 **Phase 1 (current): SHA3-256 commitments with PQC signatures**
 
-The Phase-1 runtime uses SHA3-256 commitments (hash-based). The *specified* zk-SNARK (Groth16) construction would provide compact proofs (~288 bytes) with fast verification, but is design-stage (§5.3). In both cases the surrounding validation record is signed with Dilithium (PQC): an attacker who breaks the ZKP must also forge the PQC signature to create a fraudulent record — which they cannot do.
+The Phase-1 runtime uses SHA3-256 commitments (hash-based). The *specified* zk-SNARK (Groth16) construction would provide compact proofs (128 bytes compressed on BN254) with fast verification, but is design-stage (§5.3). In both cases the surrounding validation record is signed with Dilithium (PQC): an attacker who breaks the ZKP must also forge the PQC signature to create a fraudulent record — which they cannot do.
 
 The risk window: an attacker with a quantum computer could forge a ZKP proof but would need to wrap it in a valid Dilithium signature (their own key). This allows them to falsely claim PRIVATE validation of content they created — but they could already do this by simply validating with a PUBLIC classification. The ZKP breach lets them fake the privacy wrapper, not the validation itself.
 
 **Assessment:** The practical impact of ZKP quantum vulnerability is limited because:
 - Breaking the ZKP does not let you forge someone else's validation (the PQC signature still binds it to a specific key)
 - It lets you create fake PRIVATE records under your own key — which has limited value since you could create PUBLIC records instead
-- The real attack would be de-anonymizing existing PRIVATE records by breaking the hiding property of the commitment scheme
+- The real attack would be de-anonymizing existing PRIVATE records by breaking the hiding property of the commitment scheme. The Phase-1 runtime offers no hiding to break: every record carries its plain content hash and each commitment proof carries its opening (Section 5.3)
 
 **Phase 2 (2027-2029): Hybrid ZKPs**
 
@@ -3027,7 +3172,7 @@ Deploy hybrid proofs that combine a classical zk-SNARK with a lattice-based ZKP:
 
 Both proofs must verify for the record to be considered valid. If quantum computing breaks the classical component, the lattice-based component still holds.
 
-Proof size increases from ~288 bytes to ~50 KB. Acceptable for non-constrained devices.
+Proof size increases from 128–256 bytes to ~50 KB. Acceptable for non-constrained devices.
 
 **Phase 3 (2029+): Full PQC ZKPs**
 
@@ -3037,7 +3182,7 @@ As lattice-based and hash-based ZKP constructions mature:
 - Candidates: lattice-based SNARKs, STARK-based systems (specified for SOVEREIGN; no FRI prover in the runtime today — `src/crypto/commitment.rs` is SHA3 commitments), hash-based commitment schemes
 - Algorithm agility (Section 4.4) enables seamless transition
 
-**For SOVEREIGN classification:** The specified SOVEREIGN path is zk-STARKs — hash-based, not elliptic-curve-based, and therefore not vulnerable to Shor's algorithm. Note on implementation status: the current runtime uses SHA3-256 commitments for SOVEREIGN (`src/crypto/commitment.rs`, honestly named); a FRI-based STARK prover is a planned migration, not a deployed primitive. The quantum-safety argument applies once the STARK prover lands; until then SOVEREIGN records carry the hash commitment and the Dilithium3 signature, both already PQ-safe.
+**For SOVEREIGN classification:** The specified SOVEREIGN path is zk-STARKs — hash-based, not elliptic-curve-based, and therefore not vulnerable to Shor's algorithm. Note on implementation status: the current runtime implements SOVEREIGN as a label only — ingest requires no proof for it, and the record carries its plain content hash and creator key like any other; a FRI-based STARK prover is a planned migration, not a deployed primitive. The quantum-safety argument applies once the STARK prover lands; until then a SOVEREIGN record is protected only by its ML-DSA-65 (Dilithium3) signature, which is post-quantum.
 
 ### 11.27 Multi-Device Key Management
 
@@ -3091,7 +3236,7 @@ The user's validated work history is accessible from any device by querying the 
 Reference implementations abstract this complexity:
 
 - First launch: "Create your Elara identity" (generates root key + first device key)
-- "Back up your recovery phrase" (12-word mnemonic encoding the root key, BIP-39 [25] compatible)
+- "Back up your recovery phrase" (design only, not built: a mnemonic encoding the root key, BIP-39 [25] compatible; at least 18 words, since 12 words carry only 128 bits)
 - Adding a device: scan QR code on existing device → DeviceAuthorization created automatically
 - Losing a device: "Remove device" from any other enrolled device
 
@@ -3204,43 +3349,46 @@ Version chains ARE the incremental validation recommended for originality protec
 
 ### 11.31 Formal Verification Strategy
 
-**The obligation:** A protocol handling trust for all digital creation across planetary distances must be provably correct. Informal reasoning and test suites are necessary but insufficient. Formal verification provides mathematical proof that the protocol's properties hold under all conditions.
+**The obligation:** A protocol handling trust for all digital creation across planetary distances must be provably correct. Informal reasoning and test suites are necessary but insufficient. Formal methods check that the protocol's stated properties hold in bounded models of it; they complement the tests below and do not replace them.
 
 **Approach: Layered Verification**
 
 **Layer 1: TLA+ Specification of Consensus**
 
-The Adaptive Witness Consensus mechanism (Section 11.12) will be specified in TLA+ (Temporal Logic of Actions), the same framework used to verify distributed databases, cache coherence protocols, and globally distributed data services at major technology companies.
+The Adaptive Witness Consensus mechanism (Section 11.12) is specified in TLA+ (Temporal Logic of Actions) — the same framework used to verify distributed databases, cache coherence protocols, and globally distributed data services at major technology companies — and its safety and liveness cores are bounded-model-checked with TLC (the runnable models and configs ship in `spec/tla/`).
 
-The TLA+ specification will formally verify:
-- **Safety:** If an honest node considers a record zone-settled, no honest node will ever consider a conflicting record zone-settled in the same zone
-- **Liveness:** Every record propagated to an honest node will eventually be witnessed (assuming network connectivity)
-- **Partition correctness:** Zone merging preserves all records from both partitions without duplication or loss
+The TLA+ models, as shipped, check:
+- **Safety (agreement):** two conflicting records claiming the same slot never both reach settlement while Byzantine stake stays below one third (`NoConflictingFinalization`), and diversity weighting can only lower a record's effective stake, never raise it (`DiversitySoundness`)
+- **Cross-zone conservation:** a sealed transfer is never both claimed and aborted (`NoAbortAndClaim`, `SealGateSound`), and the four-bucket supply sum is invariant (`SupplyInvariant`), including the partition-merge seal-demotion tail
+- **Liveness:** a sealed cross-zone transfer eventually settles under a live honest committee after GST (`LiveFast`), and in-zone epoch sealing recurs (`Liveness.tla`, `LivenessRecurrence.tla`). These are bounded models with uniform stake, with the record creator's stake set to zero, and with Byzantine proposers that only withhold. They count a raw two-thirds as meeting the diversity-weighted threshold, so they miss that seal settlement is not live (Section 11.12). The cross-epoch model assumes an unsteerable beacon; its failing twin shows the fast path is lost when the beacon can be steered, as the shipped one can
+- **Not modelled:** record-preserving zone split and merge. The earlier claim that zone merging is verified to preserve all records without duplication or loss is withdrawn; that path is covered by tests, not by the TLA+ models
 
-**Layer 2: Cryptographic Protocol Verification (ProVerif/Tamarin)**
+**Layer 2: Cryptographic Protocol Verification (ProVerif)**
 
-The cryptographic handshakes (key exchange, device authorization, revocation) will be verified using ProVerif or Tamarin Prover — automated tools for verifying security protocols. These tools can prove:
+The post-quantum transport handshake, the post-handshake record layer, and realm admission are modelled in ProVerif (`spec/proverif/`: handshake, record, admission and composed cores, assembled per scenario by `run-proverif.sh` and run in continuous integration). Under a Dolev-Yao attacker the models establish:
 
-- No man-in-the-middle attack is possible on device enrollment
-- Revocation propagation guarantees eventual consistency
-- The ZKP circuit correctly hides private inputs
+- Session-key secrecy and injective mutual authentication over the transcript for peers whose keys are already known (the transcript-bound ML-DSA-65 signature is the man-in-the-middle defence). On first contact a node trusts the key a peer presents (trust on first use); the models do not cover that case
+- Hybrid secrecy: the session key stays secret when ML-KEM is fully broken, and when X25519 is fully broken — and, as an intentional failing scenario, not when both are
+- Forward secrecy, key-compromise-impersonation resistance, and freedom from identity misbinding, each paired with an intentional-violation scenario that shows the query is not vacuous
+- Not modelled: device authorization and revocation propagation, and the ZKP circuit. Tamarin has not been used
 
 **Layer 3: Reference Implementation Testing**
 
-Beyond formal verification, the reference implementation will include:
+Alongside the formal models, the reference implementation carries:
 
-- **Property-based testing** (QuickCheck/Hypothesis) — generating millions of random scenarios and verifying invariants hold
-- **Fuzzing** (AFL, libFuzzer) — feeding malformed inputs to every parser and protocol handler
-- **Simulation testing** (planned, not yet run) — 10,000-node simulations with adversarial behavior, partitions, and clock skew
-- **Chaos engineering** — randomly killing nodes, introducing latency, corrupting storage, and verifying recovery
+- **Decoder fuzzing:** the `decoder_fuzz` sweep feeds random inputs to the attacker-reachable wire decoders and runs in continuous integration; coverage-guided fuzzing (AFL, libFuzzer) is not yet set up
+- **Fault-injection tests:** disk-full, memory-ceiling, slot-conflict and relay scenarios
+- **Property-based testing:** planned
+- **Simulation testing** (adversarial behavior, partitions, clock skew): planned, not yet run
+- **Chaos engineering:** planned; done by hand on small testnets so far
 
 **Timeline:**
 
-- Phase 1 (2026-2027): TLA+ specification and model checking alongside reference implementation development
-- Phase 2 (2027-2028): Cryptographic protocol verification before mainnet launch
-- Phase 3 (ongoing): Continuous fuzzing and simulation testing as part of CI/CD
+- Phase 1: TLA+ specification and TLC model checking of the settlement, cross-zone, conservation and liveness cores — shipped (`spec/tla/`, `run-tlc.sh`)
+- Phase 2: ProVerif models of the transport handshake, record layer and realm admission — shipped (`spec/proverif/`); machine-checked proofs at unbounded scale — ongoing
+- Phase 3 (ongoing): the decoder fuzz sweep runs in continuous integration; coverage-guided fuzzing and simulation testing are planned
 
-**Publication:** All specifications, proofs, and test results will be published as companion documents to this whitepaper, enabling independent verification by the academic community.
+**Publication:** The specifications ship with the runtime source (github.com/navigatorbuilds/elara-mesh, `spec/`), so they can be re-run rather than trusted; the consensus proofs (three theorems and a liveness sketch) are in the companion paper (Vasic, 2026).
 
 ### 11.32 Storage and Bandwidth Requirements
 
@@ -3252,15 +3400,15 @@ This section provides concrete estimates based on the cryptographic primitives s
 
 | Record Type                               | Approximate Size | Breakdown                                                                                |
 |-------------------------------------------|------------------|------------------------------------------------------------------------------------------|
-| PUBLIC validation record                  | ~4-5 KB          | Content hash (32 B) + ML-DSA-65 (FIPS 204, "Dilithium3") signature (~3.3 KB) + metadata/causal anchors (~500 B)  |
-| PRIVATE validation (Phase 1: SHA3 commitment) | ~4-5 KB      | SHA3-256 commitment proof + PQC signature (~3.3 KB) + commitment (32 B) + metadata (~500 B). The Groth16 zk-SNARK (288 B proof) is the design-stage target (§5.3). |
+| PUBLIC validation record                  | ~6 KB            | Content hash (32 B) + creator's ML-DSA-65 public key (1,952 B) + signature (3,309 B) + metadata/causal anchors (~500 B); about 41 KB with the optional SPHINCS+ signature (Profile A, 35,664 B; measured) |
+| PRIVATE validation (Phase 1 = SHA3 commitment) | ~6 KB            | As a PUBLIC record, plus a ~100-byte SHA3-256 commitment proof (Phase 1; it does not yet hide the content hash — Section 5.3); + 128–256 B when the specified Groth16 proof ships |
 | PRIVATE validation (Phase 2, hybrid ZKP)  | ~55 KB           | Hybrid lattice+classical proof (~50 KB) + PQC signature (~3.3 KB) + metadata (~500 B)    |
-| SOVEREIGN validation (target: zk-STARK)   | ~100-200 KB      | STARK proof (variable, typically 50-200 KB) + PQC signature (~3.3 KB) + metadata. Planned; current runtime ships SHA3-256 commitments (`src/crypto/commitment.rs`) in this slot. |
-| Witness attestation                       | ~3.5 KB          | Record reference (32 B) + Dilithium3 signature (~3.3 KB) + timestamp + node identity     |
+| SOVEREIGN validation (zk-STARK, specified) | ~100-200 KB      | STARK proof (variable, typically 50-200 KB) + PQC signature (~3.3 KB) + metadata. Planned; the current runtime ships SHA3-256 commitments in this slot. |
+| Witness attestation                       | ~5.3 KB          | Record reference + witness identity hash + ML-DSA-65 signature (3,309 B) + the witness's public key (1,952 B) + timestamp + PoWaS proof |
 | Trust header                              | ~15-20 KB        | Epoch reference + multiple anchor node signatures + zone metadata                        |
 | Epoch summary                             | ~50-100 KB       | Merkle root + multi-anchor signatures + record count + zone state                        |
-| DeviceAuthorization record                | ~5 KB            | Root identity + device key + permissions + PQC signature                                 |
-| VersionRecord                             | ~4-5 KB          | Previous version reference + content hash + PQC signature + metadata                     |
+| DeviceAuthorization record                | ~6 KB or more    | Root identity + device key + permissions + the creator's ML-DSA-65 signature and public key |
+| VersionRecord                             | ~6 KB            | Previous version reference + content hash + the creator's ML-DSA-65 signature and public key + metadata |
 
 Each validation record requires 3-5 witness attestations to reach meaningful trust scores (Section 11.12). The effective network cost of one validation is therefore approximately 4-5x the base record size.
 
@@ -3273,6 +3421,8 @@ Each validation record requires 3-5 witness attestations to reach meaningful tru
 | Mature network | 10M     | 100M sensors | ~200M       | ~1 TB        | ~4 TB          | ~1.4 PB |
 | Full vision    | 100M+   | 1B+ sensors  | ~1B+        | ~5 TB        | ~20 TB         | ~7 PB   |
 
+(These volumes assume about 5 KB per record. A measured record signed with ML-DSA-65 alone is about 6 KB, which raises them by about a fifth; records that carry the optional SPHINCS+ signature are about eight times larger.)
+
 **IoT is the dominant data source.** A single autonomous vehicle fleet (1,000 vehicles at 100 decisions/second) generates ~8.6 billion raw events per day. The protocol's tiered approach addresses this: most IoT validations remain on Layer 1 (local only, never reaching the network), with periodic summaries propagated to Layer 2 via incremental validation (Section 11.7) and batched witness requests.
 
 **Per-Node Storage Requirements**
@@ -3284,8 +3434,7 @@ Not every node stores the full DAM. The zone architecture (Section 7) and node t
 | Leaf node (phone, IoT)  | Own records only      | 10 MB – 1 GB    | ~1-10 MB/day       |
 | Relay node              | Zone records (recent) | 10 GB – 100 GB  | ~100 MB – 1 GB/day |
 | Anchor node             | Full zone history     | 1 TB – 50 TB    | ~1-10 GB/day       |
-| Archive node (Tier 3)   | Complete DAM history  | 100 TB+         | ~5-20 GB/day       |
-| Off-world node (Tier 4) | Zone-scoped snapshot  | 1 TB – 10 TB    | Sync-dependent     |
+| Archive node (Tier 3, future extension) | Complete DAM history  | 100 TB+         | ~5-20 GB/day       |
 
 **Bandwidth Requirements**
 
@@ -3434,7 +3583,7 @@ This asymmetry — combined with hardware binding where available, organizationa
 
 ### 11.34 Mega-Publication Attack (Economic Shock from Private Network Transition)
 
-> **Status (2026-06-22): both this attack and its Defenses 1–5 are INERT — they presuppose `NETWORK_PUBLISH`, which is DISABLED in code** (`NETWORK_PUBLISH_ENABLED = false`, compile-time guarded in `src/network/publish.rs`; see §10.6.3). With no live publication path, a mega-publication cannot occur on the public network, and the protocol-level publication rate limits, beat-acquisition vesting, governance cooling period, zone absorption quotas, and economic-shock circuit breaker described below are not active. They are retained for reference pending the inert-import reframe and a proven multi-root merge theorem (`docs/MESH-BFT-MERGE-SEMANTICS.md`).
+> **Implementation-status note: INERT — this analysis presupposes NETWORK_PUBLISH, which is DISABLED in the current runtime** (`NETWORK_PUBLISH_ENABLED = false`; see §10.6.3). With no live publication path, a mega-publication cannot occur on the public network, and the rate limits, acquisition vesting, governance cooling period, zone-absorption quotas, and circuit breaker described below are not active. Retained for reference pending the inert-import reframe and a proven multi-root merge theorem.
 
 **The attack:** A dominant private entity — hypothetically representing a significant fraction of global economic output — operates a private Elara network for decades. It accumulates a vast, internally-consistent DAG: hundreds of millions or billions of records, spanning every industry vertical, with deep causal chains verified by thousands of internal witnesses. One day, this entity executes a NETWORK_PUBLISH (Section 10.6.3) in SNAPSHOT mode — publishing its entire historical DAG to the public network simultaneously.
 
@@ -3444,7 +3593,7 @@ This is not a traditional attack. The entity may have entirely legitimate motiva
 
 **Failure 1: Beat Demand Singularity**
 
-The conservation model fixes supply at 10 billion beats. A mega-publisher needs beats for storage delegation of its entire historical DAG across public storage nodes. If the entity's history represents a substantial fraction of all validated work globally, the beat demand could approach or exceed the circulating supply. Beat demand outstrips circulation. Legitimate participants cannot obtain enough beats for storage delegation. The public network's economic model seizes.
+The conservation model (Section 11.17) fixes supply at 10 billion beats. A mega-publisher needs beats for storage delegation of its entire historical DAG across public storage nodes. If the entity's history represents a substantial fraction of all validated work globally, the beat demand could approach or exceed the circulating supply. Beat demand outstrips circulation. Legitimate participants cannot obtain enough beats for storage delegation. The public network's economic model seizes.
 
 **Failure 2: DAG Size Shock**
 
@@ -3456,11 +3605,11 @@ The mega-publisher's internal DAG is deeply consistent — decades of verified c
 
 **Failure 4: Governance Capture**
 
-The square-root dampening and 5% per-identity cap (Section 10.4) limit individual governance weight. But a mega-entity can create thousands of legitimate identities — subsidiaries, divisions, regional offices, each operating independently for decades. Each identity falls under the 5% cap individually. Collectively, they could represent majority governance weight. The anti-Sybil mechanisms (Section 11.1) detect fake identities but cannot prevent an entity from having legitimately distinct organizational units that happen to share strategic alignment.
+The square-root dampening and the per-identity cap (Section 10.4) limit individual governance weight. But a mega-entity can create thousands of legitimate identities — subsidiaries, divisions, regional offices, each operating independently for decades. Each identity falls under the cap individually. Collectively, they could represent majority governance weight. The anti-Sybil mechanisms (Section 11.1) detect fake identities but cannot prevent an entity from having legitimately distinct organizational units that happen to share strategic alignment.
 
-**Failure 5: Attention Economy Capture**
+**Failure 5: Cognitive-Output Capture**
 
-The entity's Layer 3 AI analysis, trained on decades of private data spanning a significant fraction of global economic activity, produces cognitive output that dwarfs anything trained on the public network's smaller dataset. The attention economy concentrates around this entity's analysis capabilities. Other participants become consumers rather than producers of attention-value.
+The entity's Layer 3 AI analysis, trained on decades of private data spanning a significant fraction of global economic activity, produces cognitive output that dwarfs anything trained on the public network's smaller dataset. Demand for Layer 3 cognitive services (Section 9.1) concentrates around this entity's analysis capabilities. Other participants become consumers rather than producers of network intelligence — a cognitive centralization that parallels the governance-capture risk of Failure 4.
 
 **Defense 1: Protocol-Level Publication Rate Limits**
 
@@ -3502,7 +3651,7 @@ The rate can be adjusted through governance (Section 10.3), but the default is d
 To prevent beat demand shocks, the protocol enforces a **maximum beat acquisition rate** for entities engaged in mega-publication:
 
 ```
-PUBLICATION_TOKEN_VESTING:
+PUBLICATION_BEAT_VESTING:
   Any entity publishing > 1% of the public DAG's current size
   must acquire beats over a period proportional to publication duration:
 
@@ -3669,23 +3818,25 @@ The theoretical maximum checkpoint rate (one every 5 minutes = 288/day) is never
 
 | Trigger | Typical Frequency | Size |
 |---------|-------------------|------|
-| Boot | 1/day | ~3.5 KB (dual-signed) |
-| Shutdown | 1/day | ~3.5 KB |
-| Milestone | 5-10/day | ~3.5 KB |
-| Drift (session) | 2-5/day | ~3.5 KB |
-| Manual | 0-2/day | ~3.5 KB |
-| Periodic (rate-limited) | 5-10/day | ~3.5 KB |
+| Boot | 1/day | ~42 KB (dual-signed) |
+| Shutdown | 1/day | ~42 KB |
+| Milestone | 5-10/day | ~42 KB |
+| Drift (session) | 2-5/day | ~42 KB |
+| Manual | 0-2/day | ~42 KB |
+| Periodic (rate-limited) | 5-10/day | ~42 KB |
+
+Sizes are for a record carrying both signatures of Section 11.35.1 (ML-DSA-65 and the 35,664-byte SPHINCS+ signature); with ML-DSA-65 alone a checkpoint is about 6 KB.
 
 **Realistic rate: 15-30 checkpoints/day per Tier 2+ node.**
 
 **Storage budget:**
 
 ```
-30 checkpoints/day × 3,500 bytes = 105,000 bytes/day ≈ 100 KB/day
-100 KB/day × 365 days = 36.5 MB/year per node
+30 checkpoints/day × ~42,000 bytes ≈ 1.26 MB/day
+1.26 MB/day × 365 days ≈ 460 MB/year per node
 ```
 
-At 10,000 Tier 2+ nodes: 365 GB/year of cognitive checkpoint data. Negligible compared to the 7 PB/year estimated for full IoT-scale validation records (Section 11.32).
+At 10,000 Tier 2+ nodes: about 4.6 TB/year of cognitive checkpoint data. Negligible compared to the 7 PB/year estimated for full IoT-scale validation records (Section 11.32).
 
 #### 11.35.5 Tier Interaction
 
@@ -3696,7 +3847,7 @@ Not all nodes generate cognitive checkpoints:
 - **Tier 2 (THINK)** — full cognitive capabilities. Generates complete CognitiveDigest checkpoints. This is the primary checkpoint tier.
 - **Tier 3 (CONNECT)** — full cognitive capabilities plus network cognition. Generates checkpoints and may witness other nodes' checkpoint chains.
 
-The economic impact of cognitive checkpoints on the public network's beat economy is specified separately.
+The beat accounting for cognitive checkpoints is a Layer 3 economic integration: designed, but not yet specified at the protocol level.
 
 ---
 
@@ -3737,11 +3888,11 @@ The individual WANTS the proof to be fully readable. The more readable, the bett
 
 #### Tier 2: Enterprises, Government, and Defense
 
-For enterprises — defense contractors, pharmaceutical companies, semiconductor manufacturers, intelligence agencies — longevity means **permanent proof that validation occurred, with permanent secrecy about what was validated**:
+For enterprises — defense contractors, pharmaceutical companies, semiconductor manufacturers, intelligence agencies — longevity means **permanent proof that validation occurred, without publishing what was validated**:
 
-- **SOVEREIGN classification:** The validation record stores only a one-way cryptographic hash of the content, never the content itself. A future civilization reading a SOVEREIGN record can verify that a specific entity signed a specific hash at a specific time — the mathematical proof is eternal and readable. But the content behind that hash is irreversibly hidden.
+- **SOVEREIGN classification:** The validation record stores only a one-way cryptographic hash of the content, never the content itself. A future civilization reading a SOVEREIGN record can verify that a specific entity signed a specific hash at a specific time — the proof stays readable and checkable for as long as its signature scheme holds. The content cannot be recovered from the hash alone, but anyone holding a candidate can check it against the hash, so short or predictable content (a yes/no, a small number, a known document) is not protected; encrypt-then-hash (below) closes that gap.
 
-- **Encrypt-then-hash (recommended):** For maximum forward secrecy, enterprises store `Hash(Encrypt(content, K))` where K is an enterprise-controlled encryption key. Even if future advances break the hash function's preimage resistance (reversing a hash to its original content), the reversed hash yields only ciphertext — encrypted data that is useless without the key. The enterprise controls the key: they can rotate it, escrow it, or destroy it. This creates an irreversible double barrier — both the hash AND the encryption must be independently broken, and one of the keys may no longer exist.
+- **Encrypt-then-hash (recommended):** For long-term secrecy, enterprises store `Hash(Encrypt(content, K))` where K is an enterprise-controlled encryption key. Even if future advances break the hash function's preimage resistance (reversing a hash to its original content), the reversed hash yields only ciphertext — encrypted data that is useless without the key. The enterprise controls the key: they can rotate it, escrow it, or destroy it. This creates a double barrier — both the hash AND the encryption must be independently broken, and one of the keys may no longer exist.
 
 - **Zero-knowledge proof path (design-stage, strongest):** For the most sensitive content, the zero-knowledge proof layer specified in Section 5 is *designed to* eliminate the content hash entirely — the DAM would store a proof of properties ("this firmware passed integrity checks," "this drug trial met statistical thresholds") without revealing the content OR its hash, leaving nothing to reverse. This is the design target, not a shipped capability: Phase 1 binds a SHA3-256 content hash to the record, and the Groth16/STARK constructions that would deliver predicate-proof-without-hash are not yet implemented (see §5.3).
 
@@ -3749,15 +3900,15 @@ For enterprises — defense contractors, pharmaceutical companies, semiconductor
 
 - **Validate and destroy:** The enterprise validates the content, obtains permanent proof on the DAM, then destroys the original content. The DAM proves "entity X validated something at time T." Nobody — not even the enterprise — can ever reconstruct what it was. This is the nuclear option: permanent proof of existence without existence. Applicable to military operation logs after declassification, drug trial data after regulatory review, trade secrets after expiration.
 
-**The enterprise chooses their level.** The protocol does not force exposure. It provides a spectrum from full transparency (PUBLIC, readable forever) to absolute secrecy (validate and destroy, content gone forever). The Rosetta Stone makes the proof format readable. It does not make the secret readable. An enterprise's content can be verifiably validated and permanently sealed — both properties surviving for the lifetime of the protocol.
+**The enterprise chooses their level.** The protocol does not force exposure. It provides a spectrum from full transparency (PUBLIC, readable forever) to secrecy (validate and destroy, content gone forever). The Rosetta Stone makes the proof format readable. It does not make the secret readable. An enterprise's content can be verifiably validated and permanently sealed — both properties surviving for the lifetime of the protocol.
 
 #### Enterprise Data Lifecycle Control
 
 > **Status:** the **"Publish selectively" / `NETWORK_PUBLISH`** row below is
 > **DISABLED in code** (`NETWORK_PUBLISH_ENABLED = false`, compile-time guarded —
 > `src/network/publish.rs`; see §10.6.3/§10.6.4). Cross-realm publication is
-> design-stage only: records carry no realm/network binding and MESH-BFT is a
-> single stake-universe, so the mechanism is unsound until those gates ship. The
+> design-stage only: records at wire format v4 and v5, which nodes still accept, carry no network
+> binding, and MESH-BFT is a single stake-universe, so the mechanism is unsound until those gates ship. The
 > other three lifecycle paths are live.
 
 Every decision above is made **per record, post-validation.** The enterprise validates first — establishing cryptographic proof of integrity, authenticity, and timing — then decides what happens to each record afterward. This is not an all-or-nothing choice. Different records within the same organization can follow different lifecycle paths simultaneously:
@@ -3769,7 +3920,7 @@ Every decision above is made **per record, post-validation.** The enterprise val
 | **Destroy everything** | Nothing | Content + DAM record + all traces | Classified operations, intelligence activities, time-limited sensitive data |
 | **Publish selectively** | Selected records move to public network via NETWORK_PUBLISH | Enterprise controls what moves | Safety certifications, regulatory filings, voluntary transparency |
 
-**"Destroy everything" is architecturally guaranteed for private networks.** On the public network, records cannot be deleted — other nodes hold copies. On a private network, the enterprise controls every node. There are no external copies, no external witnesses, no blockchain record, no beats, no central reporting. If the enterprise destroys their private DAM, there is zero protocol-level evidence that any validation ever occurred. The protocol does not phone home. It does not leak metadata to external systems. A private network that is destroyed leaves no trace that the protocol can reconstruct.
+**"Destroy everything" is architecturally guaranteed for private networks.** On the public network, records cannot be deleted — other nodes hold copies. On a private network, the enterprise controls every node. There are no external copies, no external witnesses, no blockchain record, no beats, no central reporting. If the enterprise destroys their private DAM, there is zero protocol-level evidence that any validation ever occurred. The protocol does not phone home: nodes report to no central service. One exception as shipped: when no advertise address is configured, a node's startup NAT detection sends STUN requests to public servers (operated by Google, Cloudflare and stunprotocol.org), which learn the node's public IP address and start time but nothing about its records; a private network avoids this by setting the advertise address or blocking outbound traffic. Optional external time anchors, off by default, would likewise leave evidence outside the network. A private network that is destroyed leaves no trace that the protocol can reconstruct.
 
 **The decision is reversible in one direction only.** An enterprise can always move from more secrecy to more transparency — publishing a previously private record, or revealing content behind a zero-knowledge proof. But it cannot move from transparency back to secrecy — once a record exists on the public network or content has been revealed, it cannot be retracted. This asymmetry is deliberate: it prevents enterprises from selectively rewriting history while allowing them to voluntarily increase transparency when circumstances change (regulatory requirements, declassification timelines, strategic disclosure).
 
@@ -3805,9 +3956,9 @@ The network operates under four readiness levels:
 
 **YELLOW** — Elevated risk detected (solar weather warning, geopolitical tension, infrastructure degradation). Response: increased replication factor, archive nodes activate, anchor nodes increase sync frequency.
 
-**ORANGE** — Active partition or degradation. Response: autonomous zone operation, trusted-peer-only communication, priority sync for critical records, Tier 3 archive nodes initiate full backup.
+**ORANGE** — Active partition or degradation. Response: autonomous zone operation, trusted-peer-only communication, priority sync for critical records, archive nodes (Tier 3, if deployed) initiate full backup.
 
-**RED** — Catastrophic event (global communications failure, EMP, infrastructure collapse). Response: sovereign mode activation, mesh networking between surviving nodes, Tier 3 and 4 nodes become primary, protocol enters survival configuration.
+**RED** — Catastrophic event (global communications failure, EMP, infrastructure collapse). Response: sovereign mode activation, mesh networking between surviving nodes, archive nodes (Tier 3, if deployed) become primary, protocol enters survival configuration.
 
 The emergency level is determined automatically by each zone based on observable network conditions (peer count, sync latency, partition detection). No central authority declares emergencies.
 
@@ -3824,16 +3975,13 @@ The emergency level is determined automatically by each zone based on observable
 
 ### Phase 1: Protocol Development (2026–2027)
 
-- Reference implementation of Layer 1 (local validation, PQC keypair, DAG) — **shipped**
-- Reference implementation of Layer 1.5 (Rust DAM VM, 9 ops, PyO3 bindings) — **shipped**
-- Reference implementation of Layer 2 (HTTP server, record exchange, witness attestation) — **shipped** (v0.11.0: server, client, discovery, witness manager, trust scoring — 985 lines across 8 files)
-- Layer 2 testnet hardening (signature verification, peer rate limiting, attestation back-propagation, heartbeat protocol, weighted trust with temporal decay + diversity bonus, role enforcement) — **shipped** (v0.12.0)
-- Layer 1↔Layer 3 bridge (cognitive outputs signed as DAM records, hardened with validation guards, dedup, rate limiting) — **shipped** (v0.10.8, hardened v0.11.0)
-- Cortical Execution Model (5-layer concurrent architecture for non-blocking tool dispatch) + long-range temporal memory — **shipped** (v0.13.0)
-- Tier system (4-level hardware capability gating: VALIDATE/REMEMBER/THINK/CONNECT) — **shipped** (v0.15.0)
-- Cognitive Continuity Chain (hash-chained, dual-signed cognitive state snapshots in DAG — cryptographic proof of unbroken AI experience) — **shipped** (v0.15.0)
-- Security audit by independent cryptography firm — **not yet done** (no third-party security audit has been performed as of 2026)
-- Developer SDK (Python, Rust, C/embedded) — **partial** (Rust + PQ/light-client SDK crates shipped; packaged Python/C bindings planned)
+- Reference implementation of Layer 1 (local validation, PQC keypair, DAG) — **shipped** (Rust, public source repository; releases v0.2.0–v0.3.0)
+- Layer 1.5 runtime features (DAM VM with its 9 operations; PyO3 bindings for signing, verification, hashing and record encoding) — **shipped**
+- Reference implementation of Layer 2 (HTTP server, record exchange, witness attestation, MESH-BFT epoch seals and settlement) — **shipped** (Rust, public source repository)
+- Layer 2 hardening (signature verification on ingest, peer rate limiting, witness reputation with a 180-day half-life and a zone-diversity bonus, peer heartbeat and liveness probes, bounded post-quantum verification under load) — **shipped**
+- Layer 3 prototype (Elara Core, private and frozen; not part of the open-source release): Layer 1↔Layer 3 bridge, Cortical Execution Model, tier system, Cognitive Continuity Chain — built in the prototype. Earlier editions of this paper tagged these with the prototype's internal version numbers (v0.10.8–v0.15.0); those were never public releases.
+- Security audit by independent cryptography firm — **not yet done**
+- Developer SDK (Python, Rust, C/embedded) — partly shipped: Rust crates on crates.io (`elara-record`, `elara-verify` and others), Python and TypeScript SDKs in the source repository; C/embedded not started
 
 ### Phase 2: Network Launch (2027–2028)
 
@@ -3964,15 +4112,23 @@ At full IoT scale (~7 PB/year), the public network's archive node infrastructure
 
 **14.6 Formal Verification Completeness**
 
-The TLA+ consensus specification (Section 11.31) is now implemented and TLC-model-checked at bounded scale — a 36-model gate covering safety (no conflicting finalization, diversity-penalty soundness, cross-zone sealed-abort exclusion), supply conservation, and liveness (cross-zone settlement, in-zone epoch-seal, and cross-epoch seal recurrence), with each Byzantine-threshold and guard-necessity bound proved tight by a reproduced counterexample (`spec/tla/`). The post-quantum transport and realm-admission layer is symbolically verified in ProVerif (handshake secrecy and mutual authentication, KCI and UKS resistance, forward secrecy, the record layer, full handshake-record composition, and membership-cert admission — `spec/proverif/`). What remains open is the *completeness* of that evidence, not its absence: the model checks are at bounded scale (small witness, zone, and epoch counts — sound for the stake-fraction safety arguments, but not an unbounded proof); the refinement mapping from each TLA+ action to its Rust function is an English-plus-code-grep argument, not a mechanized (TLAPS or Coq) proof of the implementation; and the companion paper has not yet been circulated to external reviewers. The consensus mechanism should therefore be considered *model-checked at bounded scale with a written refinement argument* — the bar Tendermint, HotStuff, and Diem shipped — not *mechanically proven at the implementation level*.
+The TLA+ consensus specification (Section 11.31) is TLC-model-checked at bounded scale — a 36-model gate covering safety (no conflicting finalization, diversity-penalty soundness, cross-zone sealed-abort exclusion), supply conservation, and liveness (cross-zone settlement, in-zone epoch-seal, and cross-epoch seal recurrence), with each Byzantine-threshold and guard-necessity bound shown tight in the bounded models (`spec/tla/`). The post-quantum transport and realm-admission layer is symbolically verified in ProVerif (`spec/proverif/`). What remains open: the checks are at bounded scale, not an unbounded proof; the liveness models use uniform stake, set the record creator's stake to zero and let Byzantine proposers only withhold, so they miss that seal settlement is not live and that the rank is not split-neutral, and their passing configurations assume the unsteerable beacon that the shipped code does not yet provide (Section 11.12.3 of the whitepaper); the refinement mapping from each TLA+ action to its Rust function is an English-plus-code-grep argument, not a mechanized (TLAPS or Coq) proof of the implementation; and the companion paper has not yet been circulated to external reviewers. The consensus mechanism should therefore be considered model-checked at bounded scale with a written refinement argument, not mechanically proven at the implementation level.
 
-**14.7 Regulatory Posture**
+**14.7 Regulatory Uncertainty**
 
-Validation beats are an internal protocol mechanism — never offered, sold, listed, or traded — so the protocol carries no tradeable asset for a regulator to classify as a security. This is a design choice, not a legal opinion. Operators running private or sovereign realms remain responsible for any law applicable to the data they validate.
+Securities classification of the beat remains jurisdiction-dependent and ultimately determined by regulators, not protocol design. The utility-first approach — the beat is earned through verification work and is never sold, listed, or traded (Sections 9 and 11.17) — represents best-effort mitigation, not a guarantee.
 
-**14.8 Network Publication Is Not Live (Disabled in Code)**
+**14.8 Zone Split/Merge Is Partially Implemented — Account Rehoming Is Not**
 
-The NETWORK_PUBLISH / Validation-IPO transition (Section 10.6.3–10.6.4) — importing a private network's historical records *into* public consensus where they gain retroactive native standing — is **disabled at compile time** (`NETWORK_PUBLISH_ENABLED = false`, `src/network/publish.rs`). It was found unsound: a record's signed bytes carry no realm/network binding, so an imported record is consensus-indistinguishable from a native one, and MESH-BFT's single-network safety theorem does not cover adopting a foreign network's records as native settlement parents (Assumption A8, `docs/MESH-BFT-MERGE-SEMANTICS.md`). The mechanism is being reframed to **inert-import** — public consensus attests only that a publication *bundle* existed at an anchored time, conferring zero native standing — pending a proven multi-root merge theorem. Sections 10.6.3–10.6.4 describe the original (disabled) design and are bannered accordingly.
+The zone lifecycle mechanism of Section 7.5.3 is now partially in the runtime: the `TRANSITION_SPLIT`/`TRANSITION_MERGE` seal types, their structural validation, canonical signing encoding, and multi-anchor signature verification ship (`zone_transition_seal.rs`); the auto-scaler constructs transition proposals from live per-zone activity; and every node runs the scaling calculator — with *emission* authority-gated: only the genesis authority emits the `zone_transition` record that actually moves the network. What does **not** ship: account→zone rehoming (redistribution proofs, balance-partition execution) — a transition changes zone routing, but no account state migrates yet. Because a record's signed bytes carry no zone binding (wire format v6 added a network binding, not a zone binding), full permissionless activation remains gated behind a wire-version transition that adds that binding (a constraint of the same kind as the one that led to the Network Publication reframing in §10.6.3–10.6.4). The safety claims of §7.5.3 (e.g., witnesses rejecting a bogus split) remain design analysis, not tested multi-node behavior.
+
+**14.9 The drand Not-Before Bound Is Opt-In, Not Yet Network-Default**
+
+Each epoch seal's time bracket has two legs. The Bitcoin *existed-by* upper bound (OpenTimestamps) is live on every anchored seal and offline-verifiable today. The drand *not-before* lower bound is now supported end-to-end: the seal format and the offline verifier (BLS verification against the pinned League-of-Entropy key) are exercised by the published sample bundles, and the node-side beacon fetcher has landed — a seal-producing node that enables it embeds League-of-Entropy pulses in its seals, and pulse-bearing seals produced this way verify offline. The fetcher is deliberately opt-in (`drand_pulse_enabled` defaults to false, so a producer never emits new seal metadata by surprise). Until it is the network default, the not-before guarantee applies only to seals that carry an embedded pulse, and the verifier reports the distinction rather than overstating it.
+
+**14.10 Network Publication Is Not Live (Disabled in Code)**
+
+The NETWORK_PUBLISH / Validation-IPO transition (Sections 10.6.3–10.6.4) — importing a private network's historical records *into* public consensus where they gain retroactive native standing — is **disabled at compile time** (`NETWORK_PUBLISH_ENABLED = false`, `src/network/publish.rs`). It was found unsound: when it was disabled, a record's signed bytes carried no realm/network binding, so an imported record was consensus-indistinguishable from a native one, and MESH-BFT's single-network safety theorem does not cover adopting a foreign network's records as native settlement parents (Assumption A8, `docs/MESH-BFT-MERGE-SEMANTICS.md`). Since wire format v6 each new record signs its network identifier and a node rejects a record that names a different network; records at v4 and v5, which nodes still accept, and records that name no network, carry no binding. The mechanism is being reframed to **inert-import** — public consensus attests only that a publication *bundle* existed at an anchored time, conferring zero native standing — pending a proven multi-root merge theorem. Sections 10.6.3–10.6.4 describe the original (disabled) design and are bannered accordingly.
 
 ---
 
@@ -3984,17 +4140,17 @@ The Elara Protocol is not an incremental improvement to existing systems. It asp
 
 This paper has presented:
 
-- A novel data structure — the **Directed Acyclic Mesh** — that extends distributed ledger technology beyond the single time-ordering axis of a blockchain to two structural axes — time-ordering within a zone and zone-partitioning across the mesh — with concurrency expressed through DAG parent edges and two orthogonal operational layers enabling classification-based projections and AI-powered cross-structure analysis.
+- A data structure — the **Directed Acyclic Mesh** — that composes published parts (hash-linked records, blockless DAG ledgers, adaptive state sharding, staked checkpoints, CRDT-style merge, transparency-log receipts, external time anchors; Section 2.11 of the whitepaper) into one partition-tolerant validation ledger, with two orthogonal operational layers enabling classification-based projections and AI-powered cross-structure analysis. The composition is the contribution; no part of it is claimed as new.
 
-- **Post-quantum cryptography from genesis** — not as a future migration, but as a founding decision. Dual-signature strategy, algorithm agility, and tiered cryptographic profiles that scale from a $4 microcontroller to a datacenter.
+- **Post-quantum cryptography from genesis** — not as a future migration, but as a founding decision. Dual-signature strategy (not yet effective against an ML-DSA break until the second key is bound; Section 4.3), algorithm agility, and tiered cryptographic profiles that scale from a $4 microcontroller to a datacenter.
 
-- **Zero-knowledge validation** — Phase 1 ships SHA3-256 hash commitments (not genuine ZK proofs; see §5.3), with a specified migration path through classical zk-SNARK constructions to fully quantum-safe ZKPs — addressing the tension between validation and privacy.
+- **Privacy-preserving validation (specified)** — a zero-knowledge layer with a defined migration path to fully quantum-safe ZKPs, addressing the tension between validation and privacy. Phase 1 attaches SHA3-256 commitments to classified records, but they are not yet bound to the record and every record still carries its content hash, so classified records do not yet hide it (Section 5.3 of the whitepaper).
 
-- **Adaptive Witness Consensus** — a continuous trust model targeting Byzantine fault tolerance at the 1/3 bound (specified in the companion paper; machine-checked formal verification pending — see §14.6), designed for networks where finality is impossible and partitions are expected.
+- **Adaptive Witness Consensus** — a continuous trust model with Byzantine fault tolerance at the one-third bound (proofs of safety and a liveness sketch in the companion paper; bounded model checks in TLA+), designed for networks where partitions are expected and global finality cannot be assumed.
 
-- **Interplanetary partition tolerance** — vector clocks, zone-scoped interval tree clocks, and bandwidth-optimized synchronization for communication delays measured in minutes to hours.
+- **Interplanetary partition tolerance (specified, not tested)** — vector clocks, zone-scoped interval tree clocks, and bandwidth-optimized synchronization for communication delays measured in minutes to hours.
 
-- **35 adversarial scenarios and design challenges analyzed and addressed** — from Sybil attacks, key compromise, and device identity recycling to nation-state censorship, storage economics, and the ethical implications of immutable validation. Each scenario includes a concrete defense mechanism, not a handwave.
+- **34 adversarial scenarios and design challenges analyzed and addressed** — from Sybil attacks, key compromise, and device identity recycling to nation-state censorship, storage economics, and the ethical implications of immutable validation. Each scenario names a concrete defense mechanism; where a defense is a design not yet built, its section says so.
 
 - A **free tier that is a moral commitment**, not a marketing feature. Layer 1 validation costs nothing, requires no network, and runs on any device. The protocol is useful to one person before anyone else joins.
 
@@ -4018,7 +4174,7 @@ Every digital execution and every creation deserves proof that it happened, that
 
 5. Buterin, V. (2014). *Ethereum: A Next-Generation Smart Contract and Decentralized Application Platform.*
 
-6. Popov, S. (2018). *The Tangle.* IOTA Foundation.
+6. Popov, S. (2018). *The Tangle.* IOTA Foundation. Version 1.4.3, 30 April 2018.
 
 7. Lamport, L. (1978). *Time, Clocks, and the Ordering of Events in a Distributed System.* Communications of the ACM.
 
@@ -4048,6 +4204,7 @@ Every digital execution and every creation deserves proof that it happened, that
 
 20. EU. (2016). *Regulation (EU) 2016/679 — General Data Protection Regulation (GDPR).* Official Journal of the European Union.
 
+21. Vasic, N. (2026). *MESH-BFT: Diversity-Weighted Post-Quantum Byzantine Fault Tolerance for Directed Acyclic Meshes.* Companion paper, published with the runtime source at github.com/navigatorbuilds/elara-mesh (`docs/whitepaper/MESH-BFT-PAPER.pdf`).
 
 22. Protocol Labs. (2017). *Filecoin: A Decentralized Storage Network.* Protocol Labs.
 
@@ -4069,12 +4226,13 @@ Every digital execution and every creation deserves proof that it happened, that
 
 31. Bernstein, D. J. et al. (2015). *SPHINCS: Practical Stateless Hash-Based Signatures.* EUROCRYPT.
 
-32. Benet, J. (2014). *IPFS — Content Addressed, Versioned, P2P File System.* Protocol Labs.
+32. Benet, J. (2014). *IPFS — Content Addressed, Versioned, P2P File System.* Protocol Labs. arXiv:1407.3561.
 
 33. Ducas, L. et al. (2018). *CRYSTALS-Dilithium: A Lattice-Based Digital Signature Scheme.* IACR Transactions on Cryptographic Hardware and Embedded Systems.
 
 34. Avanzi, R. et al. (2019). *CRYSTALS-Kyber: Algorithm Specifications and Supporting Documentation.* NIST PQC Submission.
 
+35. Bernstein, D. J., Hülsing, A., Kölbl, S., Niederhagen, R., Rijneveld, J., & Schwabe, P. (2019). *The SPHINCS+ Signature Framework.* Proceedings of the 2019 ACM SIGSAC Conference on Computer and Communications Security (CCS '19). https://doi.org/10.1145/3319535.3363229
 
 36. Commons Stack. (2019). *Conviction Voting: A Novel Continuous Decision Making Alternative to Governance.* Commons Stack Research.
 
@@ -4082,9 +4240,37 @@ Every digital execution and every creation deserves proof that it happened, that
 
 38. Gavin, A. et al. (2020). *Sparse Merkle Trees.* Ethereum Research.
 
-39. Efraimidis, P. S. & Spirakis, P. G. (2006). *Weighted Random Sampling with a Reservoir.* Information Processing Letters 97(5), pp. 181–185. (Cited in §11.12 for per-zone VRF committee selection.)
+39. Chacon, S. & Straub, B. *Pro Git*, 2nd ed., Section 10.2 "Git Internals — Git Objects". https://git-scm.com/book/en/v2/Git-Internals-Git-Objects
 
-40. Buterin, V. & Griffith, V. (2017). *Casper the Friendly Finality Gadget.* arXiv:1710.09437. (Cited in §11.12 as the prior-art for Layer-1/Layer-2 finality split.)
+40. Popov, S., Saa, O., & Finardi, P. (2017). *Equilibria in the Tangle.* arXiv:1712.05385. https://arxiv.org/abs/1712.05385
+
+41. Baird, L. (2016). *The Swirlds Hashgraph Consensus Algorithm: Fair, Fast, Byzantine Fault Tolerance.* Swirlds Tech Report SWIRLDS-TR-2016-01. https://hedera.com/wp-content/uploads/2025/11/SWIRLDS-TR-2016-01.pdf
+
+42. Danezis, G., Kokoris Kogias, E., Sonnino, A., & Spiegelman, A. (2021). *Narwhal and Tusk: A DAG-based Mempool and Efficient BFT Consensus.* arXiv:2105.11827. https://arxiv.org/abs/2105.11827
+
+43. Wang, Q., Yu, J., Chen, S., & Xiang, Y. (2020). *SoK: Diving into DAG-based Blockchain Systems.* arXiv:2012.06128. https://arxiv.org/abs/2012.06128
+
+44. The Zilliqa Team. (2017). *The ZILLIQA Technical Whitepaper.* Version 0.1, 10 August 2017. https://docs.zilliqa.com/whitepaper.pdf
+
+45. The MultiversX Team. (2019). *MultiversX: A Highly Scalable Public Blockchain via Adaptive State Sharding and Secure Proof of Stake.* Technical whitepaper, release 2 revision 2, 19 June 2019. https://files.multiversx.com/multiversx-whitepaper.pdf
+
+46. Buterin, V. & Griffith, V. (2017). *Casper the Friendly Finality Gadget.* arXiv:1710.09437. https://arxiv.org/abs/1710.09437
+
+47. Shapiro, M., Preguiça, N., Baquero, C., & Zawirski, M. (2011). *Conflict-Free Replicated Data Types.* Stabilization, Safety, and Security of Distributed Systems (SSS 2011), Lecture Notes in Computer Science, Springer. https://doi.org/10.1007/978-3-642-24550-3_29
+
+48. Sanjuan, H., Pöyhtäri, S., Teixeira, P., & Psaras, I. (2020). *Merkle-CRDTs: Merkle-DAGs meet CRDTs.* arXiv:2004.00107. https://arxiv.org/abs/2004.00107
+
+49. Laurie, B., Langley, A., & Kasper, E. (2013). *Certificate Transparency.* RFC 6962. https://www.rfc-editor.org/rfc/rfc6962
+
+50. Laurie, B., Messeri, E., & Stradling, R. (2021). *Certificate Transparency Version 2.0.* RFC 9162. https://www.rfc-editor.org/rfc/rfc9162
+
+51. Birkholz, H., Delignat-Lavaud, A., Fournet, C., Deshpande, Y., & Lasker, S. (2026). *An Architecture for Trustworthy and Transparent Digital Supply Chains.* RFC 9943 (SCITT). https://www.rfc-editor.org/rfc/rfc9943
+
+52. League of Entropy. drand — a verifiable, decentralised randomness beacon. https://drand.love/
+
+53. Google. *Agent Payments Protocol (AP2).* https://ap2-protocol.org/
+
+54. Efraimidis, P. S. & Spirakis, P. G. (2006). *Weighted Random Sampling with a Reservoir.* Information Processing Letters 97(5), pp. 181–185. (Cited in §11.12: the optional committee draw is modelled on it but does not reproduce it.)
 
 ---
 
@@ -4092,10 +4278,10 @@ Every digital execution and every creation deserves proof that it happened, that
 
 The following companion documents will be published separately during Phase 1 development (2026–2027):
 
-- **Appendix A: Protocol Wire Format** — Complete binary encoding, message formats, handshake sequences, and network protocol specification for interoperable implementations. *Target: Q3 2026, concurrent with reference implementation.*
-- **Appendix B: Cryptographic Parameter Selection** — Security level rationale, performance benchmarks on target hardware (ESP32, Raspberry Pi, smartphone, server), and comparison with alternative parameter sets. *Target: Q3 2026.*
+- **Appendix A: Protocol Wire Format** — Complete binary encoding, message formats, handshake sequences, and network protocol specification for interoperable implementations. *Published in part as `docs/PROTOCOL-SPEC.md` in the runtime source repository: record encoding, signature preimage, record verification, account proofs and zone routing are normative there, with test vectors; epoch seals (apart from the normative Merkle fold recipe) and the post-quantum transport handshake are described as reference material. Where that document and the code disagree, the code is authoritative.*
+- **Appendix B: Cryptographic Parameter Selection** — Security level rationale, performance benchmarks on target hardware (ESP32, Raspberry Pi, smartphone, server), and comparison with alternative parameter sets. *Not yet produced; the Q3 2026 target was missed. Desktop-class measurements are in the runtime's `benches/bench_crypto.rs` (Section 4.2); ESP32, Raspberry Pi and smartphone have not been measured.*
 - **Appendix C: Economic Model Simulation** — Agent-based simulation of the beat economy modeling validator behavior, staking dynamics, free-tier sustainability, and attack economics. *Target: Q1 2027, requires testnet data from Phase 1 launch.*
-- **Appendix D: TLA+ Consensus Specification** — Formal specification of Adaptive Witness Consensus with model-checking results for safety, liveness, and partition correctness properties. *Target: Q4 2026.*
+- **Appendix D: TLA+ Consensus Specification** — the models and TLC configurations ship as `spec/tla/` in the runtime source (Section 11.31). A written companion document collecting the model-checking results has not been produced, and record-preserving zone merge is not among the checked properties.
 
 ## Appendix E: Glossary
 
@@ -4119,15 +4305,15 @@ The following companion documents will be published separately during Phase 1 de
 | **Reincarnation detection**       | Behavioral fingerprinting that identifies likely identity resets from the same physical device                               |
 | **Organizational identity chain** | A hierarchy linking device fleet identities to an organizational root for accountability persistence                         |
 | **Hardware attestation level**    | Classification of identity binding strength: NONE, SOFTWARE, SECURE_BOOT, HARDWARE_KEY, or PUF                               |
-| **Cognitive Continuity Chain**    | A hash-chained sequence of dual-signed cognitive state snapshots that provides cryptographic proof of unbroken AI experience  |
+| **Cognitive Continuity Chain**    | A hash-chained sequence of dual-signed cognitive state snapshots, designed to make a gap or alteration in an AI's recorded state detectable (Section 11.35; a private prototype, not in the open-source runtime) |
 | **CognitiveDigest**               | A structured summary of a node's cognitive state (mood, memory counts, goals, allostatic load) captured in each checkpoint    |
 | **Module Tier**                   | A 4-level capability classification (VALIDATE/REMEMBER/THINK/CONNECT) that controls what cognitive features a node activates  |
 | **Cognitive Checkpoint**          | A ValidationRecord of type `cognitive_checkpoint` containing a CognitiveDigest, chained to previous checkpoints via DAG refs  |
 
 ---
 
-**Document Hash (SHA-256, v0.6.1):** *computed after final edit*
-**Hash verification:** To verify, replace the hash on the line above with the literal string `HASH_PLACEHOLDER` and compute SHA-256 of the file.
+**Provenance:** the whitepaper this specification is cut from is published as a PDF with an OpenTimestamps proof beside it in the public repository's `docs/whitepaper/`. The entries below record earlier whitepaper versions; the proof files they name are not part of this repository.
+
 **Previous Hash (v0.5.3):** *see ELARA-PROTOCOL-WHITEPAPER.v0.5.3.md.ots*
 **Previous Hash (v0.5.2):** *see ELARA-PROTOCOL-WHITEPAPER.v0.5.2.md.ots*
 **Previous Hash (v0.5.1):** *see ELARA-PROTOCOL-WHITEPAPER.v0.5.1.md.ots*
@@ -4138,7 +4324,7 @@ The following companion documents will be published separately during Phase 1 de
 **Previous Hash (v0.2.6):** `ec1c676b447c9082a4ecd3079f4b74057f64d7f41bdd282e77af31e84d667e26`
 **Previous Hash (v0.2.5):** `25dfbe17d91208ad28feb1263105b818a367680539a9d506ac6191d80c5b4c12`
 **Previous Hash (v0.2.3):** `b7220126fc907685ee946ea0226f49688a6fc3e585c1055811368d0c223a6336`
-**OpenTimestamps Proof:** `ELARA-PROTOCOL-WHITEPAPER.v0.6.1.md.ots`
+**OpenTimestamps Proof:** `ELARA-PROTOCOL-WHITEPAPER.pdf.ots` (published beside the PDF)
 **Genesis Document:** `ELARA-PROTOCOL-GENESIS.md` (2026-02-09, OpenTimestamps verified on Bitcoin blocks 935812, 935817, 935820, 935861)
 
 ---
@@ -4151,17 +4337,21 @@ hard-rejects legacy 3293-byte signatures), so the older name is lineage, never a
 Code identifiers (`dilithium3_*`, `DilithiumMode::Dilithium3`) and the `Dilithium3-VRF`
 construction name are frozen labels over FIPS 204 code.
 
-**SLH-DSA-SHA2-192f / "SPHINCS+":** the secondary (Profile A) signature scheme, FIPS 205;
-"SPHINCS+" is its pre-standardization name, same lineage rule as above.
+**SPHINCS+-SHA2-192f:** the secondary (Profile A) signature scheme. The shipped library
+implements the NIST round-3 SPHINCS+ with SHA-256 throughout, so it is **not** FIPS 205
+SLH-DSA-SHA2-192f and does not interoperate with it (`docs/PROTOCOL-SPEC.md` §2.3); moving to
+a FIPS 205 parameter set is planned. Its public key is not yet bound to the signer's identity.
+
 ## Appendix F: Cryptographic Verification
 
-This document is cryptographically signed using two independent timestamping systems:
+This appendix describes how a released document's integrity can be checked, then the verification model the protocol applies to any file.
 
 ### Document integrity
 
-Each released version of this whitepaper is identified by the **SHA3-256 hash** of its exact bytes and preserved in public **git history**. Under the protocol it describes (next section), the document can also carry its own on-mesh validation record — its existence provable by the very mechanism it specifies, rather than resting on any single external anchor.
+Each released version of the whitepaper is published as a PDF whose **SHA-256** hash is timestamped on the Bitcoin blockchain via **OpenTimestamps** (the `.ots` proof ships beside the PDF), and preserved in public **git history**. Under the protocol it describes (next section), the document can also carry its own on-mesh validation record — its existence provable by the very mechanism it specifies, rather than resting on any single external anchor.
 
-External time anchors — a drand *not-before* pulse, an RFC-3161 timestamp authority, and (optionally) an OpenTimestamps/Bitcoin proof — are pluggable, removable strands of that record, never its trust root.
+External time anchors — a drand *not-before* pulse and an OpenTimestamps/Bitcoin *existed-by* proof (an RFC-3161 timestamp-authority slot is reserved in the record format, but no verifier for it exists yet) — are pluggable, removable strands of that record, never its trust root.
+
 ### Validation under the protocol it describes
 
 The protocol described in this whitepaper is designed to give any file its own provable record. A creator signs a **Dilithium3** (ML-DSA-65, FIPS 204) validation record that binds:
@@ -4178,3 +4368,4 @@ You can try this validate-locally model in your browser — identity generated o
 ---
 
 *The Elara Protocol — because every creation deserves proof.*
+

@@ -4,24 +4,26 @@ Post-quantum cryptography provides stronger security at a measurable cost in siz
 
 | Algorithm           | Key Size    | Signature Size | Classical Equivalent   |
 |---------------------|-------------|----------------|------------------------|
-| CRYSTALS-Dilithium3 | 1,952 bytes | 3,309 bytes    | ECDSA: 33 + 72 bytes   |
+| ML-DSA-65           | 1,952 bytes | 3,309 bytes†   | ECDSA: 33 + 72 bytes   |
 | SPHINCS+-SHA2-192f  | 48 bytes    | 35,664 bytes   | Ed25519: 32 + 64 bytes |
-| CRYSTALS-Kyber768   | 1,184 bytes | 1,088 bytes    | X25519: 32 bytes       |
+| ML-KEM-768          | 1,184 bytes | 1,088 bytes    | X25519: 32 bytes       |
 
-Dilithium signatures are **~46x larger** than ECDSA signatures (3,309 vs ~72 bytes). For a datacenter or laptop, this is negligible. For an ESP32 sending thousands of signed readings over LoRa (max payload ~242 bytes), it is prohibitive.
+†FIPS 204 ML-DSA-65 standard value (3,309 bytes). Earlier liboqs Round 3 implementations used 3,293 bytes.
+
+ML-DSA-65 signatures are **~46x larger** than ECDSA signatures (3,309 vs ~72 bytes). For a datacenter or laptop, this is negligible. For an ESP32 sending thousands of signed readings over LoRa (max payload ~242 bytes), it is prohibitive.
 
 **Solution: Tiered Cryptographic Profiles**
 
 The protocol defines three cryptographic profiles that devices select based on their capabilities:
 
 **Profile A: Full PQC (default)**
-- Dilithium3 signatures, Kyber768 key exchange, SPHINCS+ for anchoring
+- ML-DSA-65 signatures, ML-KEM-768 key exchange, optional SPHINCS+ second signature
 - For: servers, laptops, phones, gateways
 - Signature overhead: ~3.3 KB per record
 
 **Profile B: Compact PQC**
-- Dilithium3 (same parameter set as Profile A: 3,309 byte signatures, NIST Level 3)
-- No dual signatures (Dilithium only, no SPHINCS+)
+- ML-DSA-65 (same parameter set as Profile A: 3,309 byte signatures, NIST Level 3)
+- No dual signatures (ML-DSA only, no SPHINCS+)
 - For: Raspberry Pi, industrial controllers, modern IoT gateways
 - Signature overhead: ~3.3 KB per record (identical to Profile A primary signature)
 
@@ -37,7 +39,7 @@ The protocol defines three cryptographic profiles that devices select based on t
 
 All three profiles produce validation records that are interoperable on the DAM. The profile is specified in the record metadata, so verifiers know which security level applies.
 
-**Profile B Security Boundary (v0.7.1 clarification).** Profile B is Profile A minus SPHINCS+ — it uses the same ML-DSA-65 (Dilithium3, NIST Level 3) primary signature but omits the SLH-DSA secondary signature. Under the quantum adversary model of §11.12 / §12.1, Profile B records become forgeable if ML-DSA-65 is broken by a quantum adversary — unlike Profile A records which remain secure via the independent SPHINCS+ signature. Consequently, Profile B identities are treated as lower-trust for consensus purposes. The protocol recommends: (a) transfer limits for Profile B identities (e.g., max 1,000 beats per transaction), (b) settlement requires a minimum fraction of Profile A attestations (e.g., ≥50% of attesting stake from Profile A witnesses), and (c) high-value operations (staking >10K beats, governance votes) require Profile A identity.
+**Profile B Security Boundary (v0.7.1 clarification; corrected in v0.7.38).** Profile B is Profile A minus SPHINCS+: it uses the same ML-DSA-65 primary signature and omits the secondary SPHINCS+ signature. If ML-DSA-65 is broken, Profile B records become forgeable. The design intends Profile A records to stay secure in that case through the independent SPHINCS+ signature; as shipped they do not, because the SPHINCS+ key is not yet bound to the signer's identity (Section 4.3). Profile B identities should therefore be treated as lower-trust. The runtime caps a transfer or stake without a SPHINCS+ signature at 1,000 beats, but any SPHINCS+ signature lifts the cap, including one made with a freshly generated key. Two further measures are recommendations the runtime does not enforce: requiring a minimum fraction of Profile A attestations for settlement (witness attestations carry a single ML-DSA signature in any case) and requiring a Profile A identity for governance votes.
 
 **Future PQC Size Reduction: NIST Additional Signatures Project**
 

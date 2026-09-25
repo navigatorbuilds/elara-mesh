@@ -1,6 +1,6 @@
 ### 11.34 Mega-Publication Attack (Economic Shock from Private Network Transition)
 
-> **Status (2026-06-22): both this attack and its Defenses 1–5 are INERT — they presuppose `NETWORK_PUBLISH`, which is DISABLED in code** (`NETWORK_PUBLISH_ENABLED = false`, compile-time guarded in `src/network/publish.rs`; see §10.6.3). With no live publication path, a mega-publication cannot occur on the public network, and the protocol-level publication rate limits, beat-acquisition vesting, governance cooling period, zone absorption quotas, and economic-shock circuit breaker described below are not active. They are retained for reference pending the inert-import reframe and a proven multi-root merge theorem (`docs/MESH-BFT-MERGE-SEMANTICS.md`).
+> **Implementation-status note: INERT — this analysis presupposes NETWORK_PUBLISH, which is DISABLED in the current runtime** (`NETWORK_PUBLISH_ENABLED = false`; see §10.6.3). With no live publication path, a mega-publication cannot occur on the public network, and the rate limits, acquisition vesting, governance cooling period, zone-absorption quotas, and circuit breaker described below are not active. Retained for reference pending the inert-import reframe and a proven multi-root merge theorem.
 
 **The attack:** A dominant private entity — hypothetically representing a significant fraction of global economic output — operates a private Elara network for decades. It accumulates a vast, internally-consistent DAG: hundreds of millions or billions of records, spanning every industry vertical, with deep causal chains verified by thousands of internal witnesses. One day, this entity executes a NETWORK_PUBLISH (Section 10.6.3) in SNAPSHOT mode — publishing its entire historical DAG to the public network simultaneously.
 
@@ -10,7 +10,7 @@ This is not a traditional attack. The entity may have entirely legitimate motiva
 
 **Failure 1: Beat Demand Singularity**
 
-The conservation model fixes supply at 10 billion beats. A mega-publisher needs beats for storage delegation of its entire historical DAG across public storage nodes. If the entity's history represents a substantial fraction of all validated work globally, the beat demand could approach or exceed the circulating supply. Beat demand outstrips circulation. Legitimate participants cannot obtain enough beats for storage delegation. The public network's economic model seizes.
+The conservation model (Section 11.17) fixes supply at 10 billion beats. A mega-publisher needs beats for storage delegation of its entire historical DAG across public storage nodes. If the entity's history represents a substantial fraction of all validated work globally, the beat demand could approach or exceed the circulating supply. Beat demand outstrips circulation. Legitimate participants cannot obtain enough beats for storage delegation. The public network's economic model seizes.
 
 **Failure 2: DAG Size Shock**
 
@@ -22,11 +22,11 @@ The mega-publisher's internal DAG is deeply consistent — decades of verified c
 
 **Failure 4: Governance Capture**
 
-The square-root dampening and 5% per-identity cap (Section 10.4) limit individual governance weight. But a mega-entity can create thousands of legitimate identities — subsidiaries, divisions, regional offices, each operating independently for decades. Each identity falls under the 5% cap individually. Collectively, they could represent majority governance weight. The anti-Sybil mechanisms (Section 11.1) detect fake identities but cannot prevent an entity from having legitimately distinct organizational units that happen to share strategic alignment.
+The square-root dampening and the per-identity cap (Section 10.4) limit individual governance weight. But a mega-entity can create thousands of legitimate identities — subsidiaries, divisions, regional offices, each operating independently for decades. Each identity falls under the cap individually. Collectively, they could represent majority governance weight. The anti-Sybil mechanisms (Section 11.1) detect fake identities but cannot prevent an entity from having legitimately distinct organizational units that happen to share strategic alignment.
 
-**Failure 5: Attention Economy Capture**
+**Failure 5: Cognitive-Output Capture**
 
-The entity's Layer 3 AI analysis, trained on decades of private data spanning a significant fraction of global economic activity, produces cognitive output that dwarfs anything trained on the public network's smaller dataset. The attention economy concentrates around this entity's analysis capabilities. Other participants become consumers rather than producers of attention-value.
+The entity's Layer 3 AI analysis, trained on decades of private data spanning a significant fraction of global economic activity, produces cognitive output that dwarfs anything trained on the public network's smaller dataset. Demand for Layer 3 cognitive services (Section 9.1) concentrates around this entity's analysis capabilities. Other participants become consumers rather than producers of network intelligence — a cognitive centralization that parallels the governance-capture risk of Failure 4.
 
 **Defense 1: Protocol-Level Publication Rate Limits**
 
@@ -68,7 +68,7 @@ The rate can be adjusted through governance (Section 10.3), but the default is d
 To prevent beat demand shocks, the protocol enforces a **maximum beat acquisition rate** for entities engaged in mega-publication:
 
 ```
-PUBLICATION_TOKEN_VESTING:
+PUBLICATION_BEAT_VESTING:
   Any entity publishing > 1% of the public DAG's current size
   must acquire beats over a period proportional to publication duration:
 

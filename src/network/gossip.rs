@@ -96,10 +96,10 @@ impl GossipKind {
     /// - **Ledger / governance**: always flood. Low rate (~10s of ops/day
     ///   fleet-wide), high importance — flood is fine and the verifiable-
     ///   replication invariant required to safely DHT-route is overkill.
-    /// - **Epoch seal**: floods by default to preserve pre-Gap-6.4 behavior.
-    ///   When `seal_dht_enabled` is `true` (operator opt-in), seals can
-    ///   take the K-DHT path; the replication invariant + pull-side
-    ///   reconciliation that make this safe land in follow-up slices.
+    /// - **Epoch seal**: takes the K-DHT path when `seal_dht_enabled` is
+    ///   `true`, which is the default (`seal_dht_routing_enabled`, backed by
+    ///   a replication floor and pull-side reconciliation); floods only when
+    ///   an operator turns it off.
     /// - **Per-zone record (`Other`)**: never forced; content routing kicks
     ///   in above the configured threshold.
     pub fn must_flood(self, seal_dht_enabled: bool) -> bool {
@@ -111,9 +111,11 @@ impl GossipKind {
     }
 }
 
-/// Compact gossip announcement — header + hash, no payload.
-/// Protocol §11.14: "compact announcement (~1KB header + hash),
-/// full records fetched on demand."
+/// Compact gossip announcement — header + hash, no payload: record id,
+/// content hash, creator hash, classification, zone, timestamp and wire
+/// length, a few hundred bytes. Sent only on the push-after-pull path
+/// (`push_recent_to_peer` → `pq_announce`): the peer answers with the ids
+/// it lacks, and only those full records are pushed.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RecordAnnouncement {
     pub record_id: String,
@@ -5731,22 +5733,25 @@ pub async fn attestation_pull_loop(state: Arc<NodeState>, mut shutdown: watch::R
                                         continue;
                                     }
                                 }
-                                let sig = match hex::decode(sig_hex) { Ok(s) => s, _ => continue };
-                                let pk = match hex::decode(pk_hex) { Ok(p) if !p.is_empty() => p, _ => continue };
                                 let signable = match state.get_record(rid) {
                                     Ok(rec) => super::witness::witness_attestation_preimage(&rec),
                                     _ => continue,
                                 };
-                                match crate::crypto::pqc::dilithium3_verify(&signable, &sig, &pk) {
-                                    Ok(true) => {}
-                                    _ => continue,
-                                }
+                                let (sig, pk) = match super::witness::verify_pulled_attestation(
+                                    witness_hash, sig_hex, pk_hex, &signable,
+                                ) {
+                                    Some(v) => v,
+                                    None => continue,
+                                };
                                 let powas_nonce = att["powas_nonce"].as_u64();
                                 let powas_difficulty = att["powas_difficulty"].as_u64();
-                                let _ = mgr.store_attestation_with_powas(
+                                // Feed consensus only what was actually stored.
+                                if !matches!(mgr.store_attestation_with_powas(
                                     rid, witness_hash, &sig, timestamp,
                                     Some(&pk), powas_nonce, powas_difficulty,
-                                );
+                                ), Ok(true)) {
+                                    continue;
+                                }
                                 batch.push((rid.clone(), witness_hash.to_string(), timestamp, sig, pk, powas_nonce, powas_difficulty));
                             }
                             batch

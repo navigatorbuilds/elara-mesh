@@ -1,6 +1,6 @@
 #### Node Types vs. Module Tiers vs. Storage Profiles
 
-A node's behavior on the Elara network is described by **three orthogonal axes** — confusing any two of them leads to operator-side miscapacity-planning. The Elara Core reference implementation (v0.15.0) introduces a **module tier system** that controls what cognitive capabilities a node activates. This is orthogonal to both the node's consensus role AND its storage profile: the tier controls what a node *thinks*, the consensus role controls what it *does on the network*, and the storage profile controls what it *retains on disk*.
+A node's behavior on the Elara network is described by **three orthogonal axes** — confusing any two of them leads to operator-side miscapacity-planning. The Elara Core prototype (private and frozen; not part of the public release) introduces a **module tier system** that controls what cognitive capabilities a node activates. This is orthogonal to both the node's consensus role AND its storage profile: the tier controls what a node *thinks*, the consensus role controls what it *does on the network*, and the storage profile controls what it *retains on disk*.
 
 | Axis | Values | Source of truth | Controls |
 |------|--------|-----------------|----------|

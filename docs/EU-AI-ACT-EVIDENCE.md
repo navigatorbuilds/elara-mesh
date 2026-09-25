@@ -51,10 +51,10 @@ these are the Act's evidence shapes, not a compliance product.
 
 | Act requirement | Elara artifact, today |
 |---|---|
-| **Art 12** — high-risk systems must technically allow automatic recording of events over the system's lifetime | Proven acts: each agent action can be emitted as a post-quantum dual-signed record (ML-DSA-65, optionally + SLH-DSA) carrying the acting identity, the mandate it acted under, and a content hash — sealed into a hash-linked epoch chain, offline-verifiable by anyone |
+| **Art 12** — high-risk systems must technically allow automatic recording of events over the system's lifetime | Proven acts: each agent action can be emitted as a post-quantum signed record (ML-DSA-65, optionally with a second, pre-standard SPHINCS+ signature) carrying the acting identity, the mandate it acted under, and a content hash — sealed into a hash-linked epoch chain, offline-verifiable by anyone |
 | **Art 12** — traceability appropriate to the system's purpose | Act metadata (tool, action, args hash) plus the full **mandate lineage**: who authorized whom, leaf to root, recomputed from signatures rather than from an access-control table |
 | **Art 14** — human oversight, including the ability to intervene or interrupt ("stop button") | Mandates are issued by a **human principal key**: scoped, time-bounded, and revocable in one command. Revocation is terminal and proven; acts after revocation are flagged `post_revocation` forever, acts before it stay provably authorized forever — revocation kills the future, never the past |
-| **Art 19 / Art 26(6)** — providers and deployers keep automatically generated logs, at least six months | Records you retain are **self-proving indefinitely** — verification requires no server, no account, and no trust in the operator. See the retention section below for the two-layer truth |
+| **Art 19 / Art 26(6)** — providers and deployers keep automatically generated logs, at least six months | Records you retain are **self-proving** — verification requires no server, no account, and no trust in the operator. See the retention section below for the two-layer truth |
 | **Art 26** — deployer evidence burden toward authorities and auditors | The offline verifier: `cargo install elara-verify --features cli`. A regulator or auditor verifies your logs with zero trust in your infrastructure — graded verdicts (VERIFIED / PARTIAL / FAILED, with honest UNPROVEN states). Offline mandate-bundle verdicts (valid / post-revocation / agent-mismatch) come from the same crate's bundle verifier, which has no CLI mode: run it in your browser at <https://navigatorbuilds.github.io/elara-mesh/verify/> or call `elara_verify::mandate_bundle::evaluate_mandate_bundle` from Rust |
 | Traceability across providers and networks | Wire-v6 records bind a network identity into the signed preimage: which system, under which authority, on which network — cryptographically, not by convention |
 
@@ -71,8 +71,9 @@ for at least six months unless other law says longer. Elara's honest sentence he
 > **We make what you retain self-proving; retaining it is your duty, exactly as the
 > Act says.**
 
-Two layers, do not conflate them: (1) a record **you hold** verifies offline forever —
-cryptographic validity does not expire; (2) the **network's** storage is bounded by
+Two layers, do not conflate them: (1) a record **you hold** verifies offline —
+cryptographic validity does not expire, but keep the verifier version that reads its
+format (the current verifier no longer decodes the oldest wire versions 1–3); (2) the **network's** storage is bounded by
 design (default record-body retention on a node is 7 days, RAM-constrained tiers
 downgrade to 1–3 days; see `docs/MANDATE-ACT-PERMANENCE.md` for what outlives pruning
 and what does not). Pull and archive the wire bytes of the records you are obligated to
@@ -106,7 +107,9 @@ archive, not any node, is your Art 19/26 evidence store.
   the clock and the chain. For claims that must bind against external time, use the
   external anchors (`elara-verify` `verify-anchor` feature: drand rounds,
   OpenTimestamps → Bitcoin) — that is what turns "our chain says" into "no one,
-  including the operator, could have backdated this."
+  including the operator, could have backdated this by more than Bitcoin's block-time
+  tolerance (typically about an hour)." Each bound states what it assumes: the drand
+  bound assumes fewer than drand's threshold of operators collude.
 - **GDPR:** identities are key hashes (pseudonymous) and content is hashed, not stored —
   but hashes of personal data remain personal data, and immutable evidence and erasure
   duties are in structural tension. Name it to your DPO; this page does not litigate it.
@@ -136,6 +139,6 @@ artifacts, and the gaps are printed next to the features.
 
 *Category note: agent-observability tracers and GRC dashboards address adjacent needs
 (behavior capture; process management). Elara's distinct property is the combination of
-zero-trust offline verification, revocable cryptographic authority, and post-quantum
+offline verification that needs no trust in the operator's infrastructure, revocable cryptographic authority, and post-quantum
 signatures — evidence that outlives the vendor. This page states the law as of its date;
 the Act and its deadlines can change again, as the Omnibus just proved.*

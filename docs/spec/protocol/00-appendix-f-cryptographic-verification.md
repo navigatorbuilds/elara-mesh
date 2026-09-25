@@ -1,4 +1,4 @@
 ## Appendix F: Cryptographic Verification
 
-This document is cryptographically signed using two independent timestamping systems:
+This appendix describes how a released document's integrity can be checked, then the verification model the protocol applies to any file.
 

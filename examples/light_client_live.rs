@@ -28,16 +28,22 @@
 //! 1. [`LightClient::verify_balance`] fetches `/proof/account/{id}` and proves the
 //!    server-claimed [`AccountState`] is consistent with the proof: it re-hashes
 //!    the leaf and folds the 256-level sparse-Merkle path back up to the root. A
-//!    node that lies about your balance is caught by arithmetic, not by reputation.
+//!    balance that disagrees with the node's own proof is caught by arithmetic.
+//!    A node that fabricates a whole consistent proof, root included, is not
+//!    caught by this step: the root is the node's word until you pin it (step 3).
 //! 2. The two tamper beats make that concrete with the pure
 //!    [`verify_account_against_proof`] kernel (no I/O, no clock): inflate the
 //!    claimed balance → `LeafHashMismatch`; corrupt one Merkle sibling →
 //!    `ProofInvalid`. This is the light-client analogue of the browser verifier's
 //!    "flip one byte → ✗ FAILED".
-//! 3. [`LightClient::verify_balance_against_trusted_seal`] is the fully trustless
+//! 3. [`LightClient::verify_balance_against_trusted_seal`] is the strongest
 //!    tier: pin a seal root you obtained out-of-band (a checkpoint, an anchor) and
 //!    the SDK refuses any proof whose binding does not match it exactly — and
-//!    *fails closed* when the node gives it no seal epoch to pin against.
+//!    *fails closed* when the node gives it no seal epoch to pin against. The
+//!    balance methods never check a seal's signature; the separate
+//!    `light_verify::verify_seal_record_against_anchor` does, against validator
+//!    keys you pin. This example does not call it, so here the result is exactly
+//!    as good as your out-of-band source for the pinned root.
 //!
 //! ## What this does NOT prove
 //!
@@ -224,7 +230,7 @@ async fn run(node_url: &str, identity_arg: Option<&str>) -> Result<(), BoxErr> {
                 .await
             {
                 Err(LightClientError::TrustedSealEpochUnknown) => {
-                    println!("   this node surfaced no seal epoch in the proof, so the trustless");
+                    println!("   this node surfaced no seal epoch in the proof, so the trusted-seal");
                     println!("   pin cannot be demonstrated here — and the SDK correctly FAILS");
                     println!("   CLOSED (TrustedSealEpochUnknown) instead of asserting a binding.");
                 }

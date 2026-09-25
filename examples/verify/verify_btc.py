@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Independent Bitcoin existed-by verification for the Elara conformance set.
 
-The trustless time bracket is the most distinctive claim in this directory — a
+The independent time bracket is the most distinctive claim in this directory — a
 drand BLS not-before below, a **Bitcoin existed-by above**. Until now that upper
 bound was reproducible only through the Rust ``elara-verify`` binary (legs 1-4 of
 ``verify.sh``). This leg closes that gap for the *upper* bound the way
@@ -23,7 +23,7 @@ What it checks (all offline — no node, no calendar server, no network syscall)
   3. HEADER PIN         the archived 80-byte block header double-SHA-256s to the
                         block hash **pinned in this script** (the same pin the Rust
                         binary compiles in — never a hash read from the bundle).
-                        THIS is what makes the bound trustless.
+                        THIS is what makes the bound independent of the bundle's supplier.
   4. ROOT BIND          the header's own merkle-root field (bytes 36..68) equals
                         the merkle root the OTS proof folded to — so the proof
                         genuinely lands in *that* pinned block.
@@ -53,9 +53,9 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 
-# Trustless pins — the SAME double-SHA-256 block hashes the Rust elara-verify binary
+# Pins — the SAME double-SHA-256 block hashes the Rust elara-verify binary
 # compiles in (src/bin/elara_verify.rs :: PINNED_BTC_HEADER_HASHES). The existed-by
-# bound is trustless ONLY because the archived header is authenticated against THIS
+# bound is independent of the operator ONLY because the archived header is authenticated against THIS
 # pin, never against a hash read from the (operator-supplied) bundle. Display
 # (big-endian) form, exactly as a Bitcoin explorer shows it; the stored block hash
 # is the byte-reverse. Extend as new epochs anchor.
@@ -99,7 +99,7 @@ def _collect_bitcoin_attestations(timestamp, btc_cls):
     """Walk the timestamp tree (mirrors the manual walk in elara_verify.rs::ots_walk):
     at every node, ``timestamp.msg`` is the committed digest; a Bitcoin attestation
     pins that digest as a block's merkle root. Pending/calendar attestations are NOT
-    a trustless bound and are ignored. Returns [(block_height, committed_root_bytes)]."""
+    an authenticated bound and are ignored. Returns [(block_height, committed_root_bytes)]."""
     found = []
     for att in timestamp.attestations:
         if isinstance(att, btc_cls):
@@ -171,7 +171,7 @@ def main() -> int:
         print("ERROR: walking the OTS tree failed: {}".format(e), file=sys.stderr)
         return 2
     if not attestations:
-        print("  FAIL Bitcoin attestation  none in the proof — no trustless Bitcoin bound")
+        print("  FAIL Bitcoin attestation  none in the proof — no pin-authenticated Bitcoin bound")
         print("       (only pending/calendar attestations: the proof is not yet Bitcoin-confirmed)")
         print("\nNo Bitcoin existed-by bound to reproduce. Never a fake green.")
         return 1
@@ -221,9 +221,11 @@ def main() -> int:
     print("  seal {}…".format(seal_hash[:16]))
     print("  was committed into Bitcoin block {} (pinned {}…)".format(height, display_hash[:16]))
     print("  whose header timestamp is {} UTC.".format(when.strftime("%Y-%m-%d %H:%M:%S")))
-    print("  ⇒ the sealed content existed BY {} UTC — trustless upper bound, proven".format(
+    print("  ⇒ the sealed content existed BY {} UTC — an upper bound, proven".format(
         when.strftime("%Y-%m-%d %H:%M:%S")))
-    print("    against a block hash this script pins, not Elara's word.")
+    print("    against a block hash this script pins, not Elara's word. The bound is the")
+    print("    block's header time, which the miner sets and which can trail the real")
+    print("    mining time, typically by at most about an hour.")
     return 0
 
 

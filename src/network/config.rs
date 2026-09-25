@@ -106,13 +106,14 @@ pub struct NodeConfig {
     /// mainnet and only meaningful in adversarial-downgrade tests.
     #[serde(default = "default_require_pq_transport", alias = "prefer_pq_transport")]
     pub require_pq_transport: bool,
-    /// AUDIT-10 Milestone D: gate on the public HTTPS data plane. When `true`
-    /// (testnet migration default) the existing `0.0.0.0:9473` HTTPS listener
-    /// stays bound for backwards compatibility while accounts / SDKs migrate
-    /// to PQ. When `false` (mainnet target) the HTTPS listener binds only to
-    /// loopback + documented private ranges, and the public data plane is
-    /// PQ-only. Mainnet (`network_id = "mainnet"`) refuses to start with this
-    /// flag still `true` — see [`NodeConfig::enforce_mainnet_safety`].
+    /// AUDIT-10 Milestone D: named for the public HTTPS data plane, which no
+    /// longer exists — the in-process TLS server was removed, classical
+    /// transport is plain HTTP, and public HTTPS is a reverse-proxy concern
+    /// (see Cargo.toml). The flag binds and restricts no listener. It still
+    /// gates two things: mainnet (`network_id = "mainnet"`) refuses to start
+    /// with it `true` (see [`NodeConfig::enforce_mainnet_safety`]), and the
+    /// drand pulse fetcher runs only when it and `drand_pulse_enabled` are
+    /// both `true`.
     #[serde(default = "default_allow_public_https")]
     pub allow_public_https: bool,
     /// REALMS P1.5 a3: spawn the live drand pulse fetcher
@@ -287,7 +288,8 @@ pub struct NodeConfig {
     #[serde(default = "default_data_dir_size_sample_interval_secs")]
     pub data_dir_size_sample_interval_secs: u64,
     /// Minimum PoW difficulty required for peer identities (0 = no requirement).
-    /// Default 16 (≈65K attempts ≈ 30-60s on a phone).
+    /// Default 20 (matches `identity::DEFAULT_POW_DIFFICULTY`; about 1M hash
+    /// attempts on average).
     pub min_pow_difficulty: u8,
     /// Profile C Gap C: minimum hardware attestation level a parent must
     /// advertise to author `delegation_op = authorize` records.
@@ -812,7 +814,7 @@ pub struct NodeConfig {
     /// candidate that has a captured PK but no bonded beat stake.
     /// Only consulted when `finality_committee_includes_witness_registry=true`.
     /// Default 1 (the smallest non-zero weight) so anchors with real
-    /// stake still dominate Efraimidis–Spirakis selection but
+    /// stake still dominate committee selection but
     /// witness-tier nodes are not entirely excluded.
     #[serde(default = "default_finality_known_pk_weight")]
     pub finality_committee_known_pk_weight: u64,
@@ -860,8 +862,9 @@ pub struct NodeConfig {
     /// consensus hot path at `epoch.rs:select_epoch_committee_scoped_indexed`
     /// is replaced by the unified
     /// [`super::zone_committee::select_committee_v2`] — VRF-entropy +
-    /// `ELARA_ZONE_COMMITTEE_V1` domain tag + linear-stake
-    /// Efraimidis–Spirakis draw + sort-by-identity output + bootstrap
+    /// `ELARA_ZONE_COMMITTEE_V1` domain tag + `hash / stake` priority draw
+    /// (not Efraimidis–Spirakis and not stake-proportional; see the
+    /// zone_committee module doc) + sort-by-identity output + bootstrap
     /// fallback. When `false` (default), the existing global-VRF +
     /// sqrt(stake) algorithm at `consensus.rs:select_epoch_committee_scoped_indexed`
     /// remains the source of truth, and v2 is dead code in production.
@@ -2410,6 +2413,8 @@ impl NodeConfig {
 
         use std::os::unix::ffi::OsStrExt;
         let path = std::ffi::CString::new(self.data_dir.as_os_str().as_bytes()).ok()?;
+        // SAFETY: statvfs is a plain C struct of integers, so all-zero is a valid value; the path is a
+        // NUL-terminated CString that outlives the call and `stat` is a valid, writable out-pointer.
         let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
         if unsafe { libc::statvfs(path.as_ptr(), &mut stat) } != 0 { return None; }
         // `statvfs` field widths differ by platform — `f_blocks`/`f_frsize` are

@@ -9,14 +9,15 @@
 //! that (1) fetches the latest epoch header for the target zone, (2)
 //! fetches the account-state Merkle proof, (3) runs
 //! [`crate::network::light::verify_account_proof_against_header`] to
-//! confirm the proof root matches the header's signed
-//! `account_smt_root`, and (4) returns the verified leaf state.
+//! confirm the proof root matches the header's `account_smt_root`, and
+//! (4) returns the leaf state.
 //!
-//! Two-peer mode (header from peer A, proof from peer B) gives
-//! cross-witness verification at the SDK layer — a single peer cannot
-//! lie about both the header *and* a matching proof unless they're
-//! colluding. For maximum simplicity the same peer can also serve both
-//! sides; the choice is the integrator's.
+//! The header's seal signature is NOT verified here, so a peer that serves
+//! both the header and the proof can fabricate a matching pair. Two-peer
+//! mode (header from peer A, proof from peer B) helps only while the two
+//! peers do not collude. For trust against an untrusted node, pin a seal
+//! verified against the genesis anchor and use
+//! `crate::network::light_sdk::LightClient::verify_balance_against_trusted_seal`.
 
 use std::sync::Arc;
 
@@ -32,15 +33,15 @@ use crate::network::pq_transport::PeerIdentityStore;
 
 /// Verified account-state result returned by
 /// [`LightClient::verify_account`]. Fields mirror the cryptographically
-/// witnessed slice of `/proof/account/{id}` *after* binding to a signed
+/// witnessed slice of `/proof/account/{id}` *after* binding to a fetched
 /// epoch header — every field below was confirmed against the header's
-/// `account_smt_root`.
+/// `account_smt_root`. The header's signature is not verified (module doc).
 #[derive(Debug, Clone)]
 pub struct VerifiedAccount {
     /// Hex identity hash queried.
     pub identity: String,
     /// True if the account exists in the SMT. False = verified
-    /// non-existence (the empty-leaf path reconstructs the signed
+    /// non-existence (the empty-leaf path reconstructs the header's
     /// `account_smt_root`).
     pub exists: bool,
     /// Leaf hash — `SHA3-256(serialized AccountState)` from the proof.
@@ -158,14 +159,14 @@ impl LightClient {
         })
     }
 
-    /// One-call verified balance lookup. Fetches the latest signed
-    /// header for `zone` from `header_peer`, fetches the account proof
-    /// from `proof_peer`, and verifies the proof root binds to the
-    /// header's `account_smt_root` via
+    /// One-call balance lookup. Fetches the header that anchors the
+    /// proof from `header_peer` (its signature is not verified; see the
+    /// module doc), fetches the account proof from `proof_peer`, and
+    /// verifies the proof root binds to the header's `account_smt_root` via
     /// [`verify_account_proof_against_header`].
     ///
     /// Pass the same string for both peers to verify against a single
-    /// peer; pass two different peers for cross-witness verification.
+    /// peer; pass two non-colluding peers for a cross-check.
     ///
     /// Returns [`VerifiedAccount`] on success. Returns
     /// [`ElaraError::Network`] when the peer's response is malformed,
@@ -211,13 +212,15 @@ impl LightClient {
         if !exists {
             // Sound cryptographic non-membership. The server returns a
             // compressed exclusion proof; we (1) require it to be for THIS
-            // identity, (2) require its root to equal the header's signed root,
-            // and (3) fold it to confirm the empty leaf reaches that root. A
-            // Byzantine server can no longer assert absence by echoing the
-            // signed root — it must produce a fold, which is impossible for an
-            // account that actually exists. (Pre-2026-06-16 this trusted the
-            // bare root; see internal design notes.)
-            let signed_root = header.account_smt_root.ok_or_else(|| {
+            // identity, (2) require its root to equal the header's root, and
+            // (3) fold it to confirm the empty leaf reaches that root. A
+            // server can no longer assert absence by echoing the header's root
+            // — it must produce a fold, which is impossible for an account
+            // that exists under that root. The header's seal signature is not
+            // checked here (module doc), so a peer serving both header and
+            // proof can still fabricate a matching pair. (Pre-2026-06-16 this
+            // trusted the bare root; see internal design notes.)
+            let header_root = header.account_smt_root.ok_or_else(|| {
                 ElaraError::Network(
                     "header lacks account_smt_root — pre-Gap-1, cannot verify"
                         .into(),
@@ -234,11 +237,11 @@ impl LightClient {
                     "account_proof: exclusion proof is for a different identity".into(),
                 ));
             }
-            if xproof.root != signed_root {
+            if xproof.root != header_root {
                 return Err(ElaraError::Network(format!(
                     "account_proof: non-existence root {} ≠ header.account_smt_root {}",
                     hex::encode(xproof.root),
-                    hex::encode(signed_root),
+                    hex::encode(header_root),
                 )));
             }
             if !verify_exclusion_proof(&xproof) {

@@ -17,7 +17,7 @@ Once published, the revocation record is immutable on the DAM. All future signat
 
 This is the harder problem. The protocol handles it through **pre-committed recovery keys:**
 
-At identity creation, the user can (and is strongly encouraged to) generate a **recovery keypair** stored separately — written on paper, saved on a USB drive, held by a trusted person. The recovery key's public half is embedded in the original identity record.
+At identity creation, the user can (and is strongly encouraged to) generate a **recovery keypair** stored separately — written on paper, saved on a USB drive, held by a trusted person. The design embeds a commitment to the recovery key in the original identity record. (Status: the runtime defines the succession data model and record formats, but no node path processes them yet; recovery is specified, not operational.)
 
 Only the recovery key can:
 - Override a fraudulent revocation
@@ -30,7 +30,7 @@ If no recovery key was pre-committed, the dispute becomes a social/legal matter 
 
 **Key rotation:**
 
-The protocol supports scheduled key rotation without identity loss. A rotation record — signed by both the old and new keys — maintains continuity. All past work remains attributed to the identity; all future work uses the new key. This limits the damage window of any compromise.
+The protocol **specifies** scheduled key rotation without identity loss: a rotation record — signed by both the old and new keys — would maintain continuity, keeping all past work attributed to the identity while future work uses the new key, limiting the damage window of a compromise. **This mechanism is specified but not yet operational** (an identity is currently addressed by the hash of its active key, so a rotated key resolves to a different account — see §14 and KNOWN-LIMITATIONS). Today, key **revocation** (the compromised-key tombstone) is the live compromise-recovery path; rotation lands with a versioned identity→active-key index.
 
 Note: deliberate key destruction through device wipes — where the goal is to sever accountability rather than steal identity — is a distinct attack vector addressed in Section 11.33.
 

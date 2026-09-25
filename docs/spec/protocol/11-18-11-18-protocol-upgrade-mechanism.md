@@ -53,5 +53,5 @@ ARCHIVED   → algorithm documented in protocol history, old records still verif
              through algorithm agility (Section 4.4)
 ```
 
-No algorithm is ever deleted from the protocol's specification. A record signed with Dilithium3 in 2026 must be verifiable in 3026 — even if Dilithium3 was deprecated in 2050. The verification code for every algorithm ever used is preserved in the protocol's reference implementation, explicitly tagged as archival.
+No algorithm is ever deleted from the protocol's specification. A record signed with Dilithium3 in 2026 must be verifiable in 3026 — even if Dilithium3 was deprecated in 2050. The verification code for every algorithm ever used is preserved in the protocol's reference implementation, explicitly tagged as archival. The shipped code does not yet follow this rule: it rejects Round-3 Dilithium3 signatures, has removed its EC-VRF verifier, and no longer decodes wire versions 1–3.
 

@@ -21,7 +21,20 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 //   muzzy_decay_ms:0     — immediately release lazy-purged pages
 //   narenas:2            — limit arenas (default 4×cores, wastes per-arena overhead)
 //   background_thread:true — async purging even during continuous allocations
-#[cfg(all(not(target_arch = "wasm32"), target_family = "unix", feature = "tikv-jemallocator"))]
+// This export reaches jemalloc only where its symbols stay prefixed (`_rjem_`): Apple,
+// Android and DragonFly targets. Everywhere else, Linux included, Cargo.toml's
+// `unprefixed_malloc_on_supported_platforms` makes jemalloc read `malloc_conf` and the
+// `MALLOC_CONF` environment variable instead, so a Linux node runs jemalloc's defaults.
+// A Linux operator applies the same tuning through the environment:
+// `MALLOC_CONF=dirty_decay_ms:0,muzzy_decay_ms:0,narenas:2,background_thread:true`.
+// (On Linux this export was ignored from 2026-04-10, when the symbols went unprefixed,
+// until its cfg was narrowed on 2026-09-25.)
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    target_family = "unix",
+    feature = "tikv-jemallocator",
+    any(target_vendor = "apple", target_os = "android", target_os = "dragonfly"),
+))]
 #[allow(non_upper_case_globals)]
 #[export_name = "_rjem_malloc_conf"]
 pub static malloc_conf: &[u8] = b"dirty_decay_ms:0,muzzy_decay_ms:0,narenas:2,background_thread:true\0";
@@ -126,7 +139,11 @@ fn main() {
     // arena (~64MB each), and malloc_trim only frees the main arena. With default
     // settings, 20+ arenas × 64MB = 1.3GB+ of unreclaimable heap fragmentation.
     // Must be called before any threads are created.
-    #[cfg(target_os = "linux")]
+    // Only where glibc malloc is the allocator: a `node` build on Linux allocates
+    // through jemalloc, which exports `malloc`/`free` itself, so there this would
+    // tune an allocator nothing uses.
+    #[cfg(all(target_os = "linux", not(feature = "tikv-jemallocator")))]
+    // SAFETY: mallopt takes two integers and changes only glibc's tuning parameters.
     unsafe {
         libc::mallopt(libc::M_ARENA_MAX, 2);
     }
@@ -382,9 +399,10 @@ async fn run() -> Result<()> {
         warn!("config: {w}");
     }
 
-    // AUDIT-10 Milestone D mainnet safety gate. A misconfigured mainnet node
-    // with allow_public_https=true would silently expose the legacy data
-    // plane that the migration is supposed to retire — fail fast instead.
+    // AUDIT-10 Milestone D safety gate: refuse to boot on a misconfiguration
+    // (see `NodeConfig::enforce_mainnet_safety`), e.g. mainnet with
+    // allow_public_https=true. The legacy HTTPS data plane that flag is named
+    // for has since been removed; see its config doc.
     if let Err(reason) = config.enforce_mainnet_safety() {
         return Err(elara_runtime::errors::ElaraError::Config(reason));
     }
@@ -393,9 +411,8 @@ async fn run() -> Result<()> {
     // chokepoint. Validates (≤64 bytes, ASCII — the decoder's own rules) and
     // REFUSES TO BOOT on an invalid value: a release node with a bad
     // network_id would otherwise emit v6 records it cannot decode back
-    // (self-brick). At CURRENT_SIGNING_VERSION=5 the binding is armed but
-    // inert (version-honest — no unsigned field ever dangles on a v5 record);
-    // it stamps automatically when the Phase E flip raises the constant.
+    // (self-brick). Since the Phase E flip CURRENT_SIGNING_VERSION is 7, so
+    // every new record (v6 and later) signs this network_id.
     if let Err(e) = elara_record::record::set_emission_network_id(&config.network_id) {
         return Err(elara_runtime::errors::ElaraError::Config(format!(
             "invalid network_id {:?}: {e}",
@@ -572,6 +589,7 @@ async fn run() -> Result<()> {
             use std::os::unix::io::AsRawFd;
             // Try a non-blocking exclusive lock to see if someone else holds it
             if let Ok(f) = File::open(&lock_path) {
+                // SAFETY: `f` stays open for the whole call, so its fd is valid; flock takes only the fd and a flag.
                 let ret = unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
                 if ret != 0 {
                     error!(
@@ -584,6 +602,7 @@ async fn run() -> Result<()> {
                     std::process::exit(1);
                 }
                 // Release immediately — StorageEngine::open will acquire it properly
+                // SAFETY: `f` stays open for the whole call, so its fd is valid; flock takes only the fd and a flag.
                 unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_UN) };
             }
         }
@@ -735,16 +754,11 @@ async fn run() -> Result<()> {
                     arr.copy_from_slice(&bytes);
                     let sk = VrfSecretKey::from_bytes(arr)
                         .map_err(|e| ElaraError::Config(format!("failed to build VRF key from legacy seed: {e}")))?;
-                    // Save in full format for future loads
-                    std::fs::write(&config.vrf_key_path, sk.to_full_bytes())
+                    // Save in full format for future loads. VRF secret key is a signing
+                    // secret: owner-only (0600), and atomic so a crash cannot lose the seed.
+                    let full = zeroize::Zeroizing::new(sk.to_full_bytes());
+                    elara_runtime::identity::write_secret_file(&config.vrf_key_path, &full)
                         .map_err(|e| ElaraError::Config(format!("failed to write migrated VRF key: {e}")))?;
-                    // VRF secret key is a signing secret — owner-only (0600).
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::PermissionsExt;
-                        std::fs::set_permissions(&config.vrf_key_path, std::fs::Permissions::from_mode(0o600))
-                            .map_err(|e| ElaraError::Config(format!("failed to set VRF key permissions: {e}")))?;
-                    }
                     info!("VRF key migrated to Dilithium3 format at {}", config.vrf_key_path.display());
                     sk
                 } else {
@@ -756,15 +770,10 @@ async fn run() -> Result<()> {
                 Some(sk)
             } else {
                 let sk = VrfSecretKey::generate()?;
-                std::fs::write(&config.vrf_key_path, sk.to_full_bytes())
+                // VRF secret key is a signing secret: owner-only (0600) from the first byte.
+                let full = zeroize::Zeroizing::new(sk.to_full_bytes());
+                elara_runtime::identity::write_secret_file(&config.vrf_key_path, &full)
                     .map_err(|e| ElaraError::Config(format!("failed to write VRF key: {e}")))?;
-                // VRF secret key is a signing secret — owner-only (0600).
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    std::fs::set_permissions(&config.vrf_key_path, std::fs::Permissions::from_mode(0o600))
-                        .map_err(|e| ElaraError::Config(format!("failed to set VRF key permissions: {e}")))?;
-                }
                 info!("VRF secret key generated and saved to {} ({})",
                     config.vrf_key_path.display(),
                     if is_genesis { "genesis" } else { "anchor" });
@@ -1898,61 +1907,6 @@ async fn run() -> Result<()> {
     if let Some(latest_ts) = node_state.rocks.latest_record_timestamp() {
         *node_state.pull_catchup_cursor.lock().unwrap_or_else(|e| e.into_inner()) = latest_ts;
         info!("pull catch-up cursor initialized to {:.0} (latest record in storage)", latest_ts);
-    }
-
-    // ─── Post-load jemalloc purge ───────────────────────────────────────
-    // Snapshot restore + ledger rebuild create massive transient allocations
-    // that fragment jemalloc arenas. Force a full purge to return pages to OS.
-    // Without this, a 29K-record snapshot restore leaves ~1GB of dirty pages
-    // resident despite dirty_decay_ms:0 (pages still have live fragments).
-    #[cfg(all(not(target_arch = "wasm32"), target_family = "unix", feature = "tikv-jemalloc-ctl"))]
-    {
-        let rss_before = {
-            #[cfg(target_os = "linux")]
-            {
-                std::fs::read_to_string("/proc/self/status")
-                    .ok()
-                    .and_then(|s| {
-                        s.lines()
-                            .find(|l| l.starts_with("VmRSS:"))
-                            .and_then(|l| l.split_whitespace().nth(1))
-                            .and_then(|n| n.parse::<u64>().ok())
-                    })
-                    .unwrap_or(0) / 1024 // MB
-            }
-            #[cfg(not(target_os = "linux"))]
-            { 0u64 }
-        };
-
-        // Advance jemalloc stats epoch, then purge all arenas
-        let _ = tikv_jemalloc_ctl::epoch::advance();
-        // Purge via mallctl — force all dirty + muzzy pages to be released
-        unsafe {
-            let purge_key = b"arena.0.purge\0";
-            tikv_jemalloc_ctl::raw::write(purge_key, 0u64).ok();
-            let purge_key = b"arena.1.purge\0";
-            tikv_jemalloc_ctl::raw::write(purge_key, 0u64).ok();
-        }
-
-        let rss_after = {
-            #[cfg(target_os = "linux")]
-            {
-                std::fs::read_to_string("/proc/self/status")
-                    .ok()
-                    .and_then(|s| {
-                        s.lines()
-                            .find(|l| l.starts_with("VmRSS:"))
-                            .and_then(|l| l.split_whitespace().nth(1))
-                            .and_then(|n| n.parse::<u64>().ok())
-                    })
-                    .unwrap_or(0) / 1024 // MB
-            }
-            #[cfg(not(target_os = "linux"))]
-            { 0u64 }
-        };
-        if rss_before > 0 {
-            info!("jemalloc post-load purge: RSS {}MB → {}MB (freed {}MB)", rss_before, rss_after, rss_before.saturating_sub(rss_after));
-        }
     }
 
     // ─── Auto-genesis mint (first startup only) ─────────────────────────
@@ -3970,6 +3924,8 @@ async fn run() -> Result<()> {
                             dp_state.config.data_dir.as_os_str().as_bytes()
                         ).ok();
                         if let Some(p) = path {
+                            // SAFETY: statvfs is a plain C struct of integers, so all-zero is a valid value; the path is a
+                            // NUL-terminated CString that outlives the call and `stat` is a valid, writable out-pointer.
                             let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
                             if unsafe { libc::statvfs(p.as_ptr(), &mut stat) } == 0 {
                                 // `statvfs` field widths differ by platform — `f_bavail`/`f_frsize`
@@ -5025,10 +4981,12 @@ async fn memory_prune_loop(state: Arc<NodeState>, hb: Arc<elara_runtime::network
         // Sync paths allocate large Vecs (all records for bloom filters, merkle roots,
         // ledger rebuild) then drop them. glibc's allocator keeps freed pages in its
         // arena pool — malloc_trim(0) releases them back to the kernel.
-        // This is the difference between 2.8GB RSS and ~300MB RSS after sync completes.
-        #[cfg(target_os = "linux")]
+        // Only where glibc malloc is the allocator: a `node` build on Linux allocates
+        // through jemalloc (it exports `malloc`/`free` itself), where this would trim
+        // an arena that holds nothing.
+        #[cfg(all(target_os = "linux", not(feature = "tikv-jemallocator")))]
         {
-            // SAFETY: malloc_trim is a standard glibc function, no unsafe invariants.
+            // SAFETY: malloc_trim takes a plain integer and touches only allocator state.
             unsafe { libc::malloc_trim(0); }
         }
 
@@ -6614,19 +6572,6 @@ async fn finality_monitor_loop(
                         ram_gb, max_age / 60.0
                     );
                 }
-
-                // Force jemalloc to return freed pages to OS after significant
-                // eviction. Same gate as the post-load purge above: jemalloc-ctl
-                // is only linked on unix under the full `node` feature — a
-                // `node-core`/`node-windows` build has no jemalloc and skips this.
-                #[cfg(all(not(target_arch = "wasm32"), target_family = "unix", feature = "tikv-jemalloc-ctl"))]
-                if total_evicted > 100 {
-                    let _ = tikv_jemalloc_ctl::epoch::advance();
-                    unsafe {
-                        tikv_jemalloc_ctl::raw::write(b"arena.0.purge\0", 0u64).ok();
-                        tikv_jemalloc_ctl::raw::write(b"arena.1.purge\0", 0u64).ok();
-                    }
-                }
             }
         }
     }
@@ -7177,6 +7122,7 @@ fn export_data_dir(config: &NodeConfig, output_path: &str) -> Result<()> {
         if lock_path.exists() {
             use std::os::unix::io::AsRawFd;
             if let Ok(f) = std::fs::File::open(&lock_path) {
+                // SAFETY: `f` stays open for the whole call, so its fd is valid; flock takes only the fd and a flag.
                 let ret = unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
                 if ret != 0 {
                     return Err(ElaraError::Config(
@@ -7184,6 +7130,7 @@ fn export_data_dir(config: &NodeConfig, output_path: &str) -> Result<()> {
                     ));
                 }
                 // Unlock immediately — we just wanted to check
+                // SAFETY: `f` stays open for the whole call, so its fd is valid; flock takes only the fd and a flag.
                 unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_UN); }
             }
         }

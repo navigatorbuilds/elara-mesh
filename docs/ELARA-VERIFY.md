@@ -1,9 +1,9 @@
-# elara-verify — offline verification, no trust in us
+# elara-verify — offline verification
 
 `elara-verify` is a single standalone binary that answers, **offline**, with no
 node, no network, and no trust in the people who run Elara:
 
-> *Was this record authentically signed, and when did it provably exist?*
+> *Was this record authentically signed, and by when did it exist?*
 
 It pulls in no node stack. Build it on its own:
 
@@ -34,8 +34,8 @@ identity it claims; the **ML-DSA-65 (FIPS 204, "Dilithium3")** signature is vali
 bytes; for Profile A, the **SPHINCS+** second signature too; and (with
 `--content`) that your artifact hashes to exactly the record's content hash.
 
-The record's own timestamp is only the creator's *claim*. For trustless time,
-use the anchor mode.
+The record's own timestamp is only the creator's *claim*. For an independent
+time bound, use the anchor mode.
 
 ## 2. Anchor — *the Bitcoin existed-by, notarized fresh*
 
@@ -44,36 +44,41 @@ elara-verify --anchor epoch-N-zone-Z.json
 ```
 
 An epoch-anchor artifact proves a seal **existed by** a Bitcoin block, and proves
-the anchor doing so is itself **provably fresh** — both fully offline:
+the anchor doing so was minted **after a public drand pulse** — both fully offline:
 
 - **existed-by** — the `.ots` proof beside the artifact is a SHA-256 path into a
   Bitcoin block's merkle root; `elara-verify` walks it and matches it against the
   80-byte block header self-archived next to the artifact (`btc-header-*.txt`).
-  The block's timestamp is the upper bound on the seal's existence — **trustless**
+  The block's timestamp is the upper bound on the seal's existence — **pin-authenticated**
   when that header's double-SHA256 matches a block hash pinned in the verifier (an
   auditable mainnet block hash compiled into the binary), and a **reference** bound
   otherwise: an offline tool cannot prove an arbitrary header is on Bitcoin's
   canonical chain (no PoW chain to a checkpoint), so an unpinned header is only as
   strong as its own authenticity, which you check out-of-band. No calendar server,
-  no Bitcoin node, no `ots` CLI either way.
+  no Bitcoin node, no `ots` CLI either way. The timestamp is the header time, which
+  the miner sets: Bitcoin only requires it to exceed the median of the previous
+  eleven blocks, so it can trail the real mining time, typically by at most about
+  an hour, and the bound holds only to within that tolerance.
 - **anchor freshness** (*not-before of the anchor*) — the artifact cites a drand
   round whose publication time is `genesis + (round-1)·period`. This is a pulse the
   producer fetched **fresh at stamping time**, so it bounds when the **anchor** was
-  minted — the existed-by proof could not have been pre-computed, so it is not
-  back-dated. It does **not** bound the seal's own existence: the anchor commits to
+  minted — the existed-by proof could not have been pre-computed before that pulse. It does **not** bound the seal's own existence: the anchor commits to
   the seal, so the seal *predates* the anchor. When the artifact carries the
   beacon's BLS signature, `elara-verify` verifies it against the **pinned**
   League-of-Entropy public key (never the artifact's own claimed key — that is what
-  makes a pass trustless), so the freshness bound is trustless, fully offline.
+  makes a pass independent of the artifact's supplier), so the freshness bound is
+  verified fully offline. It assumes fewer than drand's threshold of
+  League-of-Entropy operators collude.
   Legacy artifacts that stored only the round remain a *reference*, and the verdict
   says which. A present-but-invalid signature FAILS.
 
 ```
 TIME BRACKET (seal 826306639200879b…):
-  the seal was NOTARIZED into Bitcoin within a trustless window:
-    after  2026-07-10 23:25:00 UTC  — drand round (BLS-verified — trustless): the anchor is provably fresh, minted after this pulse
-    by     2026-07-10 23:34:41 UTC  — Bitcoin block 957487 (archived header — pin-authenticated, trustless): the anchoring was mined by here
-  ⇒ the seal provably existed BY the upper bound. Its OWN (earlier) not-before is proven from the seal's embedded pulse — verify the seal wire.
+  the seal was NOTARIZED into Bitcoin within this window:
+    after  2026-07-10 23:25:00 UTC  — drand round (BLS-verified): the anchor was minted after this pulse
+    by     2026-07-10 23:34:41 UTC  — Bitcoin block 957487 (archived header — pin-authenticated): the anchoring was mined by here
+  ⇒ the seal existed BY the upper bound, within Bitcoin's header-time tolerance. Its OWN (earlier) not-before is proven from the seal's embedded pulse — verify the seal wire.
+  Trust: the drand bound assumes fewer than drand's threshold of operators collude; a Bitcoin header time is set by the miner and can trail the real mining time, typically by at most about an hour.
 ```
 
 The `[drand, Bitcoin]` window brackets the **anchoring** — when the seal was
@@ -223,8 +228,8 @@ lead with the same gates-driven one-line **headline** (also in `--json` as
 
 ## The full chain
 
-Combine the modes and you have an end-to-end statement, trustless on the Bitcoin
-and signature legs — *this record existed by this Bitcoin-anchored time, signed
+Combine the modes and you have an end-to-end statement, checkable offline without
+trusting Elara's operators on the Bitcoin and signature legs — *this record existed by this Bitcoin-anchored time, signed
 by this key*:
 
 1. `--inclusion proof.json` — the record is a leaf under the proof's root. With

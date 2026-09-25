@@ -156,9 +156,10 @@ pub struct VerifiedAccount {
 /// does [`LightClient::verify_balance`], which only relays the server-asserted
 /// `bound_to_seal` flag. To bind a proof to a seal you have independently
 /// verified against the genesis anchor, use
-/// [`LightClient::verify_balance_against_trusted_seal`] (caller-pinned root) or
-/// the `pq_client_sdk::light` path, which fetches the header and checks
-/// `proof.root == header.account_smt_root`.
+/// [`LightClient::verify_balance_against_trusted_seal`] (caller-pinned root).
+/// The `pq_client_sdk::light` path checks `proof.root` against a fetched
+/// header but does not verify that header's signature, so it is not a
+/// substitute.
 pub fn verify_account_against_proof(
     claimed: &AccountState,
     proof: &AccountStateProof,
@@ -329,9 +330,10 @@ mod http_client {
         /// fabricated proof. The proof is bound to the requested identity and
         /// is internally consistent, but for end-to-end trust against an
         /// untrusted node, pin the seal out-of-band and use
-        /// [`Self::verify_balance_against_trusted_seal`], or use the
-        /// `pq_client_sdk::light` path (which checks the proof root against a
-        /// fetched header).
+        /// [`Self::verify_balance_against_trusted_seal`]. The
+        /// `pq_client_sdk::light` path is not a substitute: it checks the
+        /// proof root against a fetched header whose signature it does not
+        /// verify.
         pub async fn verify_balance(
             &self,
             identity: &str,

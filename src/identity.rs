@@ -163,7 +163,9 @@ pub enum CryptoProfile {
     /// Compact PQC: Dilithium3 only, no dual sig
     #[serde(rename = "B")]
     ProfileB,
-    /// Gateway-delegated (not implemented in Layer 1)
+    /// Gateway-delegated: a constrained child device whose records its
+    /// gateway (parent) proxy-signs under delegation records
+    /// (`accounting/delegation.rs`; internal design notes).
     #[serde(rename = "C")]
     ProfileC,
 }
@@ -242,7 +244,8 @@ impl AttestationLevel {
 ///
 /// Secret keys are zeroed from memory when the Identity is dropped,
 /// preventing key material from persisting in memory or being swapped to disk.
-#[derive(Debug, Clone)]
+/// `Debug` is implemented by hand so a `{:?}` in a log line never prints them.
+#[derive(Clone)]
 pub struct Identity {
     pub public_key: Vec<u8>,
     pub identity_hash: String,
@@ -257,6 +260,25 @@ pub struct Identity {
     secret_key: Option<Vec<u8>>,
     sphincs_public_key: Option<Vec<u8>>,
     sphincs_secret_key: Option<Vec<u8>>,
+}
+
+impl std::fmt::Debug for Identity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        const REDACTED: &str = "<redacted>";
+        f.debug_struct("Identity")
+            .field("public_key", &self.public_key)
+            .field("identity_hash", &self.identity_hash)
+            .field("entity_type", &self.entity_type)
+            .field("created", &self.created)
+            .field("algorithm", &self.algorithm)
+            .field("profile", &self.profile)
+            .field("pow_nonce", &self.pow_nonce)
+            .field("pow_difficulty", &self.pow_difficulty)
+            .field("secret_key", &self.secret_key.as_ref().map(|_| REDACTED))
+            .field("sphincs_public_key", &self.sphincs_public_key)
+            .field("sphincs_secret_key", &self.sphincs_secret_key.as_ref().map(|_| REDACTED))
+            .finish()
+    }
 }
 
 impl Drop for Identity {
@@ -857,32 +879,87 @@ impl Identity {
     }
 }
 
-/// Write an identity file with proper Unix permissions (0o600).
+/// Write an identity file with owner-only Unix permissions (0o600), atomically.
+/// See [`write_secret_file`].
 pub fn write_identity_file(
     path: &std::path::Path,
     data: &BTreeMap<String, serde_json::Value>,
 ) -> Result<()> {
-    let json_str = serde_json::to_string_pretty(data)
-        .map_err(|e| ElaraError::Crypto(format!("JSON serialization failed: {e}")))?;
+    let json_str = zeroize::Zeroizing::new(
+        serde_json::to_string_pretty(data)
+            .map_err(|e| ElaraError::Crypto(format!("JSON serialization failed: {e}")))?,
+    );
+    write_secret_file(path, json_str.as_bytes())
+}
 
-    // Create parent directories
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| ElaraError::Crypto(format!("failed to create directory: {e}")))?;
+/// Replace the file at `path` with `bytes`, owner-only (0o600) and atomically.
+///
+/// The bytes go to a fresh temp file beside the target, created with mode
+/// 0o600 so a secret key is never readable by others, not even between
+/// create and chmod. It is fsynced and renamed over the target, so a crash
+/// mid-write leaves the old file or the new one, never a truncated file.
+/// A symlinked `path` is written through, as `fs::write` did.
+pub fn write_secret_file(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
+    let target = match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => std::fs::canonicalize(path)
+            .map_err(|e| ElaraError::Crypto(format!("failed to resolve key file symlink: {e}")))?,
+        _ => path.to_path_buf(),
+    };
+    let parent = match target.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => std::path::PathBuf::from("."),
+    };
+    std::fs::create_dir_all(&parent)
+        .map_err(|e| ElaraError::Crypto(format!("failed to create directory: {e}")))?;
+
+    let file_name = target
+        .file_name()
+        .ok_or_else(|| ElaraError::Crypto(format!("key file path has no file name: {}", target.display())))?;
+    let mut tmp_name = std::ffi::OsString::from(".");
+    tmp_name.push(file_name);
+    tmp_name.push(format!(".tmp.{}", std::process::id()));
+    let tmp_path = parent.join(tmp_name);
+
+    // A temp left by a crashed earlier run would keep its old mode, so start fresh.
+    let _ = std::fs::remove_file(&tmp_path);
+    if let Err(e) = write_new_owner_only_file(&tmp_path, bytes) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(ElaraError::Crypto(format!("failed to write key file: {e}")));
     }
-
-    std::fs::write(path, &json_str)
-        .map_err(|e| ElaraError::Crypto(format!("failed to write identity file: {e}")))?;
-
-    // Set restrictive permissions on Unix (owner read/write only)
+    if let Err(e) = std::fs::rename(&tmp_path, &target) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(ElaraError::Crypto(format!("failed to replace key file: {e}")));
+    }
+    // Persist the rename itself (best effort: not every platform can fsync a directory).
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-            .map_err(|e| ElaraError::Crypto(format!("failed to set file permissions: {e}")))?;
+        if let Ok(dir) = std::fs::File::open(&parent) {
+            let _ = dir.sync_all();
+        }
     }
 
     Ok(())
+}
+
+/// Create `path` (which must not exist) with mode 0o600 on Unix, write `bytes`, fsync.
+fn write_new_owner_only_file(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut file = opts.open(path)?;
+    // The umask can only clear bits from 0o600; pin the mode exactly anyway.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    file.write_all(bytes)?;
+    file.sync_all()
 }
 
 #[cfg(test)]
@@ -1677,5 +1754,57 @@ mod tests {
         }
         let bad_profile: std::result::Result<CryptoProfile, _> = serde_json::from_str("\"D\"");
         assert!(bad_profile.is_err(), "unknown CryptoProfile 'D' must fail");
+    }
+
+    #[test]
+    fn identity_debug_redacts_secret_keys() {
+        let id = Identity::generate(EntityType::Human, CryptoProfile::ProfileA).unwrap();
+        let dbg = format!("{id:?}");
+        assert!(dbg.contains("secret_key: Some(\"<redacted>\")"), "{dbg}");
+        assert!(dbg.contains("sphincs_secret_key: Some(\"<redacted>\")"), "{dbg}");
+        // Bytes 32..64 of an ML-DSA secret key are the private seed K, which the public key does not contain.
+        let sk = hex::decode(id.to_json()["secret_key"].as_str().unwrap()).unwrap();
+        let k_dbg = format!("{:?}", &sk[32..64]);
+        assert!(!dbg.contains(k_dbg.trim_start_matches('[').trim_end_matches(']')), "Debug leaks the secret key");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_identity_file_is_owner_only_atomic_and_follows_symlinks() {
+        use std::os::unix::fs::PermissionsExt;
+        let read_back = |p: &std::path::Path| {
+            let data: BTreeMap<String, serde_json::Value> =
+                serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap();
+            Identity::from_json(&data).unwrap().identity_hash.clone()
+        };
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sub").join("identity.json");
+        let id = Identity::generate(EntityType::Human, CryptoProfile::ProfileB).unwrap();
+        write_identity_file(&path, &id.to_json()).unwrap();
+        assert_eq!(mode(&path), 0o600);
+        assert_eq!(read_back(&path), id.identity_hash);
+
+        // Replacing a looser pre-existing file leaves it owner-only, with the new content, and no temp beside it.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let id2 = Identity::generate(EntityType::Human, CryptoProfile::ProfileB).unwrap();
+        write_identity_file(&path, &id2.to_json()).unwrap();
+        assert_eq!(mode(&path), 0o600);
+        assert_eq!(read_back(&path), id2.identity_hash);
+        let names: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, vec![std::ffi::OsString::from("identity.json")]);
+
+        // A symlinked path is written through: the link survives and its target is replaced.
+        let link = dir.path().join("link.json");
+        std::os::unix::fs::symlink(&path, &link).unwrap();
+        let id3 = Identity::generate(EntityType::Human, CryptoProfile::ProfileB).unwrap();
+        write_identity_file(&link, &id3.to_json()).unwrap();
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert_eq!(read_back(&path), id3.identity_hash);
+        assert_eq!(mode(&path), 0o600);
     }
 }

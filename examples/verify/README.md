@@ -5,10 +5,12 @@ laptop with **no node, no network, and no trust in the people who run Elara**.
 This directory is the "show, don't tell" — clone the repo, build one small
 binary, and confirm two things for yourself:
 
-1. **A record was authentically signed** (post-quantum, dual signature), and
-2. **An epoch seal's existence is bounded trustlessly** — a Bitcoin *existed-by*
-   above (the seal provably existed by that block), proven by an anchor that is
-   itself provably fresh (a BLS-verified drand pulse — not back-dated).
+1. **A record was authentically signed** (post-quantum ML-DSA-65; the sample also
+   carries a second, SPHINCS+ signature, not yet bound to the signer's identity), and
+2. **An epoch seal's existence is bounded in time, independently of us** — a
+   Bitcoin *existed-by* above (the seal existed by that block's header time), proven
+   by an anchor that was itself minted after a BLS-verified drand pulse (so it was
+   not prepared in advance). Section 2 states what each bound still assumes.
 
 Nothing here phones home. The anchor check makes **zero network syscalls** — it
 reads an archived Bitcoin block header shipped right next to the proof.
@@ -17,7 +19,7 @@ reads an archived Bitcoin block header shipped right next to the proof.
 
 `elara-verify` is a standalone binary; it pulls in none of the node stack — and
 builds with **only a Rust toolchain**: no C compiler, no `cmake`, no `liboqs`.
-Every primitive it needs is pure Rust (ML-DSA-65 verify, SLH-DSA verify, and the
+Every primitive it needs is pure Rust (ML-DSA-65 verify, SPHINCS+-SHA2-192f verify, and the
 drand BLS12-381 check), so a fresh `rustup` install is the only prerequisite.
 
 ```bash
@@ -44,7 +46,7 @@ bounds:
 | 0d  | the **Bitcoin existed-by** upper bound of the time bracket | `opentimestamps` |
 | 0e  | the **drand not-before** lower bound of the time bracket | `py_ecc` |
 
-To make them *run* — i.e. reproduce **both ends of the trustless time bracket and
+To make them *run* — i.e. reproduce **both ends of the time bracket and
 the post-quantum signatures in a toolchain with zero Elara code** — install those
 libraries. Modern distros (PEP 668) refuse `pip install` into the system Python,
 so use a throwaway venv right here; `verify.sh` auto-detects it and routes the
@@ -75,17 +77,18 @@ $V examples/verify/sample-record.wire --wire
 
 `sample-record.wire` is one record in its canonical wire form, exactly as the
 mesh stores it. The verifier confirms the embedded public key hashes to the
-identity it claims, the **Dilithium3 (ML-DSA-65)** signature is valid over the
-canonical bytes, and — this record being Profile A — the second **SPHINCS+
-(SLH-DSA)** signature too. Expected verdict: `VERIFIED`.
+identity it claims, the **ML-DSA-65** (FIPS 204) signature is valid over the
+canonical bytes, and — this record being Profile A — the second
+**SPHINCS+-SHA2-192f** signature too, under the key the record carries (that key
+is not yet bound to the identity). Expected verdict: `VERIFIED`.
 
-The record's own timestamp is only the creator's *claim*. For trustless time,
-use the anchor.
+The record's own timestamp is only the creator's *claim*. For an independent
+time bound, use the anchor.
 
 ### The honesty demo — a forged proof fails closed
 
 `sample-record-TAMPERED.json` is `sample-record.json` with a single byte of its
-Dilithium3 signature flipped. Same command, opposite verdict:
+ML-DSA-65 signature flipped. Same command, opposite verdict:
 
 ```bash
 $V examples/verify/sample-record-TAMPERED.json
@@ -96,8 +99,8 @@ $V examples/verify/sample-record-TAMPERED.json
 
   ✓ structure         ValidationRecord v5 id=019f4e4f-22a8-74b2-82c4-69350e210fe9 (0 parents)
   ✓ identity binding  creator identity derived from embedded key: ada8575c57e1da94 (record carries no separate identity claim to cross-check)
-  ✗ signature         Dilithium3 signature DOES NOT VERIFY over the record's canonical bytes
-  ✓ profile           Profile A (dual signature) — SPHINCS+ (SLH-DSA) also valid
+  ✗ signature         ML-DSA-65 signature DOES NOT VERIFY over the record's canonical bytes
+  ✓ profile           Profile A (dual signature) — SPHINCS+-SHA2-192f also valid, under the key the record carries (not bound to the creator identity)
 
 VERDICT: FAILED — do not rely on this input.
 ```
@@ -109,8 +112,8 @@ point: the verifier will not print a green it cannot prove.
 ### The fast-tier class — Profile B (single signature)
 
 `sample-record-profile-b.json` is the **same** record as `sample-record.json`
-with its *optional* SPHINCS+ leg dropped (Profile A → B). The Dilithium3
-(ML-DSA-65) signature still verifies untouched — it signs `signable_bytes()`,
+with its *optional* SPHINCS+ leg dropped (Profile A → B). The ML-DSA-65
+signature still verifies untouched — it signs `signable_bytes()`,
 which never covered the SPHINCS+ fields — so this single signature is a real
 one, not a re-sign:
 
@@ -119,7 +122,7 @@ $V examples/verify/sample-record-profile-b.json
 ```
 
 ```
-  ✓ signature         Dilithium3 (ML-DSA-65) valid over canonical record bytes
+  ✓ signature         ML-DSA-65 (FIPS 204, "Dilithium3") valid over canonical record bytes
   ✓ profile           Profile B (single signature)
 
 VERDICT: VERIFIED
@@ -133,7 +136,7 @@ offline crate — identical verdict logic. Regenerate byte-for-byte from the
 committed wire record:
 `cargo run --release --example dump_record_json -- examples/verify/sample-record.wire --profile-b`.
 
-## 2. The anchor — *when did it provably exist?*
+## 2. The anchor — *by when did it exist?*
 
 ```bash
 $V --anchor examples/verify/epoch-41340-zone-0.json
@@ -153,23 +156,25 @@ verifiable, not just cited. Beside it are the proofs it needs, all offline:
 Only the first two files back the bracket `elara-verify` proves; the timestamp
 tokens are extra independent witnesses you can check with their own tools.
 
-Expected verdict — a trustless **anchoring window**, both ends offline-checkable —
+Expected verdict — an **anchoring window**, both ends offline-checkable —
 
 ```
 TIME BRACKET (seal 826306639200879b…):
-  the seal was NOTARIZED into Bitcoin within a trustless window:
-    after  2026-07-10 23:25:00 UTC  — drand round (BLS-verified — trustless): the anchor is provably fresh, minted after this pulse
-    by     2026-07-10 23:34:41 UTC  — Bitcoin block 957487 (archived header — pin-authenticated, trustless): the anchoring was mined by here
-  ⇒ the seal provably existed BY the upper bound. Its OWN (earlier) not-before is proven from the seal's embedded pulse — verify the seal wire.
+  the seal was NOTARIZED into Bitcoin within this window:
+    after  2026-07-10 23:25:00 UTC  — drand round (BLS-verified): the anchor was minted after this pulse
+    by     2026-07-10 23:34:41 UTC  — Bitcoin block 957487 (archived header — pin-authenticated): the anchoring was mined by here
+  ⇒ the seal existed BY the upper bound, within Bitcoin's header-time tolerance. Its OWN (earlier) not-before is proven from the seal's embedded pulse — verify the seal wire.
+  Trust: the drand bound assumes fewer than drand's threshold of operators collude; a Bitcoin header time is set by the miner and can trail the real mining time, typically by at most about an hour.
 ```
 
-A **9m41s anchoring window**, proven offline against the drand beacon's math and
-Bitcoin's proof-of-work — no Elara node consulted, nobody's word taken.
+A **9m41s anchoring window**, checked offline against the drand beacon's signature
+and a pinned Bitcoin block hash — no Elara node consulted. What each end still
+assumes is stated below.
 
 This window brackets the **anchoring** — when the seal was notarized into Bitcoin —
 not the seal's birth. The upper bound proves the seal **existed by** the Bitcoin
 block; the drand lower bound proves the *anchor* is fresh (it could not have been
-pre-computed, so the notarization is not back-dated). The seal predates its
+pre-computed before that pulse). The seal predates its
 anchor, so the seal's **own** not-before is an earlier, separate bound — the drand
 pulse the seal itself embeds (round 6276475, 2026-07-10 23:14:30 UTC), which the
 Rust `--seal` leg (§5) BLS-verifies. Reporting the anchor's fresh pulse as the
@@ -179,11 +184,14 @@ verifier does not.
 The lower bound is the drand beacon round the **anchor** embeds, and its
 randomness is unknowable before publication. The anchor carries the beacon's BLS
 signature; the verifier checks it against the **pinned League-of-Entropy public
-key**, so the anchor provably could not have been minted early — the existed-by
-proof is fresh, not a back-dated forgery. The upper bound is the timestamp of the
-Bitcoin block the proof commits into — anyone holding Bitcoin's history can
-re-check it forever, trusting nobody, and it is what proves the seal **existed by**
-that time. Both ends are verified offline against a key and a header shipped right
+key**, so the anchor could not have been minted before that round was published —
+unless drand's threshold of League-of-Entropy operators colluded to publish it
+early. The upper bound is the timestamp in the header of the Bitcoin block the
+proof commits into; anyone holding Bitcoin's history can re-check it, and it is
+what proves the seal **existed by** that time. That timestamp is set by the miner:
+Bitcoin only requires it to exceed the median of the previous eleven blocks, so it
+can trail the real mining time, typically by at most about an hour, and the bound
+holds only to within that tolerance. Both ends are verified offline against a key and a header shipped right
 here. That is the point.
 
 > This sample is **fully confirmed** (Bitcoin block 957487 is archived beside
@@ -193,7 +201,7 @@ here. That is the point.
 > but the existed-by upper bound is honestly marked unproven (`⚠`), never a false green.
 >
 > `verify.sh` **leg 4 demonstrates this live**: it re-runs this very anchor with
-> the `.ots` proof withheld and confirms the verifier keeps the trustless drand
+> the `.ots` proof withheld and confirms the verifier keeps the BLS-verified drand
 > freshness bound (`✓`) yet marks the Bitcoin bound `⚠` PARTIAL — the fail-closed
 > behaviour is *shown*, not just asserted, and the leg fails the demo if a future
 > change ever lets a withheld proof pass as VERIFIED.
@@ -213,26 +221,27 @@ scripts, not part of this public tree). Its files, all offline:
 |------|----------------|
 | `epoch-107599-zone-0.json`      | the epoch-anchor artifact: `seal_hash` `65f4ea8e…`, drand round 6438006 **with the beacon's BLS signature** |
 | `epoch-107599-zone-0.json.ots`  | OpenTimestamps: the SHA-256 path committing the seal into **Bitcoin block 965547** |
-| `btc-header-965547.txt`         | the archived 80-byte header of that block — its hash is pinned in the verifier, so this leg is trustless |
+| `btc-header-965547.txt`         | the archived 80-byte header of that block — its hash is pinned in the verifier, so this leg does not rest on the header's supplier |
 | `epoch-107599-zone-0.json.tsr`  | an RFC-3161 timestamp token — independent witness, **not checked by `elara-verify`** |
 | `epoch-107599-zone-0.json.qtsr` | an **eIDAS-qualified** timestamp token — **not checked by `elara-verify`** |
 | `epoch-107599-zone-0.seal.wire` | the seal itself (49,171 bytes, wire v7), signed by the same `zone-0-anchor-pubkey.hex` key as epoch 41340's |
 
-Expected verdict (captured from the verifier run that shipped this sample):
+Expected verdict (from a source build of this tree, as built above):
 
 ```
-✓ VERIFIED — all 3 checks pass; the proven claims are exactly the ✓ lines above (the full record → inclusion → seal → anchor chain was not established).
+✓ VERIFIED — all 3 checks pass; the proven claims are exactly the ✓ checks listed (the full record → inclusion → seal → anchor chain was not established).
 
   ✓ anchor structure  epoch-anchor for epoch 107599 (seal 65f4ea8e7a3a7c15)
-  ✓ drand not-before  this existed-by anchor cites drand chain 8990e7a9aaed2ffe round 6438006, published 2026-09-05 01:20:00 UTC — TRUSTLESS freshness of the anchor (the existed-by proof is provably not back-dated) — NOT a lower bound on the seal, which predates it: the beacon's BLS signature VERIFIES against the pinned League-of-Entropy key
-  ✓ existed-by        OTS proof commits the seal into Bitcoin block 965547; the archived header is authenticated against the block hash PINNED in this verifier — TRUSTLESS, existed by 2026-09-05 01:47:09 UTC
+  ✓ drand not-before  this existed-by anchor cites drand chain 8990e7a9aaed2ffe round 6438006, published 2026-09-05 01:20:00 UTC — VERIFIED freshness of the anchor (the existed-by proof was minted after this round) — NOT a lower bound on the seal, which predates it: the beacon's BLS signature VERIFIES against the pinned League-of-Entropy key (this assumes fewer than drand's threshold of League-of-Entropy operators collude)
+  ✓ existed-by        OTS proof commits the seal into Bitcoin block 965547; the archived header is authenticated against the block hash PINNED in this verifier — VERIFIED, existed by 2026-09-05 01:47:09 UTC (the block's header time, which the miner sets; Bitcoin lets it trail the real mining time, typically by at most about an hour)
 
 VERDICT: VERIFIED
          TIME BRACKET (seal 65f4ea8e7a3a7c15…):
-           the seal was NOTARIZED into Bitcoin within a trustless window:
-             after  2026-09-05 01:20:00 UTC  — drand round (BLS-verified — trustless): the anchor is provably fresh, minted after this pulse
-             by     2026-09-05 01:47:09 UTC  — Bitcoin block 965547 (archived header — pin-authenticated, trustless): the anchoring was mined by here
-           ⇒ the seal provably existed BY the upper bound. Its OWN (earlier) not-before is proven from the seal's embedded pulse — verify the seal wire.
+           the seal was NOTARIZED into Bitcoin within this window:
+             after  2026-09-05 01:20:00 UTC  — drand round (BLS-verified): the anchor was minted after this pulse
+             by     2026-09-05 01:47:09 UTC  — Bitcoin block 965547 (archived header — pin-authenticated): the anchoring was mined by here
+           ⇒ the seal existed BY the upper bound, within Bitcoin's header-time tolerance. Its OWN (earlier) not-before is proven from the seal's embedded pulse — verify the seal wire.
+           Trust: the drand bound assumes fewer than drand's threshold of operators collude; a Bitcoin header time is set by the miner and can trail the real mining time, typically by at most about an hour.
 ```
 
 A **27m09s anchoring window** this time (Bitcoin's block interval sets the
@@ -248,7 +257,7 @@ $V --seal examples/verify/epoch-107599-zone-0.seal.wire \
 
 ```
   ✓ seal anchor       seal 65f4ea8e7a3a7c15… is signed by a pinned anchor (ML-DSA-65 valid); record_hash matches the header you pinned
-  ✓ drand not-before  the seal cites drand chain 8990e7a9aaed2ffe round 6438005, published 2026-09-05 01:19:30 UTC — TRUSTLESS not-before for the seal: the beacon's BLS signature VERIFIES against the pinned League-of-Entropy key
+  ✓ drand not-before  the seal cites drand chain 8990e7a9aaed2ffe round 6438005, published 2026-09-05 01:19:30 UTC — VERIFIED not-before for the seal: the beacon's BLS signature VERIFIES against the pinned League-of-Entropy key (this assumes fewer than drand's threshold of League-of-Entropy operators collude)
 
 VERDICT: VERIFIED
 ```
@@ -314,7 +323,7 @@ epoch**, so this chain reproduces against any live node.
 
 And because the bundled epoch-anchor commits to **this very seal** (its
 `seal_hash` is the `--expected-hash` above), adding `--anchor` extends the
-chain to the trustless time bracket in one run:
+chain to the time bracket in one run:
 
 ```bash
 elara-verify --account-inclusion account-proof.json \
@@ -324,34 +333,36 @@ elara-verify --account-inclusion account-proof.json \
   --anchor epoch-41340-zone-0.json
 ```
 
-Verbatim output (reproduced in a cold `rust:1-bookworm` container):
+Verbatim output (from a source build of this tree, as built above):
 
 ```
-✓ VERIFIED — identity ada8575c57e1da94…'s sealed account state is cryptographically bound into the anchored seal of epoch 41340 whose seal carries a trustless Bitcoin existed-by bound; every link verified independently, offline.
+✓ VERIFIED — identity ada8575c57e1da94…'s sealed account state is cryptographically bound into the anchored seal of epoch 41340 whose seal carries a pin-authenticated Bitcoin existed-by bound; every link verified independently, offline.
 
   ✓ anchor structure  epoch-anchor for epoch 41340 (seal 826306639200879b)
-  ✓ drand not-before  this existed-by anchor cites drand chain 8990e7a9aaed2ffe round 6276496, published 2026-07-10 23:25:00 UTC — TRUSTLESS freshness of the anchor (the existed-by proof is provably not back-dated) — NOT a lower bound on the seal, which predates it: the beacon's BLS signature VERIFIES against the pinned League-of-Entropy key
-  ✓ existed-by        OTS proof commits the seal into Bitcoin block 957487; the archived header is authenticated against the block hash PINNED in this verifier — TRUSTLESS, existed by 2026-07-10 23:34:41 UTC
-  ✓ seal anchor       seal 826306639200879b… is signed by a pinned anchor (Dilithium3 valid); record_hash matches the header you pinned
-  ✓ drand not-before  the seal cites drand chain 8990e7a9aaed2ffe round 6276475, published 2026-07-10 23:14:30 UTC — TRUSTLESS not-before for the seal: the beacon's BLS signature VERIFIES against the pinned League-of-Entropy key
+  ✓ drand not-before  this existed-by anchor cites drand chain 8990e7a9aaed2ffe round 6276496, published 2026-07-10 23:25:00 UTC — VERIFIED freshness of the anchor (the existed-by proof was minted after this round) — NOT a lower bound on the seal, which predates it: the beacon's BLS signature VERIFIES against the pinned League-of-Entropy key (this assumes fewer than drand's threshold of League-of-Entropy operators collude)
+  ✓ existed-by        OTS proof commits the seal into Bitcoin block 957487; the archived header is authenticated against the block hash PINNED in this verifier — VERIFIED, existed by 2026-07-10 23:34:41 UTC (the block's header time, which the miner sets; Bitcoin lets it trail the real mining time, typically by at most about an hour)
+  ✓ seal anchor       seal 826306639200879b… is signed by a pinned anchor (ML-DSA-65 valid); record_hash matches the header you pinned
+  ✓ drand not-before  the seal cites drand chain 8990e7a9aaed2ffe round 6276475, published 2026-07-10 23:14:30 UTC — VERIFIED not-before for the seal: the beacon's BLS signature VERIFIES against the pinned League-of-Entropy key (this assumes fewer than drand's threshold of League-of-Entropy operators collude)
   ✓ account inclusion identity ada8575c57e1da94… holds SEALED account-state fb1a2f22a24ba142… as a leaf under account-SMT root 64ff9e19339c615d… (256-level identity-bound key-addressed path)
   ✓ seal↔anchor       the anchor commits to THIS seal (826306639200879b…)
   ✓ account-root↔seal the account-SMT root 64ff9e19339c615d… is the account root THIS seal committed to (anchor-signed)
 
 VERDICT: VERIFIED
          TIME BRACKET (seal 826306639200879b…):
-           the seal was NOTARIZED into Bitcoin within a trustless window:
-             after  2026-07-10 23:25:00 UTC  — drand round (BLS-verified — trustless): the anchor is provably fresh, minted after this pulse
-             by     2026-07-10 23:34:41 UTC  — Bitcoin block 957487 (archived header — pin-authenticated, trustless): the anchoring was mined by here
-           ⇒ the seal provably existed BY the upper bound. Its OWN (earlier) not-before is proven from the seal's embedded pulse — verify the seal wire.
+           the seal was NOTARIZED into Bitcoin within this window:
+             after  2026-07-10 23:25:00 UTC  — drand round (BLS-verified): the anchor was minted after this pulse
+             by     2026-07-10 23:34:41 UTC  — Bitcoin block 957487 (archived header — pin-authenticated): the anchoring was mined by here
+           ⇒ the seal existed BY the upper bound, within Bitcoin's header-time tolerance. Its OWN (earlier) not-before is proven from the seal's embedded pulse — verify the seal wire.
+           Trust: the drand bound assumes fewer than drand's threshold of operators collude; a Bitcoin header time is set by the miner and can trail the real mining time, typically by at most about an hour.
          ACCOUNT: identity ada8575c57e1da94… held SEALED state-hash fb1a2f22a24ba142… — the at-last-seal snapshot, NOT the live balance, and NOT any record.
-         This sealed account-state is committed in the seal above, which carries a trustless Bitcoin existed-by bound — so it provably existed by that time.
+         This sealed account-state is committed in the seal above, which carries a pin-authenticated Bitcoin existed-by bound — so it existed by that time, within Bitcoin's header-time tolerance.
 ```
 
 Every link verifies — the account walk, `account-root↔seal`, the pinned
 validator signature, **and** `seal↔anchor` into the drand + Bitcoin bracket:
-this identity's sealed account-state provably existed inside a nine-minute
-window on 2026-07-10, shown entirely offline. Full recipes (record *and*
+this identity's sealed account-state was committed in a seal that cites a drand
+pulse from 23:14:30 UTC and was notarized into Bitcoin by 23:34:41 UTC (block
+header time) on 2026-07-10, shown entirely offline. Full recipes (record *and*
 account chains): [`docs/ELARA-VERIFY.md`](../../docs/ELARA-VERIFY.md).
 
 ## 4. The proof envelope — *the whole run in one file*
@@ -513,7 +524,7 @@ green. So PQ signature verification is now demonstrated *twice* over, in two
 independent languages: the Rust `elara-verify` binary (legs 1–6) and this liboqs
 leg, no Rust.
 
-And the **trustless time bracket** — the most distinctive claim here — gets the
+And the **time bracket** — the most distinctive claim here — gets the
 same second-toolchain treatment for its *upper* bound:
 
 ```bash
@@ -532,7 +543,7 @@ anchor artifact equals the digest the `.ots` proof commits to — the proof is f
 a Bitcoin block-header attestation — block height and the committed merkle root;
 (3) the archived 80-byte header double-SHA-256s to a block hash **pinned in the
 script** — the *same* pin the Rust binary compiles in, never a hash read from the
-bundle, and **this is what makes the bound trustless**; (4) the header's own
+bundle, and **this is what makes the bound independent of the bundle's supplier**; (4) the header's own
 merkle-root field equals the OTS-committed root, so the proof genuinely lands in
 that pinned block; (5) the block's header timestamp is the existed-by upper bound.
 It is **fail-closed** — a tampered header, a proof bound to the wrong artifact, or
@@ -555,14 +566,14 @@ pure-Python BLS12-381 reference, a different implementation from the Rust backen
 It verifies the League-of-Entropy beacon signature over the chained-beacon message
 `SHA-256(previous_signature ‖ round)` against the LoE group key **pinned in the
 script** (never the artifact's own — a forged `(key, signature)` pair cannot pass,
-and the round→time mapping uses pinned chain params, so the whole bound is
-trustless), then maps the round to its scheduled publication time as the lower
+and the round→time mapping uses pinned chain params, so the bound rests only on
+drand's threshold assumption), then maps the round to its scheduled publication time as the lower
 bound. It is **fail-closed**: a one-byte-tampered signature must verify `False` on
 every run (an inline self-check proves it is not fake-accepting), and a substituted
 key, corrupted signature, or wrong chain each return exit 1 — demonstrated by the
 adversarial cases. It **skips transparently** (exit 3) when no BLS library is
 installed (`pip install py_ecc` enables it; BLS is common in the drand / Ethereum /
-Filecoin ecosystems). With 0d and 0e, **both ends of the trustless time bracket —
+Filecoin ecosystems). With 0d and 0e, **both ends of the time bracket —
 the drand not-before below and the Bitcoin existed-by above — are now reproduced in
 a second, non-Rust toolchain**, not just by the `elara-verify` binary.
 
@@ -575,7 +586,7 @@ one epoch of one chain**:
 - **The record (leg 1, the proof envelope, the conformance vectors):**
   `019f4e4f-…` — the genesis authority's witness-profile registration
   (creator `ada8575c…`, organization `elara-seed-0`, dual-signed
-  ML-DSA-65 + SLH-DSA). `sample-record-profile-b.json` is this same
+  ML-DSA-65 + SPHINCS+-SHA2-192f). `sample-record-profile-b.json` is this same
   record with the SPHINCS+ leg stripped (Profile B) — the fast-tier
   single-signature class.
 - **The seal (legs 5–6):** the zone-0 **epoch-41340** seal
@@ -605,7 +616,7 @@ one epoch of one chain**:
   (hourly stamp, daily upgrade; the ops scripts are not part of this tree); the seal
   bytes were pulled from the producing node by seal id the way
   `scripts/harvest-verify-bundle.sh` does. The block's hash is pinned in the
-  verifier, so the existed-by leg is trustless; the `.tsr`/`.qtsr` tokens beside
+  verifier, so the existed-by leg does not rest on the header's supplier; the `.tsr`/`.qtsr` tokens beside
   it are the same two independent witnesses as for 41340.
 
 The verifier still never fakes a link: leg 3 pairs the record with the anchor

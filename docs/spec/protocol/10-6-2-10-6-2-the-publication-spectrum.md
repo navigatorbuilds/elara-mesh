@@ -3,7 +3,7 @@
 Private networks exist on a spectrum from fully closed to fully public:
 
 | Mode | Description | Trust Model | Beat Involvement |
-|------|-------------|-------------|-------------------|
+|-----------|----------------|--------------|--------------|
 | **Fully private** | Closed network, no external connections | Internal hierarchy | None |
 | **Federated** | Bilateral sharing between partner organizations | Mutual trust agreements | Optional (cross-org settlement) |
 | **Selective publication** | Some record types published to public network | Hybrid: internal + public | For published records only |

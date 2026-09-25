@@ -53,6 +53,30 @@ pub fn witness_attestation_preimage(record: &elara_record::record::ValidationRec
     }
 }
 
+/// Admission check for one attestation received by PULL (hex fields as the
+/// peer sent them). The key must hash to the witness identity the entry names:
+/// the preimage above carries no witness identity, so this is the only thing
+/// tying the signature to the identity whose stake it will count. Without it a
+/// peer could sign with its own key under another identity's hash. The push
+/// paths and the batch pull already check this; every pull site calls this.
+/// Returns the decoded (signature, public key) only when both checks pass.
+pub(crate) fn verify_pulled_attestation(
+    witness_hash: &str,
+    sig_hex: &str,
+    pk_hex: &str,
+    preimage: &[u8],
+) -> Option<(Vec<u8>, Vec<u8>)> {
+    let sig = hex::decode(sig_hex).ok()?;
+    let pk = hex::decode(pk_hex).ok().filter(|p| !p.is_empty())?;
+    if sha3_256_hex(&pk) != witness_hash {
+        return None;
+    }
+    match dilithium3_verify(preimage, &sig, &pk) {
+        Ok(true) => Some((sig, pk)),
+        _ => None,
+    }
+}
+
 /// Bounded delete-chunk size for `prune_before` — memory stays O(chunk),
 /// never O(pruned), even after long downtime.
 const PRUNE_CHUNK: usize = 4096;
@@ -1090,5 +1114,45 @@ mod tests {
         assert_ne!(att, rec_pre, "witness and creator domains must never collide");
         assert_eq!(&att[DOMAIN_TAG_WITNESS_ATTESTATION_V1.len()..], &rec_pre[..],
             "v6 attestation preimage = witness tag ‖ record preimage, nothing else");
+    }
+
+    #[test]
+    fn verify_pulled_attestation_binds_key_to_named_witness() {
+        use crate::crypto::pqc::{dilithium3_keygen, dilithium3_sign_with_pk};
+        let preimage = b"attestation preimage";
+        let victim = dilithium3_keygen().expect("keygen victim");
+        let attacker = dilithium3_keygen().expect("keygen attacker");
+        let victim_hash = sha3_256_hex(&victim.public_key);
+        let victim_sig =
+            dilithium3_sign_with_pk(preimage, &victim.secret_key, &victim.public_key).expect("sign");
+        let attacker_sig =
+            dilithium3_sign_with_pk(preimage, &attacker.secret_key, &attacker.public_key).expect("sign");
+
+        // Honest: the key hashes to the named witness and signed the preimage.
+        let (sig, pk) = verify_pulled_attestation(
+            &victim_hash, &hex::encode(&victim_sig), &hex::encode(&victim.public_key), preimage,
+        ).expect("honest attestation must pass");
+        assert_eq!((sig, pk), (victim_sig.clone(), victim.public_key.clone()));
+
+        // The pull-path forgery: a valid signature under the attacker's own key,
+        // filed under the victim's identity. The signature verifies; the binding must not.
+        assert!(dilithium3_verify(preimage, &attacker_sig, &attacker.public_key).unwrap_or(false));
+        assert!(verify_pulled_attestation(
+            &victim_hash, &hex::encode(&attacker_sig), &hex::encode(&attacker.public_key), preimage,
+        ).is_none());
+
+        // The victim's key with the attacker's signature: bound, but the signature fails.
+        assert!(verify_pulled_attestation(
+            &victim_hash, &hex::encode(&attacker_sig), &hex::encode(&victim.public_key), preimage,
+        ).is_none());
+
+        // A good signature over different bytes, an empty key, and bad hex all fail.
+        assert!(verify_pulled_attestation(
+            &victim_hash, &hex::encode(&victim_sig), &hex::encode(&victim.public_key), b"other bytes",
+        ).is_none());
+        assert!(verify_pulled_attestation(&victim_hash, &hex::encode(&victim_sig), "", preimage).is_none());
+        assert!(verify_pulled_attestation(
+            &victim_hash, "zz", &hex::encode(&victim.public_key), preimage,
+        ).is_none());
     }
 }

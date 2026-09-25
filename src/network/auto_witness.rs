@@ -552,23 +552,26 @@ pub async fn auto_witness_loop(
                             if let Ok(existing) = mgr.get_attestations(rid) {
                                 if existing.iter().any(|a| a.witness_hash == wh) { continue; }
                             }
-                            let sig = match hex::decode(sig_hex) { Ok(s) => s, _ => continue };
-                            let pk = match hex::decode(pk_hex) { Ok(p) if !p.is_empty() => p, _ => continue };
-                            // Verify Dilithium3 over the attestation preimage
+                            // Key bound to `wh` + Dilithium3 over the attestation preimage
                             // (T63 dispatch: bare v≤5, domain-tagged v6+)
                             let signable = match state.get_record(rid) {
                                 Ok(rec) => super::witness::witness_attestation_preimage(&rec),
                                 _ => continue,
                             };
-                            match crate::crypto::pqc::dilithium3_verify(&signable, &sig, &pk) {
-                                Ok(true) => {}
-                                _ => continue,
-                            }
+                            let (sig, pk) = match super::witness::verify_pulled_attestation(
+                                wh, sig_hex, pk_hex, &signable,
+                            ) {
+                                Some(v) => v,
+                                None => continue,
+                            };
                             let powas_nonce = att["powas_nonce"].as_u64();
                             let powas_difficulty = att["powas_difficulty"].as_u64();
-                            let _ = mgr.store_attestation_with_powas(
+                            // Feed consensus only what was actually stored.
+                            if !matches!(mgr.store_attestation_with_powas(
                                 rid, wh, &sig, ts, Some(&pk), powas_nonce, powas_difficulty,
-                            );
+                            ), Ok(true)) {
+                                continue;
+                            }
                             batch.push((rid.clone(), wh.to_string(), ts));
                         }
                         batch
@@ -673,23 +676,26 @@ pub async fn auto_witness_loop(
                                 if let Ok(existing) = mgr.get_attestations(rid) {
                                     if existing.iter().any(|a| a.witness_hash == wh) { continue; }
                                 }
-                                let sig = match hex::decode(sig_hex) { Ok(s) => s, _ => continue };
-                                let pk = match hex::decode(pk_hex) { Ok(p) if !p.is_empty() => p, _ => continue };
-                                // Verify Dilithium3 over the attestation preimage
+                                // Key bound to `wh` + Dilithium3 over the attestation preimage
                                 // (T63 dispatch: bare v≤5, domain-tagged v6+)
                                 let signable = match state.get_record(rid) {
                                     Ok(rec) => super::witness::witness_attestation_preimage(&rec),
                                     _ => continue,
                                 };
-                                match crate::crypto::pqc::dilithium3_verify(&signable, &sig, &pk) {
-                                    Ok(true) => {}
-                                    _ => continue,
-                                }
+                                let (sig, pk) = match super::witness::verify_pulled_attestation(
+                                    wh, sig_hex, pk_hex, &signable,
+                                ) {
+                                    Some(v) => v,
+                                    None => continue,
+                                };
                                 let powas_nonce = att["powas_nonce"].as_u64();
                                 let powas_difficulty = att["powas_difficulty"].as_u64();
-                                let _ = mgr.store_attestation_with_powas(
+                                // Feed consensus only what was actually stored.
+                                if !matches!(mgr.store_attestation_with_powas(
                                     rid, wh, &sig, ts, Some(&pk), powas_nonce, powas_difficulty,
-                                );
+                                ), Ok(true)) {
+                                    continue;
+                                }
                                 batch.push((rid.clone(), wh.to_string(), ts));
                             }
                             batch

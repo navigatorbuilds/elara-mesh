@@ -2754,7 +2754,7 @@ pub async fn committees_snapshot(
 /// Answers "is this identity in the committee for (zone, epoch)?"
 /// Phase 6b (Gap 5 first slice): backed by the shared
 /// `ZoneCommitteeResolver` cache on `NodeState`, so high-rate
-/// dashboard polling doesn't redo the `O(n log n)` Efraimidis–Spirakis
+/// dashboard polling doesn't redo the `O(n log n)` priority-key
 /// sort. ADVISORY ONLY — the consensus hot path consults the resolver
 /// behind `enforce_per_zone_vrf` (default off). Phase 6c will flip the
 /// flag once the resolver soaks under live load.

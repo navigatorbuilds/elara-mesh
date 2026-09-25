@@ -2,6 +2,46 @@
 
 All notable changes to elara-runtime.
 
+## [Unreleased]
+
+### Fixed — security
+- **Pulled attestations are bound to the witness they name (critical).** Three pull paths
+  (the targeted attestation pull and both auto-witness pull phases) verified a signature
+  under whatever public key the peer supplied, without checking that the key hashes to the
+  witness identity the attestation names, so a peer could make a node credit another
+  identity's stake. One shared check, `witness::verify_pulled_attestation`, now gates all
+  three; the push paths and the batch pull already checked. A pulled attestation now feeds
+  consensus only after it has been stored.
+- **Secret key files are written owner-only and atomically.** Identity files, the re-key
+  path and the VRF key go through one helper that creates a 0600 temporary file and renames
+  it into place, so a secret is never briefly readable by other users and a crash cannot
+  leave a truncated key. `Identity`'s `Debug` output redacts both secret keys.
+
+### Changed — documentation corrections
+- SPHINCS+-SHA2-192f is labelled as what it is, not as FIPS 205 SLH-DSA (verifier output,
+  error strings, record docs). `bench_crypto` now measures its sign and verify.
+- The aggregator module no longer claims VRF ranking, grinding resistance or split-proof
+  stake weighting; `docs/KNOWN-LIMITATIONS.md` records all three.
+- The light-client SDK docs no longer say the PQ light path verifies a signed header, or
+  that balance checks are trustless.
+- `elara-verify` no longer calls its time bracket trustless. The drand not-before assumes
+  fewer than drand's threshold of League-of-Entropy operators collude; the Bitcoin existed-by
+  is the block's header time, which the miner sets and which can trail the real mining time,
+  typically by at most about an hour. A drand pulse proves freshness (not prepared in
+  advance), not protection against back-dating. The reference branch, whose BLS signature is
+  unverified, no longer prints "provably fresh". JSON field names are unchanged.
+
+## Crates — elara-verify, unreleased (the next publish is 0.3.4, never a second 0.3.3)
+
+Pins Bitcoin block 965547 (added 2026-09-05), so the second matured sample in
+`examples/verify/` (epoch seal 107599) grades its existed-by leg verified (pin-authenticated). The published
+0.3.3 predates this pin and grades that sample PARTIAL. The repository's Cargo.toml still
+reads 0.3.3, so a source build and the crates.io build of "0.3.3" differ until the bump.
+Output wording also changed, so a source build and the published 0.3.3 print different text:
+the summary says "the ✓ checks listed" (it prints before the checks, so "above" was wrong),
+and each time bound states its trust assumption instead of calling the bracket trustless.
+The sample output in `examples/verify/README.md` is regenerated from a source build.
+
 ## Crates — elara-verify 0.3.3 — 2026-08-25
 
 Act-metadata echo becomes pass-through (G4 derive-don't-restate): the six core keys
@@ -92,7 +132,7 @@ no verifier behavior change otherwise.
 ## [0.2.0] — 2026-07-06
 
 ### Added
-- **Offline verifier (`elara-verify`) + in-browser verify demo** — a zero-network CLI verifies a record end-to-end (post-quantum signature, identity binding, epoch inclusion, seal, and the trustless Bitcoin/drand time bracket); a verify-only WASM widget runs the record-integrity legs in the browser. Honest tri-state — VERIFIED / PARTIAL / FAILED — never prints a green it can't prove.
+- **Offline verifier (`elara-verify`) + in-browser verify demo** — a zero-network CLI verifies a record end-to-end (post-quantum signature, identity binding, epoch inclusion, seal, and the Bitcoin/drand time bracket, checked offline against pinned keys and block hashes); a verify-only WASM widget runs the record-integrity legs in the browser. Honest tri-state — VERIFIED / PARTIAL / FAILED — never prints a green it can't prove.
 - **Gap 7 state-snapshot autonomous repair** — `chain_divergence_monitor_loop` now repairs ≥50-epoch divergence without operator intervention. Pulls signed `StateDelta` from max-tip peer (HTTP `/snapshot/state-delta?since_epoch=<local_tip>`), verifies Dilithium3 + checksum + trust-gate against `{genesis_authority} ∪ trusted_snapshot_signers`, applies via `account_merkle::snapshot_scoped` + `apply_snapshot` in `spawn_blocking`. Five distinct counters: `repair_attempts_total`, `repair_failures_total`, `repair_verify_fails_total`, `repair_apply_fails_total`, `repair_success_total`.
 - **Gap 7 post-apply SMT-root verify** — `apply_state_delta_for_repair` now cross-checks the computed post-apply SMT root against the producer's signed `delta.account_state_root`. Counter-only signal `elara_chain_divergence_repair_root_mismatch_total`; ledger mutation already committed when this fires (rolling back mid-repair is out of scope), so the visibility hit IS the fix — operators see a non-zero rate, cross-check `latest_sealed_account_smt_root` against the trusted seal, escalate to a manual seed-peer reset if the producer is on a different chain. Closes the deepest available integrity probe between repair-apply and the next sealed root arrival. Test coverage: counter bumps under bogus `account_state_root`, stays put on matching root.
 - **`/alive` endpoint** — lightweight liveness probe, zero NodeState reads, ideal for load-balancer real-time checks (distinct from `/health` which caches for 30 s).

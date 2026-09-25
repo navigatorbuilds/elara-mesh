@@ -1,8 +1,8 @@
 ### 3.6 Industrial Scale Deployment: From One Phone to One Million Sensors
 
-Section 3.5 shows the protocol at its smallest: one teenager, one phone, one poem. This section shows the same architecture at its largest: a factory with a million sensors generating billions of readings per day. The same cryptographic proof covers both.
+Section 3.5 shows the protocol at its smallest: one teenager, one phone, one poem. This section shows the same architecture at its largest: a hundred factories with a million sensors generating billions of readings per day. The same cryptographic proof covers both.
 
-**Scenario: Samsung semiconductor fabrication plant**
+**Scenario: a semiconductor fabrication plant**
 
 A single fabrication facility operates 10,000 sensors — vibration monitors on bearings, temperature probes in clean rooms, pressure gauges on gas lines, optical sensors on wafer alignments. Each sensor generates one reading per second.
 
@@ -51,9 +51,9 @@ Compression ratio: 1,000:1
 
 1. **Sensors don't run PQC.** A $4 vibration sensor sends HMAC-authenticated readings to a trusted gateway over CAN bus. The gateway does the cryptography. Profile C (Section 4.6) was designed for exactly this.
 
-2. **Batch signing collapses overhead by 1,000x.** Instead of 2.85 TB of signatures, the factory generates 2.85 GB — manageable on commodity hardware.
+2. **Batch signing collapses overhead by 1,000x.** Instead of 2.86 TB of signatures, the factory generates 2.86 GB — manageable on commodity hardware.
 
-3. **The Cognitive Continuity Chain runs at the factory AI level, not the sensor level.** Sensors don't think. The factory AI thinks — it analyzes patterns, makes predictions, detects anomalies. The CCC proves that this cognitive process was unbroken: no gaps, no tampering, no silent model replacement. A Tier 2 node generates ~30 cognitive checkpoints per day, each ~3-4 KB. Negligible.
+3. **The Cognitive Continuity Chain runs at the factory AI level, not the sensor level.** Sensors don't think. The factory AI thinks — it analyzes patterns, makes predictions, detects anomalies. The CCC is designed to make a gap or an altered checkpoint in the factory AI's record detectable: a missing or modified checkpoint breaks the hash chain (Section 11.35). The CCC exists today only in a private prototype, not in the open-source runtime. A Tier 2 node generates ~30 cognitive checkpoints per day, each about 42 KB with the two signatures of Section 11.35.1 — about 1.3 MB a day. Negligible next to the factory's 2.86 GB of batch signatures.
 
 4. **The private network is free.** The entire factory operates as a private network (Section 10.6). No beats, no witnesses, no Layer 2 fees. Layer 1 is always free.
 
@@ -61,7 +61,7 @@ Compression ratio: 1,000:1
 
 **Scaling to the enterprise:**
 
-Across 100 Samsung factories worldwide:
+Across 100 factories worldwide:
 
 ```
 100 factories × 864M readings/day = 86.4 billion readings/day
@@ -71,7 +71,7 @@ Storage: 86.4M × 3,309 bytes = ~286 GB/day in signatures
 
 That arithmetic projects to 286 GB/day of cryptographic signatures across 100 factories, validating 86.4 billion sensor readings — on commodity hardware, with post-quantum security and no blockchain fees. These figures are a worked projection of the Profile C batch-signing model, not a measured deployment: the protocol has not been run at this scale.
 
-If Samsung later decides to publish its validation history to the public network — a Network Publication event (Section 10.6.3) — the published records integrate into the global DAM with the same trust scoring that applies to every other record. The bearing vibration readings from a Pyeongtaek fabrication line sit alongside poems from Nairobi in the same data structure, with the same cryptographic guarantees, distinguished only by their content hashes and classification levels.
+If the manufacturer later decides to publish its validation history to the public network — a Network Publication event (Section 10.6.3) — the published records integrate into the global DAM with the same trust scoring that applies to every other record. The bearing vibration readings from one of its fabrication lines sit alongside poems from Nairobi in the same data structure, with the same cryptographic guarantees, distinguished only by their content hashes and classification levels. *(Implementation-status note: Network Publication is disabled in the current runtime (Section 10.6.3). The "same trust scoring" described here is the original design; the mechanism is being reframed to inert-import, which gives imported records no native standing.)*
 
 ---
 

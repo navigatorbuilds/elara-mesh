@@ -109,14 +109,14 @@ pub fn dilithium3_sign_with_pk(message: &[u8], secret_key: &[u8], public_key: &[
 
 // dilithium3_verify moved to elara-record::pqc (re-exported at the top of this module).
 
-// ─── SPHINCS+ / SLH-DSA-SHA2-192f (pure Rust, all platforms) ────────────────
+// ─── SPHINCS+-SHA2-192f, not FIPS 205 (pure Rust, all platforms) ───────────
 
 use slh_dsa::safe_api::SlhDsaKeyPair;
 use slh_dsa::params::SLH_DSA_SHA2_192F;
 
 pub fn sphincs_keygen() -> Result<SphincsKeypair> {
     let kp = SlhDsaKeyPair::generate(SLH_DSA_SHA2_192F)
-        .map_err(|e| ElaraError::Crypto(format!("SLH-DSA keygen failed: {e:?}")))?;
+        .map_err(|e| ElaraError::Crypto(format!("SPHINCS+ keygen failed: {e:?}")))?;
     Ok(SphincsKeypair {
         public_key: kp.public_key().to_vec(),
         secret_key: kp.secret_key().to_vec(),
@@ -126,9 +126,9 @@ pub fn sphincs_keygen() -> Result<SphincsKeypair> {
 /// Sign with both secret key and public key.
 pub fn sphincs_sign_with_pk(message: &[u8], secret_key: &[u8], public_key: &[u8]) -> Result<Vec<u8>> {
     let kp = SlhDsaKeyPair::from_bytes(SLH_DSA_SHA2_192F, public_key, secret_key)
-        .map_err(|e| ElaraError::Crypto(format!("invalid SLH-DSA keys: {e:?}")))?;
+        .map_err(|e| ElaraError::Crypto(format!("invalid SPHINCS+ keys: {e:?}")))?;
     let sig = kp.sign(message)
-        .map_err(|e| ElaraError::Crypto(format!("SLH-DSA sign failed: {e:?}")))?;
+        .map_err(|e| ElaraError::Crypto(format!("SPHINCS+ sign failed: {e:?}")))?;
     Ok(sig.to_bytes().to_vec())
 }
 
@@ -144,7 +144,7 @@ pub use elara_record::pqc::{ALG_DILITHIUM3, ALG_SPHINCS_SHA2_192F};
 
 /// Dilithium3 / ML-DSA-65 public key size in bytes (FIPS 204).
 pub const DILITHIUM3_PUBLIC_KEY_LEN: usize = 1952;
-/// SPHINCS+-SHA2-192f / SLH-DSA public key size in bytes (FIPS 205).
+/// SPHINCS+-SHA2-192f public key size in bytes (the same size as FIPS 205's).
 pub const SPHINCS_SHA2_192F_PUBLIC_KEY_LEN: usize = 48;
 
 #[cfg(test)]
@@ -264,7 +264,7 @@ mod tests {
         // Wire-format tag identifiers must be stable across releases —
         // any divergence corrupts cross-version signature container parsing.
         assert_eq!(ALG_DILITHIUM3, 1u8, "FIPS 204 ML-DSA-65 algorithm tag must be 1");
-        assert_eq!(ALG_SPHINCS_SHA2_192F, 2u8, "SLH-DSA-SHA2-192f algorithm tag must be 2");
+        assert_eq!(ALG_SPHINCS_SHA2_192F, 2u8, "SPHINCS+-SHA2-192f algorithm tag must be 2");
 
         // Tag-space distinctness: no two PQC algorithms share an ID.
         assert_ne!(ALG_DILITHIUM3, ALG_SPHINCS_SHA2_192F);
@@ -287,7 +287,7 @@ mod tests {
     fn batch_b_key_size_constants_strict_pin_and_dilithium_dominates_sphincs() {
         // FIPS 204 / FIPS 205 public-key sizes — used for wire-format length checks.
         assert_eq!(DILITHIUM3_PUBLIC_KEY_LEN, 1952usize, "FIPS 204 ML-DSA-65 PK bytes");
-        assert_eq!(SPHINCS_SHA2_192F_PUBLIC_KEY_LEN, 48usize, "FIPS 205 SLH-DSA-SHA2-192f PK bytes");
+        assert_eq!(SPHINCS_SHA2_192F_PUBLIC_KEY_LEN, 48usize, "SPHINCS+-SHA2-192f PK bytes (same size as FIPS 205)");
 
         // Cross-relation: SPHINCS+ PK is much smaller than Dilithium3 PK.
         assert!(SPHINCS_SHA2_192F_PUBLIC_KEY_LEN < DILITHIUM3_PUBLIC_KEY_LEN,

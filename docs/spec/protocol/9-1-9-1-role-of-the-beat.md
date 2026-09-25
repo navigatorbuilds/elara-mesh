@@ -8,5 +8,5 @@ The Elara Protocol **beat** is a utility unit that enables four protocol functio
 
 3. **Storage delegation** — nodes that cannot store records long-term pay storage-specialized nodes to hold them. The delegating node always retains its signed record header.
 
-4. **Governance participation** — beat holders participate in protocol governance through conviction voting (Section 10.3), subject to anti-centralization constraints (Section 10.4).
+4. **Governance participation** — beat stakers participate in protocol governance through conviction voting (Section 10.3), subject to the anti-centralization constraints detailed in Section 10.4.
 

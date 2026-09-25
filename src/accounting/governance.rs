@@ -16,7 +16,7 @@
 //!   @spec economics §7.1
 //!   @spec Protocol §10.2 (Decision Categories — ProposalCategory enum)
 //!   @spec Protocol §10.3 (Voting Mechanism — conviction voting + supermajority)
-//!   @spec Protocol §10.4 (Governance Attack Mitigations — sqrt dampening + 5% cap)
+//!   @spec Protocol §10.4 (Governance Attack Mitigations — sqrt dampening + per-identity cap = total dampened power / sqrt(voters); no flat 5% cap in code)
 
 use std::collections::HashMap;
 
@@ -1043,7 +1043,11 @@ impl GovernanceState {
     }
 
     /// Settle a proposal: compute conviction-weighted votes and determine outcome.
-    /// Call this when the voting deadline passes.
+    /// Tallies at `now`, not at the deadline. The only production caller (the
+    /// ledger's auto-settle when a later record is applied) passes that record's
+    /// timestamp, so conviction keeps growing past the deadline until a record
+    /// arrives. Tallying at min(now, deadline) is a consensus change, queued
+    /// (2026-09-25 self-audit).
     pub fn settle_proposal(
         &mut self,
         proposal_id: &str,

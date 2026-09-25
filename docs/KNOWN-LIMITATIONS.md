@@ -102,7 +102,7 @@ This is a *default*, not a gap you have to take on faith: a production seal
 that carries an embedded pulse is committed in this repo (harvested from the
 project's dev-net seed, a producer running with the fetcher enabled), and its
 pulse's BLS signature verifies fully offline — `examples/verify/verify.sh`
-exercises it (the seal leg prints the `drand not-before … TRUSTLESS` line),
+exercises it (the seal leg prints the `drand not-before … VERIFIED not-before for the seal` line),
 and `examples/verify/README.md` carries the current bundle's filename and
 pins for running `elara-verify --seal` on it directly. One committed,
 checkable artifact — not a live feed, and not a claim that every live seal
@@ -264,3 +264,426 @@ a different account and would strand the original account's stake and trust
 an identity→active-key index consulted during verification), treat your initial
 signing key as long-lived and keep it safe. If a key is compromised, use
 revocation, not rotation.
+
+## 9. Integer metadata values above `i64::MAX` produce records that cannot verify
+
+A record whose metadata holds an integer larger than `i64::MAX` (for example
+`2^63 + 12345`) is signed over the exact integer, but the binary wire format
+carries it as a float. A receiver re-derives the signature preimage from the
+decoded value, gets a different preimage, and rejects the record as if it were
+a forgery. No error is raised when the record is created.
+
+This fails closed: nothing is admitted that should not be. The cost is that
+this value class is unusable and the rejection is hard to diagnose. Until it
+is fixed, store such values as strings. The reproducer is the ignored test
+`wire03_large_u64_metadata_must_roundtrip_losslessly` in
+`crates/elara-record/src/wire.rs` (finding WIRE-03). Rejecting these values at
+encode time with a typed error would not fork the network, since every record
+it would newly reject already fails verification; carrying them losslessly
+would need a new wire tag, which is a wire-format change.
+
+## 10. On Linux the node runs jemalloc's default memory settings
+
+The node binary allocates through jemalloc. The source carries a tuning string
+that releases freed memory to the operating system more aggressively, but on
+Linux jemalloc reads its settings from the `MALLOC_CONF` environment variable
+instead, so a Linux node runs jemalloc's defaults. To apply the same tuning,
+set it in the service environment:
+
+```bash
+MALLOC_CONF=dirty_decay_ms:0,muzzy_decay_ms:0,narenas:2,background_thread:true
+```
+
+The effect of this setting on a running node's memory has not been measured.
+
+## 11. The second signature does not yet protect against an ML-DSA break
+
+Profile A identities sign every record twice, with ML-DSA-65 and with
+SPHINCS+-SHA2-192f, so that forging a record should need both broken. The code
+does not enforce that yet. The SPHINCS+ public key travels inside the record:
+it is not part of the identity (an identity is the hash of its ML-DSA key
+alone) and it is not covered by the ML-DSA signature. Verifiers check the
+SPHINCS+ signature against whatever key the record carries. So anyone who can
+forge ML-DSA signatures for an identity can strip the SPHINCS+ fields, or attach
+a key pair of their own, and the record verifies, dual-signed or not. Epoch
+seals need only ML-DSA. Until the SPHINCS+ key is bound to the identity and
+required for it, a record's authenticity rests on ML-DSA-65 alone. That binding
+is a versioned change and is not scheduled.
+
+## 12. The SPHINCS+ signature is not FIPS 205 SLH-DSA
+
+The SPHINCS+ library (`lattice-slh-dsa` 0.3.3) hashes with SHA-256 throughout.
+FIPS 205 requires SHA-512 for several of its functions (H_msg, PRF_msg, H and
+T_l) at security categories 3 and 5, which includes the 192f parameter set used
+here. So Elara's signatures do not verify under a FIPS 205 SLH-DSA-SHA2-192f
+implementation, and FIPS 205 signatures do not verify under Elara's.
+`crates/elara-record/tests/acvp_slhdsa192f.rs` pins this against NIST's test
+vectors. A third-party verifier has to reproduce the shipped hashing, not FIPS
+205, to check today's records. What the difference does to the security level
+at category 3 has not been analysed. The same library's SHAKE parameter set
+does match NIST's vectors (`crates/elara-record/tests/acvp_slhdsa_shake192f.rs`),
+so SLH-DSA-SHAKE-192f is one migration path. A migration would be a new
+algorithm ID and a versioned change, and it is not scheduled.
+
+## 13. The light-client balance check trusts the node's root unless you pin one
+
+`LightClient::verify_balance` checks that a node's account proof is consistent:
+it re-hashes the leaf and rebuilds the Merkle path up to the root the node
+supplied. That catches a node whose balance disagrees with its own proof. It
+does not catch a node that fabricates a whole consistent proof, root included,
+and the "sealed" flag it returns is the node's own claim (see the trust-boundary
+note in `src/network/light_sdk.rs`). `verify_balance_against_trusted_seal`
+compares the proof against a seal epoch and root that you supply, and it is
+exactly as good as your source for them. Neither method checks a seal's
+signature. `light_verify::verify_seal_record_against_anchor` does, against
+validator keys you pin, but the balance methods do not call it, so combining the
+two is up to the caller today.
+
+## 14. Records without a network identifier are accepted on every network
+
+Current nodes build wire-version-7 records, and from version 6 on a record signs
+over a network identifier. Two kinds of record carry none. Versions 4 and 5 have
+no such field, and nodes still accept them (`WIRE_VERSION_MIN = 4` in
+`crates/elara-record/src/wire.rs`). And a record of version 6 or later signs over
+an empty identifier when the program that built it never set one: `elara-node`
+and `elara-cli` set it at start-up (`set_emission_network_id`), but other code
+does not, including the browser client in `browser-node/`. Ingest admits a
+record with an empty identifier on any network (`network_id_admits` in
+`src/network/ingest.rs`). So such a record, signed for one network, could be
+admitted on another. Replay has not been traced end to end. The fix is to have
+every client set its network and then, at a flag day, stop admitting records
+without one. Neither step is scheduled.
+
+## 15. Peer keys are trusted on first use
+
+When a node dials a peer, it accepts whatever Dilithium3 key the peer presents
+on first contact and pins it for later dials (`<data_dir>/pq-peer-pins.json`).
+Seed peers are configured as plain addresses, so a node's first dial to a seed
+is trust-on-first-use too, and a man-in-the-middle on that first connection is
+not detected. Inbound connections are open to any key, except on a node running
+a sovereign realm, which admits only pinned identities. The ProVerif model
+in `spec/proverif/` proves authentication for a peer the initiator has already
+pinned, so first contact is outside what it proves. To close the gap for a known
+peer, write its identity hash into the pin file before first contact, with the
+node stopped (the store is `PeerIdentityStore` in
+`src/network/pq_transport/peer_store.rs`).
+
+## 16. Records signed with retired algorithms no longer verify
+
+Crypto agility as designed would keep old records valid under the algorithm
+they were signed with. Current builds do not. Signatures from the round-3 Dilithium3
+submission (3,293 bytes) are rejected (`crates/elara-record/src/pqc.rs`), as are
+proofs from the retired elliptic-curve VRF (`src/crypto/vrf.rs`), and wire
+versions 1 to 3 no longer decode. Such records need the older build that
+produced them to verify. Keeping retired verifiers as a separate, verify-only
+component is possible but not built.
+
+## 17. Identity keys are stored in plaintext by default
+
+A node's identity file holds its secret keys as plaintext JSON unless
+`ELARA_IDENTITY_PASSPHRASE` is set, in which case the file is encrypted with
+Argon2id + AES-256-GCM. Set `ELARA_REQUIRE_ENCRYPTED_IDENTITY=1` to make the node
+refuse to start on a plaintext file. The VRF key file that sealing nodes keep
+is always plaintext. Setting a passphrase on an existing node
+encrypts the file in place, but that cannot erase plaintext already written to
+the disk, its backups or its snapshots.
+
+Since 2026-09-25 identity files, and the VRF key file that sealing nodes keep,
+are created owner-only (0600) from the first byte and replaced atomically.
+Earlier builds wrote them at the default file mode and tightened them to 0600
+straight afterwards, so under a typical umask a file written by an older build
+could be read by other local users for a moment. Some in-memory copies of secret keys
+(`Identity::secret_key_bytes`) are still not wiped when freed.
+
+## 18. Finality counts attesting stake; the diversity weighting does not gate it yet
+
+MESH-BFT's design weighs witnesses by independence: witnesses that share an
+organization, subnet or location count for less, so that one operator's clones
+cannot settle a record alone. The shipped code computes that weighting but does
+not gate finality on it. A record becomes durably final once attesting stake
+reaches two-thirds of the zone's eligible stake, excluding the creator, and every
+durable-finality path reads that raw-stake check (`is_settled` in
+`src/network/consensus.rs`). The diversity-weighted check (`is_settled_diverse`)
+feeds only the reported confirmation level and the record detail view, and even
+there it falls back to the raw check when no witness profiles are known or fewer
+than three distinct organizations attest. Organizations are self-declared, and
+the default configuration advertises no witness profile.
+
+So today stake is what holds a clone committee off, as in any proof-of-stake
+system. Even once the weighting gates finality, it cannot raise the classical
+one-third bound against an adversary whose identities are spread across distinct
+organizations, subnets and networks: those identities look independent.
+Editions of the MESH-BFT paper before 2026-09-25 said the weighting works
+"beyond the classical n/3 bound" and "regardless of stake"; that was wrong, and
+the 2026-09-25 edition corrects it (§24). Gating finality on the diversity check
+is a consensus change and is not scheduled.
+
+## 19. Seal-level settlement does not complete today
+
+Above per-record finality, the design settles whole epoch seals: witnesses
+attest a seal, and it settles at a diversity-weighted two-thirds of eligible
+stake, excluding the proposer (`is_seal_settled` in `src/network/consensus.rs`).
+Under the default configuration that threshold cannot be reached. With no witness
+profiles known, every pair of attesters is treated as correlated (0.8), and at
+that correlation two or more attesters of similar stake never reach two-thirds of
+the weighted stake. The proposer's own stake does not count as a vote. On a
+network with one staker there is no eligible stake at all. And a seal that fails
+to settle is not escalated, because escalation fires only for an epoch with no
+seal. The authority node's metrics agree: no seal has settled. Records still
+finalize one by one (§18), so the practical effect is that the seal-settlement
+layer, and the liveness argument the MESH-BFT paper builds on it, does nothing
+yet; the paper's 2026-09-25 edition says so. Counting the proposer's stake and
+escalating on non-settlement are consensus changes and are not scheduled.
+
+## 20. Witness attestations carry one signature
+
+A witness attestation carries one ML-DSA-65 signature. Profile A's second
+signature protects record authorship (and only once §11 is fixed), not
+consensus: if ML-DSA-65 is broken, attestations, and so settlement, can be
+forged. Editions of the MESH-BFT paper before 2026-09-25 said the protocol
+enforces a minimum Profile A quorum among attesters; no code does, and the
+2026-09-25 edition says so. Dual-signed attestations and an enforced quorum are
+a consensus change and are not scheduled.
+
+## 21. The previous sealer can bias the order of the next sealers
+
+The order in which anchors may seal the next epoch is ranked from a beacon that
+includes the previous seal's hash; the VRF output is not used for the rank. So
+the anchor that sealed the previous epoch chooses fields that feed the next
+beacon, and it can search them for an order that favours it or its allies. The
+MESH-BFT paper's bound, under which the chance that all seven ranked sealers are
+faulty falls as (1/3)^7, assumes an unbiased draw and does not hold against such
+a sealer. In a single zone such a sealer can stall sealing; with several zones,
+cross-zone escalation bounds the delay. This is moot with one sealing authority.
+Ranking from the VRF output is a hard-fork change and is not scheduled.
+
+## 22. The genesis authority's powers have no expiry, and a slash needs no evidence
+
+Privileged actions, including slashes and zone transitions, are accepted from
+exactly one key, the genesis authority's (`is_privileged_emitter` in
+`src/accounting/authority.rs`), with no expiry and no hand-over. The whitepaper
+says bootstrap mechanisms become inert; in code this one does not, and its expiry
+is a roadmap item. A slash carries a free-text reason and no offense proof, and
+validation (`validate_slash` in `src/accounting/validate.rs`) checks none. Each
+slash takes at most half of a stake, but a partly slashed stake stays active, so
+slashes can repeat, and the challenger and jury shares go to whichever identities
+the slash names, which may include the authority itself. On today's
+single-authority network this is simply the operator's power, stated plainly. A
+network that admits other stakers has to trust the authority key with it until a
+slash requires a verified offense proof, carries a per-offense de-duplication key,
+and excludes the authority and the offender as payees. Those are consensus
+changes and are not scheduled.
+
+## 23. Attestations that arrive by pull skip the minimum-stake and identity-age checks
+
+An attestation pushed to a node passes two admission gates: the witness must
+hold at least the minimum witness stake (100 beats), or the attestation is
+buffered until the stake arrives; and the node must have known the witness's
+identity for at least an hour, or the attestation is refused. Attestations that
+arrive by the pull paths, or that wait in the deferred queue for a record the
+node does not hold yet, skip both gates; their signatures are still checked.
+Zero-stake witnesses add nothing to finality, but a stake below the minimum, or
+an identity too new, counts on some nodes and not on others, so verdicts can
+diverge near the threshold. And up to 128 zero-stake witnesses per record can join the
+diversity set and depress the seal-level and confirmation-level weighting, a
+liveness effect rather than a safety one. One shared admission check for every
+path is a consensus change and is not scheduled.
+
+The same three pull paths (the targeted attestation pull and the two
+auto-witness pull phases) also do not check the optional proof-of-work-at-stake
+(PoWaS) that the push paths and the batch pull verify when it is present. That
+check belongs in the same shared admission change.
+
+Related, fixed 2026-09-25: those three pull paths checked an attestation's
+signature under the public key the peer sent, but not that the key hashes to the
+witness identity the attestation names, so a peer could have had a node credit
+another identity's stake. All three now run one shared check
+(`verify_pulled_attestation` in `src/network/witness.rs`). The push paths and the
+batch pull always bound the key.
+
+## 24. The MESH-BFT paper describes the design, and some of its proofs are sketches
+
+The MESH-BFT paper (`site/papers/MESH-BFT-PAPER.pdf`) states the consensus
+design; where the shipped code differs, §18 to §23 say how. A self-audit on
+2026-09-25 found claims in earlier editions that were false or unsupported, and
+the 2026-09-25 edition corrects them, each marked "Correction (2026-09-25)". The
+safety theorem now states the assumption it needs, Byzantine stake below one
+third of the eligible stake (§18), and has a quorum-intersection proof. That
+proof needs two conflicting records to be settled against the same stake total,
+which the code does not guarantee once there are several zones (the settlement
+zone follows the record identifier) or an active zone committee (the numerator
+counts every attester, the denominator only committee stake); both are latent on
+today's single-zone network. The post-quantum theorem covers record authorship
+only, since attestations carry one signature (§20), and the dual-signature level
+is about 192 bits, not 384. The liveness theorem is marked as a design target
+that the shipped seal layer (§19) and a grinding sealer (§21) do not meet. The
+hop-count formula, written O(log n / log √n) in earlier editions and equal to 2
+for every n, is restated for a fixed fan-out of 3, and the evaluation now matches
+the six-node testnet. What remains: the liveness theorem and one lemma have proof
+sketches only, machine checking is limited to bounded TLA+ models and ProVerif
+(the paper's §8.2), and hop counts and throughput beyond the testnet are
+projections, not measurements.
+
+## 25. Some performance figures are design targets, not measurements
+
+- **Phones.** The Rust implementation has been measured on x86 only. On a 2014
+  desktop CPU a record is signed in under 1 ms with ML-DSA-65, and the optional
+  SPHINCS+ signature adds about 125 ms (README benchmarks). No phone or low-cost
+  ARM device has been measured; sub-second signing on a cheap phone is a design
+  target.
+- **Seal latency.** The default epoch is 60 seconds, and a record is sealed at
+  the next epoch boundary. An optimistic "sealed" state within seconds is
+  designed, not measured.
+- **Proof checks.** Light-client proof checks have been run in desktop browsers,
+  not measured on phones.
+
+## 26. Splitting stake across identities raises a staker's chance to be selected
+
+Two selections weight each identity by the square root of its stake: the order in
+which anchors may seal an epoch, and the witness committee once a zone's pool
+exceeds ten identities. The root is taken per identity, so a staker who divides
+the same stake among k identities gains about √k in selection weight. Dividing is
+cheap. Anchor status is declared by the identity itself, and each stake needs
+only the 100-beat minimum. One identity holding 99% of stake ties 100 identities
+that share the other 1% for the first sealing slot (the case pinned by
+`sqrt_weighting_whale_ties_split_farm` in `src/network/aggregator.rs`). Majority
+stake therefore does not guarantee majority selection. The first-ranked anchor
+proposes the epoch's seal, and with section 21 it can also steer the next
+epoch's order. The per-zone committee draw (`select_zone_committee`, which
+also fixes the committees recorded in zone split and merge seals) and a
+flag-gated alternative (`use_committee_v2`, off by default) divide a hash by the
+stake itself. That is not proportional to stake either, and it biases the other
+way: at 2:1 stake the larger identity takes the first seat three times in four,
+not two in three, and stake held by one identity wins more often than the same
+stake split across many. Turning the flag on would swap one bias for the other.
+Moving all three selections to stake-proportional weighting is a consensus
+change and is not scheduled. This is moot with one sealing authority: ranking
+starts at three staked anchors.
+
+## 27. Governance records reach the ledger only when a node replays records
+
+A running node validates each governance record (proposal, vote, execution,
+cancellation, delegation) when it arrives, then stores and gossips it, but does
+not apply it to its ledger. The live apply step (`apply_ledger_op_phase4` in
+`src/network/ingest.rs`) handles ledger operations only; the governance delta of
+the tentative-ledger design was never built,
+and the direct path that used to cover governance was removed with the
+tentative-ledger feature flag in April 2026. Governance records are applied only
+when a node replays records into its ledger (`rebuild_ledger_streaming` and
+`incremental_ledger_replay` in `src/storage/rocks.rs`). A full rebuild applies
+them all. A restart from the ledger checkpoint replays only records newer than
+the newest record already in the checkpoint, and every live ledger operation
+moves that point forward, so a governance record that arrived before the last
+ledger operation is skipped until the next full rebuild (`POST /admin/rebuild`,
+node-local).
+
+So a vote fails validation ("proposal not found") on any node that has not
+applied its proposal, and two nodes can hold different governance state
+depending on when each last rebuilt. Applying governance records in the same
+order on every node, live and at rebuild, is a consensus change and is queued.
+
+## 28. A proposal's tally depends on when it is settled
+
+A proposal is settled when the first governance record after its voting
+deadline is applied (`apply_governance_op` in `src/accounting/ledger.rs`), and
+`settle_proposal` (`src/accounting/governance.rs`) computes the tally at that
+record's timestamp, not at the deadline. Conviction keeps growing after the
+deadline, and the quorum is measured against the governance stake at settlement.
+The outcome therefore depends on which record triggers settlement and on stake
+changes after the deadline, not only on the votes and stake at the deadline.
+Tallying at the deadline, with the quorum measured at the deadline, is a
+consensus change and is queued.
+
+## 29. A vote keeps its weight after the voter unstakes
+
+A vote records the voter's own governance stake when it is cast
+(`cast_vote_with_own`); settlement adds the stake delegated to the voter at that
+time (`reconcile_effective_stakes`) but does not check that the voter's own stake
+is still staked. Staked beats can be unstaked 7 days after staking
+(`UNSTAKE_COOLDOWN` in `src/accounting/types.rs`). The capital behind a vote is
+therefore locked for 7 days, not until the tally, and the conviction curve does
+not change that. Re-checking the voter's stake at settlement is queued.
+
+## 30. The emergency veto and critical-proposal committees are not wired in
+
+The governance state machine implements the anchor veto's threshold (more than
+75% of anchors) and its limit of two vetoes per zone per quarter
+(`anchor_veto_signal`), and trust-weighted committee selection
+(`select_committee`), both in `src/accounting/governance.rs`. No record type
+carries a veto signal and nothing in the node calls `select_committee`, so the
+veto cannot be invoked on the network, and its 72-hour public disclosure and
+its override by a second vote with more than 80% conviction are not
+implemented. A critical proposal submitted as a record fails when applied,
+because no committee is supplied. Wiring both is a consensus change and is
+queued.
+
+## 31. Classified records do not yet hide their content
+
+A record classified Private or Restricted must carry a proof (`zk_proof`), which
+the node checks when the record arrives (`src/network/ingest.rs`). The Phase-1
+proof is a SHA3-256 commitment (`src/crypto/commitment.rs`), and it hides
+nothing: the proof carries its own opening (the content hash and the blinding
+value), the verifier checks only that the commitment matches that opening, and
+nothing compares the opened hash with the record's own content hash, so a proof
+is not bound to the record it travels with. Every record also carries its plain
+content hash. Legacy proofs (version `0x01`) get structural checks only, and
+Groth16-format proofs (`0x02`) are always rejected because no verifier exists.
+Records from the genesis authority, and records that arrive through sync, are
+accepted without a proof, and a Sovereign record needs none. A classification
+is therefore a label today, not a confidentiality guarantee; confidentiality
+comes only from what a creator keeps off the network, for example by
+encrypting content before hashing it. Binding the commitment to the record's
+content hash and requiring proofs on every ingest path are a consensus change
+and are queued; hiding the content hash itself needs the zero-knowledge layer,
+which is specified, not built.
+
+## 32. A node contacts public STUN servers at startup
+
+A node with no configured advertise address runs NAT detection at startup
+(`auto_detect_nat` in `crates/elara-nat/src/lib.rs`, called from
+`src/bin/elara_node.rs`). It sends STUN requests to public servers operated by
+Google, Cloudflare and stunprotocol.org (`STUN_SERVERS`), which learn the
+node's public IP address and the time of the request, but nothing about its
+records. The check ignores the network realm, so a node configured as a
+Sovereign realm, whose other outbound discovery is off, still makes these
+requests. Setting `advertise_addr`, or blocking outbound traffic to those
+servers, avoids them. Skipping NAT detection in a Sovereign realm, or making it
+opt-in, is queued.
+
+## 33. Snapshot replay protection is best-effort above one million records
+
+A snapshot served to a joining node carries the set of record ids already
+applied to the ledger only while the serving chain has at most one million
+applied records (`MAX_SNAPSHOT_APPLIED_RECORDS` in
+`src/network/routes/sync.rs`). Above that the set is sent empty, and the
+joining node's protection against applying a record the snapshot already
+contains is best-effort. A bounded watermark that removes this limit is
+designed and queued.
+
+## 34. The whitepaper's witness requirements are only partly enforced
+
+The whitepaper (section 7.5.1) lists four requirements for acting as a
+witness. The node enforces them as follows.
+
+- **Minimum stake of 100 beats.** Checked for attestations pushed to a node;
+  the pull paths skip it (section 23).
+- **Proof of work** (`min_pow_difficulty`, 20 bits by default). Checked when a
+  node admits a peer to its peer table (`src/network/peer.rs`), not when it
+  counts an attestation; the witness an attestation names is not checked for it.
+  An attestation may carry its own optional proof of work (PoWaS), which the
+  push paths and the batch pull verify when present (section 23).
+- **Identity age of at least 48 hours.** The push paths require one hour,
+  counted from when the checking node first saw the identity, so it differs
+  between nodes and resets when a node restarts from a stale trust snapshot.
+  Genesis validators are exempt, and the genesis authority skips both push
+  checks. The 48-hour branch in the code is unreachable, because a witness below
+  the minimum stake is deferred before the age check runs.
+- **Diversity:** no single entity or /24 subnet may control more than 33% of a
+  zone's staked weight. The check exists as `can_witness` in
+  `src/network/zone.rs`, keyed by a self-declared organization name rather than
+  a subnet, but only tests call it, and no admission path enforces the cap. The
+  peer-discovery table limits entries per /24 subnet, but that bounds routing
+  entries, not staked weight.
+
+Enforcing all four in one shared admission check is a consensus change and is
+queued.

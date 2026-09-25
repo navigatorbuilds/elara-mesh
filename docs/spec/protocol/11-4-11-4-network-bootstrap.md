@@ -16,7 +16,7 @@ Genesis anchors actively attest to new nodes' identity registrations. Early part
 - Participation in testnet validation (proving reliability)
 - Contribution to the codebase, documentation, or tooling (proof of commitment)
 
-Beat incentives during this phase are elevated — early validators earn disproportionate rewards to compensate for the network's low utility. The distribution schedule and bootstrap economics are specified separately.
+Beat incentives during this phase are elevated — early validators earn disproportionate rewards to compensate for the network's low utility. The bootstrap distribution (participation faucet) is described in Section 9.5 of the whitepaper.
 
 **Phase 3: Decentralization Threshold (nodes 1,000–10,000)**
 
@@ -30,36 +30,22 @@ At 1,000 active witness nodes across at least 10 geographic regions, the protoco
 
 The network effects take over. Developers build on the protocol because users are there. Users join because developers have built tools. Institutions adopt because the network is too large to ignore.
 
+*Status: Phases 3 and 4 describe the plan. In the current implementation the genesis authority's privileged powers have no expiry and no decentralization threshold is detected (Section 11.12.3 of the whitepaper).*
+
 The bootstrap problem is real, but it is a solved problem in practice. The challenge is not technical — it is social. The protocol must be useful enough that the first 1,000 people choose to run nodes. Section 3.5 (Minimum Viable Validation) is the answer: the protocol is useful to a single person with a single device before anyone else joins.
 
-#### 11.4.1 Epoch-Indexed State Snapshots (v0.7.9+)
+**Fast Snapshot Sync for Onboarding (v0.7.7)**
 
-Once a network accumulates 10M+ records across its zones, replaying the DAG from genesis to derive ledger state becomes cost-prohibitive for new joiners and for any node recovering from a storage wipe. The protocol solves this with **epoch-indexed snapshots**: archive-profile nodes emit signed snapshots at epoch boundaries (default: every 10 epochs, retention 20), published at deterministic paths of the form `/snapshot/epoch/{N}` and listed via `/snapshot/epochs`.
+Once a zone has sealed its first few hundred epochs, genesis replay becomes impractical for new full nodes. A 10M-record zone with 100K epoch seals takes hours to reconstruct from scratch. The protocol addresses this with **epoch-indexed state snapshots** served by archive nodes:
 
-A snapshot is authoritative state, not a replay hint. It includes:
+1. Archive nodes (node_profile = Archive, §11.3) emit a signed state snapshot every `archive_snapshot_every_n_epochs` (default 10). Each snapshot is a JSON artifact at `epoch-{N:012}.json` — zero-padded for lexicographic ordering equals numeric ordering — containing: epoch number, SHA3-256 checksum of the contained state, full ledger snapshot, per-zone epoch cursors, zone registry root, Merkle tree roots, and the archive node's signature over the checksum (ML-DSA-65, FIPS 204, named "Dilithium3" in the code, always; a second SPHINCS+ leg is added when the archive runs signing Profile A — the SPHINCS+ fields are absent otherwise).
+2. Retention is bounded: archives keep the last `archive_snapshot_retention` snapshots (default 20) and prune older files. At the default cadence of 10 epochs per snapshot (10 min at the default 60 s epoch interval), 20 retained snapshots cover about 3.3 hours of state history. The adaptive 5–60 s interval (Section 11.12; its sealing gate is off by default) would shorten this to as little as about 17 minutes under sustained load.
+3. A new node onboards by: (a) fetching the snapshot index from a peer via `GET /snapshot/epochs` (returns sorted epoch list); (b) downloading the latest snapshot via `GET /snapshot/epoch/{N}`; (c) verifying the signatures and the checksum, and accepting the snapshot only if its signer is the genesis authority or an operator-configured trusted signer (by default the genesis authority alone); (d) comparing its checksum with the same epoch's snapshot from up to three other connected peers that offer it, aborting on any mismatch; (e) applying the snapshot to its local state; (f) fetching only records produced *after* epoch N via the standard delta sync path (§11.22.1 Merkle proofs + gossip). Onboarding time collapses from hours to minutes.
+4. Snapshot emission resumes from the highest on-disk epoch on archive restart — the archive does not re-emit snapshots it has already written. Snapshot *emission* is archival-only — full-zone and light nodes never produce snapshots; *consumption* is open to any onboarding node (step 3 above), after which non-archive nodes pull records directly.
 
-- The complete ledger (`total_supply`, per-account balances, active stakes, staked totals, trust scores, continuity scores) as of the snapshot boundary.
-- The set of record IDs whose beat ops have already been applied to that ledger (`applied_record_ids`). This set is what lets a bootstrapping node seed its `CF_APPLIED` dedup column family, so any pre-snapshot record re-delivered via delta sync or gossip is recognized as already-accounted-for and skipped at the ledger-apply gate — no double-apply, regardless of gossip redelivery order.
-- The finalized-record set, last-seal metadata per zone, genesis state, and bootstrap phase.
-- A snapshot timestamp (`snapshot_timestamp`), which is the cursor the subsequent delta-sync loop resumes from.
-- A ML-DSA-65 (FIPS 204, "Dilithium3") signature over the canonical serialization, signed by the emitting archive node's identity key. The signer's public key is embedded so verifiers need no out-of-band trust.
+**Safety under compromised archive:** A signature proves who produced a snapshot, not that its state is correct, so a joining node accepts snapshots only from the genesis authority or from signers its operator has configured — by default the genesis authority alone. It also compares the snapshot's checksum with the same epoch's snapshot from up to three other connected peers that offer it and aborts on any mismatch; a peer that does not offer the epoch is not a disagreement, so a network with a single archive is accepted on the signature alone. Snapshots never replace the attested epoch seal chain; they are an acceleration mechanism for consensus-identical state.
 
-**Bootstrap algorithm.** A joining node:
+**Scale limit:** a snapshot carries the set of already-applied record ids only while the serving chain has at most one million applied records; above that the set is sent empty, and the joining node's protection against re-applying a pre-snapshot record is best-effort (a bounded watermark that removes this limit is designed but not yet built).
 
-1. Queries `/snapshot/epochs` from its seed peers and selects the highest-numbered epoch that is available on at least two independent peers.
-2. Downloads the full snapshot from the primary peer via `/snapshot/epoch/{N}`.
-3. Cross-verifies the snapshot's Merkle checksum against up to three other peers' `/snapshot/epoch/{N}/checksum` endpoints. Any mismatch (primary says root `R` but another peer says `R' ≠ R`) aborts the bootstrap. Silence (peer has no snapshot for `N`) is not a disagreement.
-4. Verifies the Dilithium3 signature against the embedded public key and checks the signer satisfies the local trust policy (anchor, archive, or allow-listed peer).
-5. Applies the snapshot as authoritative state: the ledger replaces any partial local ledger; `CF_APPLIED` is bulk-seeded with the snapshot's `applied_record_ids`; the finalized set, genesis state, and bootstrap phase are restored; and the `pull_catchup_cursor` is advanced to `snapshot_timestamp`.
-6. From that cursor, delta sync fetches only records newer than the snapshot — the ~9.99M pre-snapshot records on a 10M-record chain are never downloaded.
-
-**Profile-scoped behavior.** The cursor-advance in step 6 is conditional on node profile. `Light` and `FullZone` profiles seed the cursor and skip pre-snapshot record fetches entirely — the snapshot is authoritative for all state they need; retention policy would prune old records anyway. `Archive` profiles — the historical source of truth — do **not** seed the cursor, so delta sync backfills pre-snapshot records from timestamp zero for DAG completeness. CF_APPLIED dedup still prevents any ledger double-apply; Archive just additionally retains the record bytes and DAG edges.
-
-**Why signed and cross-verified, not just signed.** A single archive node's signature vouches that _it_ computed this state at that epoch — not that the state is correct. A colluding peer could serve a forged snapshot signed with its own legitimate key. Cross-peer Merkle-root verification protects against that class of attack: an honest peer that emitted its own snapshot at the same epoch will have a different root if the primary's snapshot is forged. Silence is allowed because not every peer is configured as an archive emitter; disagreement is not. This matches the pattern used for super-seal verification in §11.12.
-
-**Retention and liveness.** Archive nodes hold the last `retention` snapshots (default 20) and prune older ones lazily to bound disk growth at `20 × snapshot_size`. Snapshots are emitted every `every_n_epochs` (default 10) — at a 60-second P50 epoch, that's a new bootstrap anchor every ten minutes, with a ~200-minute window of historical bootstrapping options.
-
-#### 11.4.2 Storage Tiers and Snapshot Pricing
-
-See §12.2 for how snapshot emission interacts with the Light / FullZone / Archive retention profiles, and how the delegated-storage market in §12.2 prices snapshot serving alongside cold-tier record serving.
+**Testnet status:** Epoch-indexed snapshots are implemented in the Elara Runtime (public `v0.2.0` release, `archive_snapshot_loop`); an archival anchor node has been observed emitting epoch-indexed snapshots (e.g. `epoch-000000004004.json`) under the default 10-epoch cadence.
 

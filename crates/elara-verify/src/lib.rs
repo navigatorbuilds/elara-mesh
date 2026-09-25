@@ -584,7 +584,7 @@ pub fn verdict_headline(
                         .map(|a| format!(" of epoch {}", a.epoch))
                         .unwrap_or_default();
                     let bracket = if account_absence_time_bracketed(checks, anchor) {
-                        " whose seal carries a trustless Bitcoin existed-by bound"
+                        " whose seal carries a pin-authenticated Bitcoin existed-by bound"
                     } else {
                         ""
                     };
@@ -612,7 +612,7 @@ pub fn verdict_headline(
                     .map(|a| format!(" of epoch {}", a.epoch))
                     .unwrap_or_default();
                 let bracket = if account_chain_time_bracketed(checks, anchor) {
-                    " whose seal carries a trustless Bitcoin existed-by bound"
+                    " whose seal carries a pin-authenticated Bitcoin existed-by bound"
                 } else {
                     ""
                 };
@@ -655,7 +655,7 @@ pub fn verdict_headline(
                 // deny the full chain, promise nothing more.
                 format!(
                     "✓ VERIFIED — all {total} checks pass; the proven claims are exactly the \
-                     ✓ lines above (the full record → inclusion → seal → anchor chain was \
+                     ✓ checks listed (the full record → inclusion → seal → anchor chain was \
                      not established)."
                 )
             }
@@ -850,7 +850,7 @@ pub fn verify_record(
                 name: "profile",
                 status: st(pass),
                 detail: if pass {
-                    "Profile A (dual signature) — SPHINCS+ (SLH-DSA) also valid".into()
+                    "Profile A (dual signature) — SPHINCS+-SHA2-192f also valid, under the key the record carries (not bound to the creator identity)".into()
                 } else {
                     "Profile A claimed but the SPHINCS+ signature DOES NOT VERIFY".into()
                 },
@@ -1805,8 +1805,8 @@ mod headline_tests {
     }
 
     #[test]
-    fn bracket_headline_phrase_appears_only_with_the_trustless_bitcoin_bound() {
-        const PHRASE: &str = "trustless Bitcoin existed-by bound";
+    fn bracket_headline_phrase_appears_only_with_the_pinned_bitcoin_bound() {
+        const PHRASE: &str = "pin-authenticated Bitcoin existed-by bound";
         let checks =
             vec![pass("account inclusion"), pass("account-root↔seal"), pass("seal↔anchor")];
         let facts = AccountInclusionFacts {

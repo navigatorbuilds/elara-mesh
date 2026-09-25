@@ -279,10 +279,13 @@ pub fn deserialize_proof(data: &[u8]) -> Option<ZkProof> {
 
 // ─── Record-level verification ──────────────────────────────────────────────
 
-/// Verify the ZK proof attached to a record, if any.
+/// Verify the ZK proof attached to a record.
 ///
-/// Called during `insert_record` for Private/Restricted classified records.
-/// Returns `true` if no proof is attached (optional) or if the proof is structurally valid.
+/// Called during `insert_record` for Private/Restricted classified records; the
+/// caller decides what a missing proof means. Returns `true` if the proof bytes
+/// verify on their own (malformed or empty input returns `false`). It does NOT
+/// bind the proof to the record's content hash, id or creator, and the 0x01 and
+/// 0x03 proofs carry their own openings (docs/KNOWN-LIMITATIONS.md §31).
 pub fn verify_record_proof(zk_proof_bytes: &[u8]) -> bool {
     // Version 0x03 IS the SHA3 commitment format (commitment::COMMITMENT_VERSION).
     // Historical note: 0x03 was once labelled "STARK"; there is no STARK prover —

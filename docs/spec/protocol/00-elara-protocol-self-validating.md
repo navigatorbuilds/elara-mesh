@@ -14,3 +14,4 @@ You can try this validate-locally model in your browser — identity generated o
 ---
 
 *The Elara Protocol — because every creation deserves proof.*
+

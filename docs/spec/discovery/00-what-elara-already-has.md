@@ -1,6 +1,6 @@
 ## What Elara Already Has
 
-- Kademlia DHT (256 k-buckets, K=8, alpha=3) — `network/dht.rs`
+- Kademlia DHT (256 k-buckets, K=8, alpha=3) — `crates/elara-dht/src/lib.rs`
 - PoW on identity (min_pow_difficulty=16) — equivalent to S/Kademlia static puzzle
 - PeerTable with ban/backoff, PoW verification, reputation — `network/peer.rs`
 - Seed peer bootstrap + DHT lookup + PEX + seed reconnect — `network/discovery.rs`

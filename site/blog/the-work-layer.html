@@ -86,7 +86,7 @@ naming the seam, not an endorsed standard; I cite it as exactly that.)</p>
 <h2>What Elara puts there</h2>
 
 <p>Elara is shipped work-layer proof for any signed agent act: <strong>post-quantum</strong>
-(FIPS&nbsp;204 ML-DSA / FIPS&nbsp;205 SLH-DSA), bound to a <strong>revocable on-mesh
+(FIPS&nbsp;204 ML-DSA<sup><a href="#fix-2026-09-25">*</a></sup>), bound to a <strong>revocable on-mesh
 mandate</strong> from a named principal, and <strong>verifiable fully offline</strong> by a
 signing-incapable MIT/Apache verifier. It composes with the payment receipts above through
 that <code>action_ref</code> field rather than competing with them: the payment stack proves
@@ -121,6 +121,12 @@ Verifiable Credentials, sigstore, C2PA, Certificate Transparency and "just a blo
 lives in the
 <a href="https://github.com/navigatorbuilds/elara-mesh/blob/main/docs/launch/differentiation-faq.md">differentiation
 FAQ</a>.</p>
+
+<p id="fix-2026-09-25"><em>* Correction, September 25, 2026: this post first said
+"FIPS&nbsp;204 ML-DSA / FIPS&nbsp;205 SLH-DSA". Every record carries an ML-DSA-65 (FIPS&nbsp;204)
+signature. The optional second signature is SPHINCS+ from a backend that hashes with SHA-256
+where FIPS&nbsp;205 requires SHA-512, so it is not FIPS&nbsp;205 SLH-DSA, and its key is not yet
+bound to the signer (<a href="https://github.com/navigatorbuilds/elara-mesh/blob/main/docs/KNOWN-LIMITATIONS.md">known limitations</a>).</em></p>
 
 <p style="margin-top:36px"><a href="../writing.html">← All writing</a></p>
 

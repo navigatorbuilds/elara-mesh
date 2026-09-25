@@ -200,7 +200,7 @@ pub enum PulseSubject {
     /// Pulse embedded in the seal record itself — bounds the seal's creation.
     Seal,
     /// Pulse the existed-by anchor fetched fresh at stamping time — bounds the
-    /// anchor's construction (freshness / not back-dated), NOT the seal.
+    /// anchor's construction (freshness: not pre-computed), NOT the seal.
     Anchor,
 }
 
@@ -213,14 +213,14 @@ impl PulseSubject {
             Self::Anchor => "this existed-by anchor cites",
         }
     }
-    /// What a TRUSTLESS (BLS-verified) bound establishes — spelled out so the
+    /// What a BLS-verified bound establishes — spelled out so the
     /// badge cannot be misread as the seal's floor when it is the anchor's.
     fn bound_kind(self) -> &'static str {
         match self {
             Self::Seal => "not-before for the seal",
             Self::Anchor => {
-                "freshness of the anchor (the existed-by proof is provably not \
-                 back-dated) — NOT a lower bound on the seal, which predates it"
+                "freshness of the anchor (the existed-by proof was minted after this \
+                 round) — NOT a lower bound on the seal, which predates it"
             }
         }
     }
@@ -305,7 +305,7 @@ pub fn drand_not_before_leg(
                      constants ({LOE_DEFAULT_GENESIS_UNIX}/{LOE_DEFAULT_PERIOD_SECS}s); \
                      the beacon BLS signature does not cover those fields, so a \
                      not-before derived from them is forgeable — refusing to treat \
-                     it as trustless"
+                     it as verified"
                 ),
             });
         }
@@ -327,9 +327,10 @@ pub fn drand_not_before_leg(
                 DrandBls::Verified => (
                     Status::Pass,
                     format!(
-                        "{} {beacon_label} round {r}, published {} UTC — TRUSTLESS {}: \
+                        "{} {beacon_label} round {r}, published {} UTC — VERIFIED {}: \
                          the beacon's BLS signature VERIFIES against the pinned \
-                         League-of-Entropy key{default_note}",
+                         League-of-Entropy key{default_note} (this assumes fewer than \
+                         drand's threshold of League-of-Entropy operators collude)",
                         subject.cites(),
                         format_utc(nb as f64),
                         subject.bound_kind(),
@@ -344,7 +345,7 @@ pub fn drand_not_before_leg(
                     Status::Partial,
                     format!(
                         "{} {beacon_label} round {r}, mapped to {} UTC by round→time \
-                         arithmetic — REFERENCE ONLY, not trustless ({}): the beacon BLS \
+                         arithmetic — REFERENCE ONLY, not verified ({}): the beacon BLS \
                          signature was NOT verified ({why}){default_note}",
                         subject.cites(),
                         format_utc(nb as f64),
@@ -848,7 +849,9 @@ pub fn existed_by_leg_from_bytes(
                 } else if let Some(&(height, blocktime)) =
                     confirmed_pinned.iter().min_by_key(|(_, t)| *t)
                 {
-                    // Pin-authenticated → genuinely trustless upper bound.
+                    // Pin-authenticated upper bound. The bound is the header time, which
+                    // the miner sets: consensus only requires it to exceed the median of
+                    // the previous eleven blocks, so it can trail the real mining time.
                     summary.existed_by_unix = Some(blocktime as u64);
                     summary.existed_by_height = Some(height);
                     summary.existed_by_trustless = true;
@@ -858,7 +861,9 @@ pub fn existed_by_leg_from_bytes(
                         detail: format!(
                             "OTS proof commits the seal into Bitcoin block {height}; the archived \
                              header is authenticated against the block hash PINNED in this verifier \
-                             — TRUSTLESS, existed by {} UTC",
+                             — VERIFIED, existed by {} UTC (the block's header time, which the \
+                             miner sets; Bitcoin lets it trail the real mining time, typically by \
+                             at most about an hour)",
                             format_utc(blocktime as f64),
                         ),
                     });
@@ -878,7 +883,7 @@ pub fn existed_by_leg_from_bytes(
                             "OTS proof commits the seal into Bitcoin block {height} and the archived \
                              header is internally consistent with it (existed by {} UTC) — but the \
                              header is NOT pin-authenticated, so this is a REFERENCE bound, not \
-                             trustless: it is only as strong as the header's authenticity, which you \
+                             verified: it is only as strong as the header's authenticity, which you \
                              must establish (check block {height} on any Bitcoin explorer, or add \
                              its hash to the verifier's pin set)",
                             format_utc(blocktime as f64),

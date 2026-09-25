@@ -43,8 +43,9 @@ All multi-byte integers are **big-endian** unless explicitly noted.
 
 Elara is a post-quantum **validation mesh**: a network that produces
 **offline-verifiable proofs** of *who recorded what, when, and — for the agent
-layer — on whose authority*. Each `ValidationRecord` is dual-signed with two
-independent post-quantum signature schemes and content-addressed. Records are
+layer — on whose authority*. Each `ValidationRecord` is signed with ML-DSA-65
+(FIPS 204), on Profile A also with a hash-based SPHINCS+ signature (see the
+limits in §2.3–§2.4), and content-addressed. Records are
 sharded into **zones**, ordered per-account by a slot **nonce**, and periodically
 **sealed**: a zone's account state is committed to a 256-level Sparse Merkle Tree
 whose root is signed by the zone's witness committee. A light client that pins the
@@ -85,14 +86,17 @@ document as the map. Appendix B is the module index.
 
 ## 2. Cryptographic primitives
 
-Elara uses exactly one hash function and two signature schemes. All are NIST
-post-quantum standards (or, for SHA3, the standard hash underpinning them). No
+Elara uses exactly one hash function and two signature schemes. SHA3-256 and
+ML-DSA-65 are NIST standards. The second signature scheme is SPHINCS+-SHA2-192f
+as the shipped library computes it, which is **not** FIPS 205 SLH-DSA (§2.3). No
 other primitive participates in record authenticity.
 
 ### 2.1 Hash — SHA3-256 (FIPS 202)
 
-Every hash in the authenticity path is **SHA3-256** (NIST FIPS 202), **not**
-Keccak-256 and **not** SHA-2/BLAKE. Output is 32 bytes. Source: `crates/elara-record/src/hash.rs`.
+Every hash Elara itself computes in the authenticity path is **SHA3-256** (NIST
+FIPS 202), **not** Keccak-256 and **not** SHA-2/BLAKE. Output is 32 bytes. The
+signature schemes hash internally as their own definitions say (SHAKE inside
+ML-DSA-65, SHA-256 inside the SPHINCS+ variant of §2.3). Source: `crates/elara-record/src/hash.rs`.
 
 Known-answer test (a conforming implementation MUST reproduce it):
 
@@ -113,7 +117,7 @@ A conforming verifier MUST reject any primary signature whose length ≠ 3309 by
 *before* attempting verification (`src/crypto/pqc.rs`). The 3309-byte gate also
 rejects legacy 3293-byte OQS signatures from the pre-FIPS era.
 
-### 2.3 Secondary signature — SLH-DSA-SHA2-192f (FIPS 205, "SPHINCS+")
+### 2.3 Secondary signature — SPHINCS+-SHA2-192f (not FIPS 205 SLH-DSA)
 
 | Parameter | Value |
 |-----------|-------|
@@ -121,13 +125,36 @@ rejects legacy 3293-byte OQS signatures from the pre-FIPS era.
 | Public key length | **48** bytes |
 | Signature length | **35664** bytes (fixed) |
 
-Source: `src/crypto/pqc.rs`. Present only on **Profile A** records (§2.4).
+Source: `crates/elara-record/src/pqc.rs` (verify), `src/crypto/pqc.rs` (keygen,
+sign). Present only on **Profile A** records (§2.4).
+
+**Not FIPS 205 (binding on verifiers).** The sizes are those of FIPS 205
+SLH-DSA-SHA2-192f, but the shipped library (`lattice-slh-dsa` 0.3.3) uses
+SHA-256 for every hash function, where FIPS 205 §11.2.2 uses SHA-512 for H_msg,
+PRF_msg, H and T_l at security categories 3 and 5. So `0x02` signatures do not
+verify under a FIPS 205 implementation, and FIPS 205 signatures do not verify
+as `0x02` (`crates/elara-record/tests/acvp_slhdsa192f.rs` pins this against
+NIST's ACVP vectors). A conforming verifier MUST reproduce the shipped hashing
+to check `0x02` signatures. What the difference does to the security level has
+not been analysed. Moving to a FIPS 205 parameter set would need a new algorithm
+ID and a versioned change; the same library's SLH-DSA-SHAKE-192f passes NIST's
+vectors (`crates/elara-record/tests/acvp_slhdsa_shake192f.rs`). Not scheduled.
 
 ### 2.4 Signature profiles
 
-- **Profile A (dual-signed):** both ML-DSA-65 and SLH-DSA-SHA2-192f signatures are
-  present. The canonical, defence-in-depth profile (two independent PQ hardness
-  assumptions — lattice + hash-based). The shipped sample record is Profile A.
+- **Profile A (dual-signed):** both ML-DSA-65 and SPHINCS+-SHA2-192f signatures
+  are present. The design intent is defence in depth (two independent PQ
+  hardness assumptions — lattice + hash-based). The shipped sample record is
+  Profile A. **Limit (current): the second signature does not deliver that
+  yet.** The SPHINCS+ public key travels in the record. It takes no part in the
+  identity (§3.1), and the SPHINCS+ fields are outside `signable_bytes` (§4.4),
+  so the ML-DSA signature does not cover them. A verifier checks the SPHINCS+
+  signature against whatever key the record carries. Anyone who can forge
+  ML-DSA-65 for an identity can therefore strip the SPHINCS+ fields or attach a
+  key pair of their own, and any relay can strip them, all without changing
+  `record_hash`. Until the key is bound to the identity, a record's authenticity
+  rests on ML-DSA-65 alone (`docs/KNOWN-LIMITATIONS.md` §11). The binding is a
+  versioned change and is not scheduled.
 - **Profile B (Dilithium-only):** only the ML-DSA-65 signature is present.
 
 **Wire consistency invariant (MUST):** the three SPHINCS+ fields
@@ -148,6 +175,17 @@ is exactly the §4.4 body, whose structure (id, version, nonce, content_hash,
 key, …) is the scoping; those preimages are frozen forever by known-answer
 tests. Domain separation also appears in the SMT (§6, tags `0x00`/`0x01`) and
 in the transport layer (§10), which have their own preimages.
+
+**Limit (current): not every record is bound to a network.** Nodes still admit
+wire versions 4 and 5 (`WIRE_VERSION_MIN` = 4), and admit a record whose
+`network_id` is empty on any network (`network_id_admits` in
+`src/network/ingest.rs`). A v6+ record signs over an empty `network_id` when the
+program that built it never set one: `elara-node` and `elara-cli` set it at
+start-up (`set_emission_network_id`), other creators, including the browser
+client in `browser-node/`, do not. Such a record, signed for one network, can
+be admitted on another (`docs/KNOWN-LIMITATIONS.md` §14). The fix (every creator
+sets its network, then a flag day stops admitting records without one) is not
+scheduled.
 
 ---
 
@@ -199,8 +237,8 @@ binary wire codec** — the encoder never writes it and the decoder never reads 
 | `classification` | u8 | §4.2 |
 | `metadata` | map | UTF-8 key → JSON value, key-sorted |
 | `signature` | bytes? | ML-DSA-65 signature (3309 bytes) |
-| `sphincs_signature` | bytes? | SLH-DSA signature (35664 bytes, Profile A) |
-| `creator_sphincs_pk` | bytes? | SLH-DSA PK (48 bytes, Profile A) |
+| `sphincs_signature` | bytes? | SPHINCS+ signature (35664 bytes, Profile A; §2.3) |
+| `creator_sphincs_pk` | bytes? | SPHINCS+ PK (48 bytes, Profile A; not bound to the identity, §2.4) |
 | `sig_algorithm` | u8 | `0x01` |
 | `sphincs_algorithm` | u8? | `0x02` (Profile A) |
 | `zone` | string? | Explicit zone path (v3+) |
@@ -283,7 +321,7 @@ followed by that many bytes; all multi-byte integers are **big-endian**.
 | 7 | `metadata` | binary TLV — see §4.3.2 | |
 | 8 | `zk_proof` | `u32-len` + bytes | |
 | 9 | `signature` | `u16-len` + bytes | ML-DSA-65 |
-| 10 | `sphincs_signature` | `u16-len` + bytes | SLH-DSA |
+| 10 | `sphincs_signature` | `u16-len` + bytes | SPHINCS+ (§2.3) |
 | **v2+** | | | present in every decodable record (floor = 4) |
 | 11 | `itc_stamp` | `u16-len` + bytes | |
 | 12 | `zone_refs` | `u16` count, then per ref: **24 raw bytes** | zone `u64` ‖ sequence `u64` ‖ epoch `u64`, each BE |
@@ -368,7 +406,8 @@ is the reason for the rules below:
 A conforming decoder MUST reject:
 
 1. A `sig_algorithm` byte other than the ML-DSA-65 identifier, and a
-   `sphincs_algorithm` byte other than `0` or the SLH-DSA-SHA2-192f identifier.
+   `sphincs_algorithm` byte other than `0` or the SPHINCS+-SHA2-192f identifier
+   (`0x02`).
 2. Any disagreement among the three SPHINCS+ fields: an algorithm byte declared
    without both a signature and a public key, or a signature present with a `0`
    algorithm byte. All three travel together or none do.
@@ -418,7 +457,8 @@ zk_proof_bytes      payload            (if present)
 3. `itc_stamp`, `zone_refs`, `zone`, the SPHINCS+ fields, `sig_algorithm`,
    `sphincs_algorithm`, `identity_hash_wire`, and `signature` itself are **never**
    in `signable_bytes`. Nodes may attach or rewrite them without breaking the
-   creator's signature.
+   creator's signature, which is why the SPHINCS+ signature does not yet
+   authenticate the creator (§2.4).
 4. v4→v5: a v4 record has `nonce == 0` and is signed **without** the nonce field;
    a v5 record always includes the nonce in `signable_bytes` regardless of value.
 5. v6 domain separation (T63/T65, defined 2026-08-18): for `version >= 6` the
@@ -462,15 +502,18 @@ A conforming offline verifier performs the following ordered steps
    `sphincs_algorithm == 0x02`.
 3. **Identity binding** (§3.2): if the record carries `identity_hash_wire`, resolve
    the full `creator_public_key` and confirm `SHA3-256(creator_public_key) ==
-   identity_hash_wire`. (v1–v3 records carry the full key inline; no check needed.)
+   identity_hash_wire`. (A record decoded from the binary wire codec carries the
+   full key inline, so there is nothing to check.)
 4. **Reconstruct `signable_bytes`** (§4.4) from the decoded fields — same field
    order, same sorting, same compact-JSON metadata.
 5. **Primary signature (MUST):** verify the 3309-byte ML-DSA-65 `signature` over
    `signable_bytes` with `creator_public_key`. Absent or invalid ⇒ fail.
 6. **Secondary signature (Profile A, MUST):** if `sphincs_signature` and
-   `creator_sphincs_pk` are present, verify the 35664-byte SLH-DSA signature over
-   the *same* `signable_bytes` with `creator_sphincs_pk`. Invalid ⇒ fail. (Both
-   absent ⇒ Profile B, acceptable.)
+   `creator_sphincs_pk` are present, verify the 35664-byte SPHINCS+ signature
+   (the §2.3 hashing, not FIPS 205) over the *same* `signable_bytes` with
+   `creator_sphincs_pk`. Invalid ⇒ fail. (Both absent ⇒ Profile B, acceptable.)
+   A pass shows only that the carried key signed; it says nothing more about
+   the creator (§2.4).
 7. **Content binding (optional):** if the original payload bytes are supplied,
    confirm `SHA3-256(payload) == content_hash`.
 
@@ -700,6 +743,13 @@ frame format and handshake are specified by the standalone
   auth) + ML-KEM-768 + X25519 (key agreement).
 - Session: HKDF-SHA256 key schedule, ChaCha20-Poly1305 AEAD with per-direction
   keys, transcript-bound.
+- Peer keys: trust-on-first-use. A dialling node pins the key a peer presents on
+  first contact (`PeerExpectation::Tofu` in `crates/elara-pq-transport/src/handshake.rs`);
+  seed peers are plain addresses. The ProVerif model (`spec/proverif/`) proves
+  authentication for a peer the initiator has already pinned, so first contact
+  is outside it. An operator can pre-pin a peer by hand in
+  `<data_dir>/pq-peer-pins.json`; nothing does so by default
+  (`docs/KNOWN-LIMITATIONS.md` §15).
 
 Record authenticity (§5) does **not** depend on the transport: a record verifies
 identically whether fetched over PQ transport, plain HTTP, or read from disk. The
@@ -712,13 +762,13 @@ clients tunnel ELPQ frames over a `/pq-ws` WebSocket.
 
 | Layer | Status | Notes |
 |-------|--------|-------|
-| L0 crypto, L1 identity | **Stable** | FIPS-pinned; const-pinned by tests |
-| L2 record / L3 verification | **Stable** | Wire v4–v5 frozen + v6 defined (decode-required, emission flag-day-gated); v1–v3 decode retired 2026-08-18 (`WIRE_VERSION_MIN`=4); round-trip guarded |
+| L0 crypto, L1 identity | **Stable** | ML-DSA-65 pinned to NIST's FIPS 204 vectors; the SPHINCS+ variant is not FIPS 205 and its key is not yet bound to the identity (§2.3–§2.4); sizes const-pinned by tests |
+| L2 record / L3 verification | **Stable** | Wire v4–v7 decodable (`WIRE_VERSION_MIN`=4, `WIRE_VERSION`=7), v7 emitted since 2026-08-23; v1–v3 decode retired 2026-08-18; preimages pinned by frozen KATs; round-trip guarded |
 | L4 account SMT + proofs | **Stable** | 256-level; standalone crate; tested |
 | L5 seals / finality | **Stable (code)** | Trust model binding; byte layout = code |
 | L6 zones / routing | **Stable** | Signed transitions; consensus-critical |
 | L7 conservation | **Stable** | Invariant enforced each transition |
-| L8 PQ transport | **Stable** | Standalone crate, KAT-tested |
+| L8 PQ transport | **Stable** | Standalone crate, KAT-tested; peer keys trust-on-first-use (§10) |
 | Agent mandates (v0) | **Observational** | Flag computed, NOT consensus-weighted (`docs/AGENT-DELEGATION.md`) |
 | Agent mandates (v1 enforcement) | **Design-stage** | Multi-validator-gated; op/zone scope-taxonomy not yet ratified |
 | Protocol upgrade enforcement | **Design-stage** | Tally + state machine exist (`src/network/protocol_upgrade.rs`); not wired to consensus |
@@ -735,18 +785,18 @@ binding consensus behaviour.
 A **conforming offline verifier** MUST:
 
 1. Reproduce the SHA3-256 KAT (§2.1).
-2. Decode v4–v6 records (`WIRE_VERSION_MIN`=4 .. `WIRE_VERSION`=6) and reject
+2. Decode v4–v7 records (`WIRE_VERSION_MIN`=4 .. `WIRE_VERSION`=7) and reject
    bad magic / out-of-range version / `rec_type` / bound violations,
    length-gating before allocation (§4.3, §4.5).
 3. Enforce the SPHINCS+ all-or-nothing profile invariant (§2.4).
 4. Reconstruct `signable_bytes` exactly per §4.4 (BE integers, sorted parents,
-   compact-JSON metadata even at v4+, v5 nonce placement, v6 domain-tag +
+   compact-JSON metadata even at v4+, v5 nonce placement, v6+ domain-tag +
    `network_id` prefix).
 5. Verify the 3309-byte ML-DSA-65 signature over `signable_bytes`, after a
    strict length gate (§2.2, §5).
-6. Verify the 35664-byte SLH-DSA signature over the same preimage when present
-   (Profile A), and accept Profile B when both SPHINCS+ fields are absent (§2.3,
-   §5).
+6. Verify the 35664-byte SPHINCS+ signature, with the §2.3 hashing, over the
+   same preimage when present (Profile A), and accept Profile B when both
+   SPHINCS+ fields are absent (§2.3, §5).
 7. Check `identity_hash_wire` against `SHA3-256(creator_public_key)` when present
    (§3.2).
 
@@ -758,6 +808,8 @@ A **conforming light client** MUST additionally:
 9. Verify account inclusion against the `account_smt_root` carried in an
    **anchor-trusted seal**, never a root reported by an untrusted RPC (§7).
 10. Distinguish optimistic *Sealed* from *Finalized* (≥ 2/3 attestation) (§7).
+11. Fold a seal's record tree with the recipe its own wire version selects,
+    keeping both recipes (§7.1).
 
 A conforming implementation SHOULD emit at the latest wire version, preserve
 `parents` order on relay, and treat `zone_refs` entries as opaque 24-byte blobs.
@@ -793,8 +845,9 @@ can iterate the array and self-check the hash primitives with no Rust, no node, 
 no network; the four ML-DSA-65 signature vectors (A.6, A.8) additionally require a
 FIPS 204 verifier. The pure-stdlib `verify_conformance.py` size-pins those four;
 `verify_pq.py` (`verify.sh` leg 0c) then verifies them for real against **liboqs**
-(the Open Quantum Safe reference C library — a second FIPS 204 implementation,
-independent of the Rust generator), accepting each valid signature and rejecting
+(the Open Quantum Safe project's C library — a second FIPS 204 implementation,
+independent of the Rust generator; liboqs itself warns against production use,
+and here it serves only as a cross-check), accepting each valid signature and rejecting
 each must-reject twin, and skipping transparently when no PQ library is present.
 Regenerate with `cargo run --example gen_conformance_vectors`.
 
@@ -821,7 +874,7 @@ will fail signature verification.
 
 **A.3 Sample record (Profile A, dual-signed)** —
 `examples/verify/sample-record.json`. A real harvested record with both ML-DSA-65
-and SLH-DSA signatures. Running the verification algorithm (§5) over it MUST yield
+and SPHINCS+ (§2.3) signatures. Running the verification algorithm (§5) over it MUST yield
 **verified**; flipping a single byte of `content_hash` MUST yield **failed** at
 the primary-signature step (this is exactly what the in-browser
 `browser-node/verify-demo/` widget demonstrates).
@@ -941,7 +994,7 @@ the wrong-anchor twin.
 | Module | Defines |
 |--------|---------|
 | `crates/elara-record/src/hash.rs` | SHA3-256 |
-| `src/crypto/pqc.rs` | ML-DSA-65 + SLH-DSA-SHA2-192f params + verify |
+| `src/crypto/pqc.rs`, `crates/elara-record/src/pqc.rs` | ML-DSA-65 + SPHINCS+-SHA2-192f (§2.3) params, sign, verify |
 | `crates/elara-record/src/record.rs` | `ValidationRecord`, `to_bytes`/`from_bytes`, `signable_bytes`, `record_hash` |
 | `crates/elara-record/src/wire.rs` | length-prefix codecs, v4+ binary metadata TLV |
 | `crates/elara-verify/src/lib.rs` | record verification algorithm (`verify_record`) |
@@ -960,7 +1013,8 @@ In-repository (also in the public mirror): `docs/ELARA-VERIFY.md`,
 `docs/api.md`, `docs/PROTOCOL-ECONOMICS.md`, `docs/AGENT-DELEGATION.md`,
 `docs/MESH-BFT-MERGE-SEMANTICS.md`.
 
-Standards: FIPS 202 (SHA3), FIPS 204 (ML-DSA), FIPS 205 (SLH-DSA), RFC 2119 /
+Standards: FIPS 202 (SHA3), FIPS 204 (ML-DSA), FIPS 205 (SLH-DSA; sizes only,
+§2.3), RFC 2119 /
 RFC 8174 (conformance keywords), RFC 9562 (UUID v7).
 
 ## Appendix D — Independent implementations

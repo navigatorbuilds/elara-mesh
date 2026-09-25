@@ -7,7 +7,7 @@ Not all nodes generate cognitive checkpoints:
 - **Tier 2 (THINK)** — full cognitive capabilities. Generates complete CognitiveDigest checkpoints. This is the primary checkpoint tier.
 - **Tier 3 (CONNECT)** — full cognitive capabilities plus network cognition. Generates checkpoints and may witness other nodes' checkpoint chains.
 
-The economic impact of cognitive checkpoints on the public network's beat economy is specified separately.
+The beat accounting for cognitive checkpoints is a Layer 3 economic integration: designed, but not yet specified at the protocol level.
 
 ---
 

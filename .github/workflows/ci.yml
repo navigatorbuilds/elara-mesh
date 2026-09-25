@@ -178,8 +178,10 @@ jobs:
         run: cargo test -p elara-record
       # elara-verify carries the extracted verify_core logic (+ anchor/grade legs
       # and the anchor-pinned seal verify) — same silent-rot rationale as above.
-      - name: elara-verify crate (default + verify-anchor)
-        run: cargo test -p elara-verify && cargo test -p elara-verify --features verify-anchor
+      # `cli` gates the CLI module's own tests (crates/elara-verify/src/cli.rs); the
+      # root verify-cli feature enables it only as a dependency, whose tests never run.
+      - name: elara-verify crate (default + verify-anchor + cli)
+        run: cargo test -p elara-verify && cargo test -p elara-verify --features verify-anchor && cargo test -p elara-verify --features cli
       # elara-mcp: the MCP mandate server's pure core (canonical-JSON args
       # hashing, emit budget, ledger_text envelope, fail-loud config). Gate leg
       # added in the SAME commit that created the crate — the gate-coverage

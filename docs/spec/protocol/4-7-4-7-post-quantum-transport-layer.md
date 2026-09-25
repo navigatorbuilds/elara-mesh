@@ -6,37 +6,37 @@ This section is normative. Implementations that ship classical TLS (rustls, Open
 
 #### 4.7.1 The Hybrid Handshake
 
-ElaraPQ uses a three-message hybrid handshake combining classical Curve25519 with the NIST-standardized ML-KEM-768 (FIPS 203). The handshake is:
+ElaraPQ uses a three-message hybrid handshake in the Noise XX style. Key agreement combines classical X25519 with the NIST-standardized ML-KEM-768 (FIPS 203); both peers authenticate with their long-term ML-DSA-65 (FIPS 204, "Dilithium3") identity keys. Each message travels in a frame with a 9-byte header: `ELPQ_MAGIC` (4 bytes), `WIRE_VERSION` (1), frame type (1) and a 3-byte big-endian payload length. The payloads are:
 
 ```
-msg1: initiator → responder
-  ELPQ_MAGIC(4) | WIRE_VERSION(1) | timestamp(8) |
-  initiator_dilithium3_pk(1952) | initiator_x25519_pk(32) |
-  initiator_kyber768_ct(1088) | initiator_dilithium3_sig_over_transcript(3309)
-  = 6394 bytes
+msg1 (Hello): initiator → responder
+  timestamp(8) | ephemeral_x25519_pk(32) | ephemeral_mlkem768_pk(1184)
+  = 1224 bytes
 
-msg2: responder → initiator
-  responder_x25519_pk(32) | responder_kyber768_ct(1088) |
-  responder_dilithium3_sig_over_transcript(3309) | aead_tag(16)
-  = 4445 bytes
+msg2 (Challenge): responder → initiator
+  ephemeral_x25519_pk(32) | mlkem768_ct(1088) |
+  AEAD(responder_mldsa65_pk(1952) | responder_sig_over_transcript(3309)) + tag(16)
+  = 6397 bytes
 
-msg3: initiator → responder
-  aead_handshake_finished(48)
-  = 48 bytes
+msg3 (Auth): initiator → responder
+  AEAD(initiator_mldsa65_pk(1952) | initiator_sig_over_transcript(3309)) + tag(16)
+  = 5277 bytes
 ```
 
-The session key is derived as:
+The responder rejects a msg1 whose timestamp is more than `MAX_HANDSHAKE_SKEW_SECS` from its own clock. The session keys are derived as:
 
 ```
-shared_x25519     = X25519(initiator_x25519_sk, responder_x25519_pk)
-shared_kyber768   = ML-KEM-768.Decapsulate(responder_kyber768_ct, sk)
-session_key       = HKDF-SHA256(salt = transcript_hash,
-                                ikm  = shared_x25519 || shared_kyber768,
-                                info = "elara-pq-session-v1",
-                                len  = 32)
+transcript_hash  = running SHA3-256 hash of the handshake, seeded with WIRE_VERSION
+x25519_ss        = X25519(own ephemeral secret, peer's ephemeral public key)
+mlkem768_ss      = ML-KEM-768 shared secret (the responder encapsulates to the
+                   initiator's ephemeral key; the initiator decapsulates)
+k_send, k_recv   = HKDF-SHA256(salt = transcript_hash,
+                               ikm  = x25519_ss || mlkem768_ss),
+                   expanded with the labels "ELPQ session v1 k_send" and
+                   "ELPQ session v1 k_recv", 32 bytes each
 ```
 
-The session key feeds ChaCha20-Poly1305 AEAD for all subsequent frames. The transcript signature binds both peers to the full handshake under their long-term ML-DSA-65 (FIPS 204, "Dilithium3") identity keys, preventing transcript-substitution attacks. The hybrid construction means a successful attack must break both X25519 (classical, trivially broken by Shor's algorithm) **and** ML-KEM-768 (post-quantum, lattice-based, currently no known attack) — the protocol fails open only if both substrates fall.
+The two keys feed ChaCha20-Poly1305 AEAD, one key per direction; they encrypt the identity blocks of msg2 and msg3 and every later frame. Each peer signs the running transcript hash with its ML-DSA-65 identity key, so impersonating a peer requires forging ML-DSA-65, and the identities never cross the wire in the clear. A dialing node that does not already know the peer's key pins the key presented on first contact (trust on first use). The hybrid key agreement means a passive attacker must break both X25519 (breakable by Shor's algorithm on a large quantum computer) **and** ML-KEM-768 (lattice-based, no known practical attack) to read the traffic.
 
 Constants are normative:
 
@@ -46,7 +46,7 @@ Constants are normative:
 | `WIRE_VERSION` | `0x02` | `crates/elara-pq-transport/src/frame.rs` |
 | `MAX_HANDSHAKE_SKEW_SECS` | `30` | `crates/elara-pq-transport/src/handshake.rs` |
 | `DEFAULT_HANDSHAKE_TIMEOUT` | `10s` | `src/network/pq_transport/stream.rs` |
-| `MAX_FRAME` | 4 MiB after AEAD | `crates/elara-pq-transport/src/frame.rs` |
+| `MAX_PAYLOAD` | 2^24 − 1 bytes (16 MiB − 1), the most the 3-byte length field can express | `crates/elara-pq-transport/src/frame.rs` |
 
 The Source column names the file, not a line: the constant's own name in column 1
 is the anchor. Three of the four line numbers here were stale by 2026-09-06, and
@@ -68,15 +68,15 @@ The protocol does not define a "classical-only" transport mode. Implementations 
 - HTTPS over TLS 1.3 with classical KEM (X25519, P-256, RSA) — forbidden as a node-to-node transport on mainnet.
 - HTTPS over TLS 1.3 with hybrid KEM (X25519+ML-KEM-768) negotiated by IETF draft-ietf-tls-hybrid-design — forbidden, because the draft is not yet a standard and Elara does not pin to any in-flight standardization process.
 - QUIC with the same primitives — forbidden on the same grounds.
-- Plaintext UDP (any form) — forbidden.
+- Plaintext UDP (any form) — forbidden as a node-to-node transport. Local discovery and NAT detection (mDNS, STUN and UPnP) do send plaintext UDP datagrams; they carry at most a node's identity hash, node type, software version and address, never records, attestations or seals.
 
-The protocol does permit a *bootstrap* exception (§11.14): light clients on first install retrieve a foundation-signed seed-peer list from a single foundation-operated HTTPS origin, used exactly once. After first contact, all subsequent traffic uses ElaraPQ.
+The protocol permits a *bootstrap* exception (§11.14) in its design: a light client on first install would fetch a signed seed-peer list from a single HTTPS origin, once, and use ElaraPQ for all later traffic. This is not implemented. Today a node takes its seed peers from its operator's configuration, and the light-client SDK talks to a configured seed over HTTP(S) on the public listener that testnet nodes keep open (`allow_public_https`, default true; a node configured with `network_id = "mainnet"` refuses to start with it on).
 
 Implementations that wish to integrate with non-Elara IoT or web infrastructure (MQTT bridges, CoAP gateways, HTTP REST APIs documented in §8.3) may use classical transports for that integration boundary. Those classical transports terminate at the gateway; the gateway then signs validation records with the device's PQ identity (Profile C, §4.6) and pushes them onto the DAM via ElaraPQ. The classical surface is a non-protocol boundary — outside the scope of this section.
 
 #### 4.7.4 Pluggable Transports for Censored Networks
 
-For deployments in jurisdictions that block direct ElaraPQ traffic, the protocol supports tunneling ElaraPQ frames inside other transports (Tor pluggable transports, WireGuard, Tailscale, SSH port-forwarding). The ElaraPQ handshake and AEAD remain unchanged; the outer wrapper is opaque to the protocol.
+For deployments in jurisdictions that block direct ElaraPQ traffic, an operator can carry ElaraPQ frames inside an external tunnel (WireGuard, Tailscale, SSH port-forwarding, or Tor), since the transport runs over ordinary TCP; no pluggable transport is built into the node (Section 11.16). The ElaraPQ handshake and AEAD remain unchanged; the outer wrapper is opaque to the protocol.
 
 What the protocol does **not** do: define a "domain-fronting mode" that masquerades as classical HTTPS to fool deep-packet-inspection middleboxes. Earlier drafts of this section described domain fronting as a censorship-resistance feature; that language is retired. Domain-fronting compromises the cryptographic transcript by accepting classical TLS framing on the outer layer, which leaks per-connection metadata (TLS ClientHello fingerprints, SNI when not encrypted via ECH, certificate chain timing) that defeat the transport's post-quantum forward-secrecy goal. Operators who need DPI-bypass should use Tor, Snowflake, or obfuscated VPNs as the carrier — not bake classical TLS into the protocol.
 
@@ -90,4 +90,6 @@ A mainnet node operator can verify their deployment matches §4.7 by:
 4. The compiled binary's dependency graph (`cargo tree --features node`) lists no `rustls`, `tokio-rustls`, `rustls-pemfile`, `rustls-pki-types`, `rcgen`, `hyper`, or `hyper-util` as direct or transitive dependencies on the mainnet build profile.
 
 These four checks are the operator-facing acceptance gates for §4.7 compliance.
+
+**Status:** these gates describe the mainnet target, and three of them cannot pass today. No mainnet build profile exists: the node build depends on `hyper` and `hyper-util` directly and on `rustls`, `tokio-rustls` and `rustls-pki-types` through `reqwest`, so check 4 fails. The `elara-capture-audit` tool named in check 2 has not been written. The grep in check 3 matches four source comments. Check 1 depends on `allow_public_https` being off, which testnet nodes do not do by default.
 

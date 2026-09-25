@@ -1,7 +1,7 @@
 //! Post-quantum signature **verification** primitives.
 //!
 //! Verify-only by design: this module carries `dilithium3_verify` (ML-DSA-65 / FIPS 204)
-//! and `sphincs_verify` (SLH-DSA-SHA2-192f / FIPS 205) — both operate on **public data only**
+//! and `sphincs_verify` (SPHINCS+-SHA2-192f, not FIPS 205) — both operate on **public data only**
 //! (message, signature, public key). Key generation and signing stay in the node; a
 //! third-party verifier embedding this crate is structurally incapable of producing a
 //! signature. Pure-Rust wrappers over `dilithium-rs` / `lattice-slh-dsa`, wasm32-portable.
@@ -17,7 +17,9 @@ const MODE: DilithiumMode = DilithiumMode::Dilithium3;
 /// Algorithm ID for ML-DSA-65 (FIPS 204) — Dilithium3. Canonical definition —
 /// the node's `crypto` module re-exports these; record wire bytes carry them.
 pub const ALG_DILITHIUM3: u8 = 0x01;
-/// Algorithm ID for SLH-DSA-SHA2-192f (FIPS 205) — SPHINCS+.
+/// Algorithm ID for SPHINCS+-SHA2-192f. The backend hashes with SHA-256 throughout, where
+/// FIPS 205 requires SHA-512 at this category, so this is not FIPS 205 SLH-DSA-SHA2-192f
+/// (`tests/acvp_slhdsa192f.rs` pins it).
 pub const ALG_SPHINCS_SHA2_192F: u8 = 0x02;
 
 /// Verify a Dilithium3 / ML-DSA-65 (FIPS 204) signature over `message` with `public_key`.
@@ -35,7 +37,8 @@ pub fn dilithium3_verify(message: &[u8], signature: &[u8], public_key: &[u8]) ->
     Ok(DilithiumKeyPair::verify(public_key, &sig, message, b"", MODE))
 }
 
-/// Verify a SPHINCS+ / SLH-DSA-SHA2-192f (FIPS 205) signature over `message` with `public_key`.
+/// Verify a SPHINCS+-SHA2-192f signature over `message` with `public_key`.
+/// It rejects FIPS 205 SLH-DSA-SHA2-192f signatures: see [`ALG_SPHINCS_SHA2_192F`].
 pub fn sphincs_verify(message: &[u8], signature: &[u8], public_key: &[u8]) -> Result<bool, RecordError> {
     Ok(SlhDsaSignature::verify(signature, public_key, message, SLH_DSA_SHA2_192F))
 }
@@ -176,7 +179,7 @@ mod tests {
         let sig = kat("slhdsa192f.sig");
         assert!(
             sphincs_verify(&msg, &sig, &pk).unwrap(),
-            "committed SLH-DSA-SHA2-192f KAT must verify — a false here means \
+            "committed SPHINCS+-SHA2-192f KAT must verify — a false here means \
              the verify path or the slh-dsa dep drifted"
         );
         let mut tampered = msg.clone();

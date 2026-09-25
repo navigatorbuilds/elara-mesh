@@ -182,6 +182,7 @@ pub fn windows_start_bat_content(exe: &Path, args: &[String], env: &[(String, St
 
 fn is_root() -> bool {
     #[cfg(unix)]
+    // SAFETY: geteuid takes no arguments and cannot fail.
     unsafe {
         libc::geteuid() == 0
     }

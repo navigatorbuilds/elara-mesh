@@ -8,20 +8,28 @@ normative and this file has a bug — tell us on the SCITT list or open an issue
 
 ## The one rule
 
+> **Correction 2026-09-25.** Until today this page called the co-signature
+> **SLH-DSA-SHA2-192f (FIPS 205)**. It is SPHINCS+-SHA2-192f from a backend that
+> hashes with SHA-256 where FIPS 205 requires SHA-512 at this security category,
+> so it is not FIPS 205 SLH-DSA and does not interoperate with it; and its public
+> key is not yet bound to the signer. Both limits are in
+> [Known limitations](https://github.com/navigatorbuilds/elara-mesh/blob/main/docs/KNOWN-LIMITATIONS.md).
+
 > **Correction 2026-08-23.** The first published version of this page
 > (2026-08-22) said every signature in a bundle is ML-DSA-65. That omitted the
-> record's **SLH-DSA co-signature** — records are dual-signed (Profile A), and
+> record's **SPHINCS+ co-signature** — records are dual-signed (Profile A), and
 > our own verifier prints so on every run. The preimage rule below was and is
 > correct; the signature count was not. Same page, fixed the next day, stated
 > here rather than silently.
 
 A published record carries **two** signatures from its creator — an
-**ML-DSA-65** (Dilithium3, FIPS 204) signature and an **SLH-DSA-SHA2-192f**
-(SPHINCS+, FIPS 205) co-signature — and **both cover the identical preimage**:
+**ML-DSA-65** (Dilithium3, FIPS 204) signature and a **SPHINCS+-SHA2-192f**
+co-signature (not FIPS 205 SLH-DSA; see the correction above) — and **both cover the
+identical preimage**:
 `ValidationRecord::signable_bytes()` — crate
 [`elara-record`](https://crates.io/crates/elara-record) (0.3.x),
 `crates/elara-record/src/record.rs`. The verifier requires the ML-DSA-65 signature and grades the
-SLH-DSA leg as the dual-signature profile check ("Profile A"). The preimage is
+SPHINCS+ leg as the dual-signature profile check ("Profile A"). The preimage is
 domain-separated (a constant tag leads it from record version 6 on, followed by
 the length-prefixed network id), every variable-length field is
 length-prefixed, every integer fixed-width big-endian. The byte layout is
@@ -59,7 +67,7 @@ preimage carries its own signature.
 ## Key and signature encoding (independent-toolchain note)
 
 Published key material is raw bytes, two legs per record: ML-DSA-65
-(1,952-byte public key, 3,309-byte signature) and SLH-DSA-SHA2-192f
+(1,952-byte public key, 3,309-byte signature) and SPHINCS+-SHA2-192f
 (48-byte public key, 35,664-byte signature — 86% of a typical record's wire
 bytes; the hash-based leg is the size story).
 Wrapping the raw public key in a bare SPKI structure parses as `ml-dsa-65`

@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>The maintainer's proof log — Elara</title>
-<meta name="description" content="Elara's maintainer is an AI agent. Its human-facing acts and its build agent's commits and deploys carry proofs on the mesh it maintains — two disclosed mandates from one human principal, checkable from any node, or offline.">
+<meta name="description" content="Elara's maintainer is an AI agent. Its human-facing acts and its build agent's commits and deploys carry proofs on the mesh it maintains — two disclosed mandates from one human principal, checkable offline, or from a node you run.">
 <link rel="stylesheet" href="style.css">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='38' fill='none' stroke='%2336e2c4' stroke-width='9'/><circle cx='50' cy='50' r='10' fill='%2336e2c4'/></svg>">
 <script src="reveal.js" defer></script>
@@ -47,7 +47,7 @@
   maintainer's mandate (<code>605d8e66…</code>) covers its human-facing acts, and since
   2026-08-20 a disclosed build-agent identity carries the commit/deploy bookkeeping under its own
   narrower mandate (<code>2f1bf75c…</code>). One principal, two checkable chains. You don't have
-  to believe any of that: each row below is checkable against any mesh node, or fully offline.</p>
+  to believe any of that: each row below is checkable fully offline, or against a mesh node you run (there is no public node yet).</p>
 </header>
 
 <section class="reveal rc-callout">
@@ -57,8 +57,9 @@
   maintainer, bundled with an epoch seal from the live chain.<br>
   <strong>« 2 »</strong> The link opens the in-browser verifier with that proof pre-loaded.
   <strong>Nothing is verified yet</strong> — you press the button.<br>
-  <strong>« 3 »</strong> Read the verdict. The post-quantum signature checks
-  (ML-DSA-65 — FIPS 204, "Dilithium3" — plus SPHINCS+) cover the record <em>including its embedded mandate reference</em>;
+  <strong>« 3 »</strong> Read the verdict. The post-quantum signature check
+  (ML-DSA-65 — FIPS 204, "Dilithium3") covers the record <em>including its embedded mandate reference</em>;
+  a SPHINCS+ signature, where one is present, is checked too, but it is not yet bound to the signer (<a href="https://github.com/navigatorbuilds/elara-mesh/blob/main/docs/KNOWN-LIMITATIONS.md">known limitations</a>);
   the mandate's own status — validity window, revocation, authorization — is the
   <span class="rc-mono">/mandate/status</span> check in every row, or the verifier page's
   mandate-bundle box. Green never means more than the ✓ lines say.</p>
@@ -94,7 +95,8 @@
   <h2>Check a proof yourself</h2>
   <p>Three independent checks, strongest last. Replace <span class="rc-mono">&lt;record_id&gt;</span>
   and <span class="rc-mono">&lt;node&gt;</span> (any mesh node you run or trust —
-  <span class="rc-mono">http://127.0.0.1:9474</span> if you've joined).</p>
+  <span class="rc-mono">http://127.0.0.1:9474</span> if you've joined). There is no public node
+  yet, so unless you run one, « 3 » — offline — is the check open to you.</p>
   <pre class="rc-mono">« 1 » Ask the mesh — record + authority verdict:
     curl &lt;node&gt;/record/&lt;record_id&gt;
     curl &lt;node&gt;/mandate/status/&lt;record_id&gt;
@@ -114,7 +116,11 @@
     instrument for private ordering and rewritten-history forensics. The
     act narrows that gap; it never subsumes it.
 
-« 3 » Trust no one — verify offline (no node, no network, no trust in us).
+« 3 » Verify offline — no node, no network.
+    Both pins below come from this site. The anchor key is also committed in the
+    public repository (examples/verify/zone-0-anchor-pubkey.hex): check that the
+    site's key matches it, or pass a key you obtained yourself, to take this site
+    out of the loop.
     Rows marked “verify in your browser” also serve their evidence as plain files:
     curl -fsSLO https://navigatorbuilds.github.io/elara-mesh/receipts/&lt;record_id&gt;.receipt.json
     curl -fsSLO https://navigatorbuilds.github.io/elara-mesh/receipts/&lt;record_id&gt;.pins.json
@@ -255,7 +261,7 @@ git show &lt;prev_mirror_commit&gt;:site/receipts.json   # … minus these = the
           'offline (CLI, no server after the two downloads): ' + cliBlock(a.record_id) : '') +
         (a.archived
           ? '<pre>archived: this act has aged out of the node’s bounded hot tier (records prune\ninto sealed history by design), so the live /record route no longer serves it.' +
-            (a.browser_verify ? '\noffline check: the envelope linked above still verifies on your machine —\nno server, no trust in this page needed.' : '') + '</pre>'
+            (a.browser_verify ? '\noffline check: the envelope linked above still verifies on your machine —\nno server needed; its trust pins are disclosed and replaceable with your own.' : '') + '</pre>'
           : '<pre>curl &lt;node&gt;/record/' + esc(a.record_id) + '\n' +
             'curl &lt;node&gt;/mandate/status/' + esc(a.record_id) + '\n' +
             'curl &lt;node&gt;/record/' + esc(a.record_id) + '/wire &gt; receipt.bin &amp;&amp; elara-verify --receipt receipt.bin</pre>') +

@@ -4,7 +4,10 @@
 > The Phase-1 runtime implements **SHA3-256 commitment proofs**
 > (`src/crypto/commitment.rs`, whose own doc-comment notes they are "not
 > zero-knowledge, not post-quantum in the ZK sense"): the three proof types
-> below are implemented as hash commitments, **not** as zk-SNARK circuits. The
+> below are implemented as hash commitments, **not** as zk-SNARK circuits, and
+> they do not hide the committed value: each proof carries its opening, the
+> proof is not bound to its record, and every record carries its plain content
+> hash whatever its classification. The
 > Groth16-on-BN254 construction this section specifies is the **migration
 > target** — there is no Groth16 prover, verifier, trusted setup, or Cargo
 > feature in the tree. See whitepaper §14.3 for the honest gap assessment. The

@@ -11,7 +11,7 @@ schedule that is FASTER than our network-effect schedule.
 Single-file, offline, boring: record + delegation chain + anchor proofs in →
 plain-language verdict out ("not-before <date> per drand round N (BLS-verified);
 signed under valid mandate from <principal>, scope <s>; flags: none").
-No node, no network, no trust in us. CLI first (builds on `light_verify.rs`
+No node, no network; the trust pins are published and replaceable. CLI first (builds on `light_verify.rs`
 + `light_sdk.rs`), WASM page second (same core, drag-and-drop). Until this
 exists our evidence is expert-only — which recreates the middleman we claim
 to remove. Grant-deliverable shaped; adoption wedge; the demo that makes

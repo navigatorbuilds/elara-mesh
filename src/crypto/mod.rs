@@ -27,7 +27,7 @@ pub mod zk;
 
 /// Signature algorithm IDs — canonical in `elara_record::pqc` (record wire
 /// bytes carry them): Dilithium3 / ML-DSA-65 (FIPS 204) primary,
-/// SPHINCS+-SHA2-192f / SLH-DSA (FIPS 205) secondary hash-based.
+/// SPHINCS+-SHA2-192f secondary hash-based (SHA-256 throughout, so not FIPS 205).
 pub use elara_record::pqc::{ALG_DILITHIUM3, ALG_SPHINCS_SHA2_192F};
 
 /// CRYSTALS-Kyber768 / ML-KEM (FIPS 203) — key encapsulation.
@@ -37,7 +37,7 @@ pub const ALG_KYBER768: u8 = 0x03;
 pub fn algorithm_name(id: u8) -> &'static str {
     match id {
         ALG_DILITHIUM3 => "ML-DSA-65",
-        ALG_SPHINCS_SHA2_192F => "SLH-DSA-SHA2-192f",
+        ALG_SPHINCS_SHA2_192F => "SPHINCS+-SHA2-192f",
         ALG_KYBER768 => "ML-KEM-768",
         _ => "unknown",
     }

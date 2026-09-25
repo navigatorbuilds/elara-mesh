@@ -20,7 +20,7 @@ The actual content — the poem, the document, the sensor reading — is stored 
 
 3. **The DAM retains only:** an orphaned hash signed by a revoked pseudonymous key. This satisfies GDPR's erasure requirement because no personal data remains — only mathematical artifacts that cannot be linked to a natural person.
 
-**For PRIVATE and SOVEREIGN classifications**, the situation is even cleaner: the content hash was never visible on the DAM in the first place. Only a SHA3-256 commitment proof exists (Phase-1; genuine ZK is design-stage). Revoking the key makes the proof unattributable.
+**For PRIVATE, RESTRICTED and SOVEREIGN classifications**, the design keeps the content hash off the DAM and stores only a zero-knowledge proof, so revoking the key makes the proof unattributable. The current implementation does not yet do this: every record carries its content hash, and the proof attached to a PRIVATE or RESTRICTED record carries the committed value in the clear (Section 5.3). Until that changes, the analysis above applies to classified records too, and values placed in such a proof should be treated as public.
 
 **For IoT and device data**, GDPR applies only to personal data. Sensor readings from industrial equipment or environmental monitors are not personal data and are not subject to erasure rights.
 

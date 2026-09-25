@@ -63,7 +63,7 @@ sudo fallocate -l 4G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapf
 `scripts/build.sh` sets the job cap automatically from your detected RAM.
 
 ### "It's been 15 minutes — is it stuck?"
-No. A first release build is **10–30 minutes** (RocksDB + liboqs + ~350k lines of
+No. A first release build is **10–30 minutes** (RocksDB + liboqs + ~410k lines of
 Rust). There's no per-line output during the big C compiles — that's normal.
 Re-runs are cached and take seconds.
 

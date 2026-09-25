@@ -26,5 +26,5 @@ Witnesses verify:
 
 If yes → witness signs attestation to the seal. If no → abstain or reject.
 
-**VRF selects which anchor proposes each epoch** (existing behavior, per-zone). Multiple anchors per zone prevent single-point-of-failure.
+**A stake-weighted rank over a beacon chained from the previous seal selects which anchor proposes each epoch** (existing behavior, per-zone; the previous sealer can influence that beacon — see Section 11.12.3 of the whitepaper). Multiple anchors per zone prevent single-point-of-failure.
 

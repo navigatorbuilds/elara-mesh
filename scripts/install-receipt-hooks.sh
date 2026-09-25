@@ -68,16 +68,28 @@ NODE_URL="${ELARA_NODE:-http://127.0.0.1:9474}"
     # summary line (match either leading shape); log anything else, e.g. "daily
     # record limit exceeded: tier0 …" (20/day rolling record-limit budget).
     SPOOL="$HOME/.elara/emit-spool"
-    OUT="$("$CLI" --node "$NODE_URL" agent-emit \
-        --identity "$IDENTITY" \
-        --tool git \
-        --action commit \
-        --args-hash "$AH" \
-        --agent-id elara-build-agent \
-        --mandate-ref "$MANDATE" \
-        --spool-dir "$SPOOL" 2>&1)"
+    # 2026-09-25: never sign under a mandate the node reports lapsed, revoked or
+    # not yet valid; the verifier flags every such receipt, and renewal is the
+    # principal's act. "unknown" (node down) signs and spools as before.
+    MSTATE="$("$REPO_DIR/scripts/mandate-window-state.sh" "$NODE_URL" "$MANDATE")"
+    case "$MSTATE" in
+        lapsed|revoked|not-yet-valid)
+            OUT="mandate-skip: build mandate ${MANDATE:0:8} is $MSTATE" ;;
+        *)
+            OUT="$("$CLI" --node "$NODE_URL" agent-emit \
+                --identity "$IDENTITY" \
+                --tool git \
+                --action commit \
+                --args-hash "$AH" \
+                --agent-id elara-build-agent \
+                --mandate-ref "$MANDATE" \
+                --spool-dir "$SPOOL" 2>&1)" ;;
+    esac
     TS="$(date -u +%FT%TZ)"
     case "$OUT" in
+        "mandate-skip: "*)
+            printf '%s %s skipped commit %s | %s\n' "$TS" "${SHA:0:8}" "$SHA" "$OUT" \
+                >> "$HOME/.elara/receipt-hook.log" ;;
         "accepted: "*|"agent-emit: "*)
             # G1 (c): success logged too — coverage computable from this log.
             RID="$(printf '%s' "$OUT" | sed -n 's/^accepted: \([0-9a-f-]*\).*/\1/p' | head -1)"
