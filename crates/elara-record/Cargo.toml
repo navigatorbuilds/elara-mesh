@@ -26,9 +26,17 @@ sha3 = "0.10"
 hex = "0.4"
 uuid = { version = "1.0", features = ["v7", "js"] }
 dilithium-rs = "=0.2.0"
-lattice-slh-dsa = "=0.3.3"
+# SPHINCS+ backend of the 0x02 second leg. 0.3.3 predates final FIPS 205 (its
+# SHA2-192f H_msg diverges, tests/acvp_slhdsa192f.rs) and signed every 0x02 leg,
+# so it stays, renamed, as that era's verifier.
+slh_dsa_legacy = { package = "lattice-slh-dsa", version = "=0.3.3" }
 
 # record::now_timestamp() reads the clock via js_sys::Date on wasm32 (no
 # SystemTime there). Same pin as the node's wasm32 target block.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = "0.3"
+
+[dev-dependencies]
+# Final FIPS 205 SLH-DSA, for the ACVP tests until the second-leg algorithm
+# that replaces 0x02 ships (it becomes a normal dependency then).
+slh_dsa = { package = "lattice-slh-dsa", version = "=0.4.0" }

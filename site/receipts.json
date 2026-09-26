@@ -2,9 +2,13 @@
  "acts": [
   {
    "act_timestamp_ms": 1790266040964,
+   "action": "outreach-email",
+   "agent_id": "elara-maintainer",
+   "args_hash": "1c9ff232914e1463590260f4c8ce59d48fe6283ee2c4eef5ffdf7de499522e3e",
    "authorized": true,
    "browser_verify": true,
    "flag": "valid",
+   "kind": "agent_audit",
    "mandate_ref": "605d8e66b16b0cae072b494f23ab2eeee6870111e9401c3c436fa4825fcd67cc",
    "mandate_status": {
     "act_timestamp_ms": 1790266040964,
@@ -32,13 +36,18 @@
    },
    "record_id": "01a0d42b-e284-7130-827f-111304a8aaf9",
    "scope_deferred": false,
-   "timestamp": 1790266040.9642901
+   "timestamp": 1790266040.9642901,
+   "tool": "proton-bridge"
   },
   {
    "act_timestamp_ms": 1790266020710,
+   "action": "outreach-email",
+   "agent_id": "elara-maintainer",
+   "args_hash": "f4490e24d6729c043ca829ade157585c66eec316cfc563669503082bb1dc35be",
    "authorized": true,
    "browser_verify": true,
    "flag": "valid",
+   "kind": "agent_audit",
    "mandate_ref": "605d8e66b16b0cae072b494f23ab2eeee6870111e9401c3c436fa4825fcd67cc",
    "mandate_status": {
     "act_timestamp_ms": 1790266020710,
@@ -66,13 +75,18 @@
    },
    "record_id": "01a0d42b-9366-7322-b6a2-9003d6467ab9",
    "scope_deferred": false,
-   "timestamp": 1790266020.7107182
+   "timestamp": 1790266020.7107182,
+   "tool": "proton-bridge"
   },
   {
    "act_timestamp_ms": 1790265662513,
+   "action": "commit",
+   "agent_id": "elara-build-agent",
+   "args_hash": "477ed6695c143807cfcbb74a0c64c9c0a478a62cdd0c6c33a19ca7fc77540c5f",
    "authorized": false,
    "browser_verify": true,
    "flag": "lapsed",
+   "kind": "agent_audit",
    "mandate_ref": "2f1bf75c994da0c084fe471a7e9bb9551d9e114d815cd8c71be0aa111ed52299",
    "mandate_status": {
     "act_timestamp_ms": 1790265662513,
@@ -90,13 +104,18 @@
    },
    "record_id": "01a0d426-1c31-73a3-bbf6-5628d6e25c30",
    "scope_deferred": true,
-   "timestamp": 1790265662.513762
+   "timestamp": 1790265662.513762,
+   "tool": "git"
   },
   {
    "act_timestamp_ms": 1789617642789,
+   "action": "commit",
+   "agent_id": "elara-build-agent",
+   "args_hash": "a704e8f8392788f99e4251c949058ec97f0c9ba51123d0624cf2d6545c829a65",
    "authorized": false,
    "browser_verify": true,
    "flag": "lapsed",
+   "kind": "agent_audit",
    "mandate_ref": "2f1bf75c994da0c084fe471a7e9bb9551d9e114d815cd8c71be0aa111ed52299",
    "mandate_status": {
     "act_timestamp_ms": 1789617642789,
@@ -114,13 +133,18 @@
    },
    "record_id": "01a0ad86-1d25-71a1-89ba-a56219d9e589",
    "scope_deferred": true,
-   "timestamp": 1789617642.7890987
+   "timestamp": 1789617642.7890987,
+   "tool": "git"
   },
   {
    "act_timestamp_ms": 1789581341126,
+   "action": "outreach-email",
+   "agent_id": "elara-maintainer",
+   "args_hash": "c885e577232f9cfaf1022e457b8bd8fb3da6d294534bceb3a048bd93ee81ac1c",
    "authorized": true,
    "browser_verify": true,
    "flag": "valid",
+   "kind": "agent_audit",
    "mandate_ref": "605d8e66b16b0cae072b494f23ab2eeee6870111e9401c3c436fa4825fcd67cc",
    "mandate_status": {
     "act_timestamp_ms": 1789581341126,
@@ -148,13 +172,18 @@
    },
    "record_id": "01a0ab5c-31c6-79d0-b716-d59161a76440",
    "scope_deferred": false,
-   "timestamp": 1789581341.1267102
+   "timestamp": 1789581341.1267102,
+   "tool": "proton-bridge"
   },
   {
    "act_timestamp_ms": 1789579870124,
+   "action": "outreach-email",
+   "agent_id": "elara-maintainer",
+   "args_hash": "d38d517b65d168f1f10a27f52cc50b33bc0d7b21fde33f9aa1735468dc0be348",
    "authorized": true,
    "browser_verify": true,
    "flag": "valid",
+   "kind": "agent_audit",
    "mandate_ref": "605d8e66b16b0cae072b494f23ab2eeee6870111e9401c3c436fa4825fcd67cc",
    "mandate_status": {
     "act_timestamp_ms": 1789579870124,
@@ -182,13 +211,18 @@
    },
    "record_id": "01a0ab45-bfac-70d0-b783-3d9919881283",
    "scope_deferred": false,
-   "timestamp": 1789579870.1245475
+   "timestamp": 1789579870.1245475,
+   "tool": "proton-bridge"
   },
   {
    "act_timestamp_ms": 1789520564009,
+   "action": "commit",
+   "agent_id": "elara-build-agent",
+   "args_hash": "770ce9f31692a31fb0607e4e623fd4a15d64fe606e482c83e19d68403000e4a4",
    "authorized": true,
    "browser_verify": true,
    "flag": "valid",
+   "kind": "agent_audit",
    "mandate_ref": "2f1bf75c994da0c084fe471a7e9bb9551d9e114d815cd8c71be0aa111ed52299",
    "mandate_status": {
     "act_timestamp_ms": 1789520564009,
@@ -216,13 +250,18 @@
    },
    "record_id": "01a0a7bc-cf29-7c40-ad9d-d718f2f8a97f",
    "scope_deferred": true,
-   "timestamp": 1789520564.0098512
+   "timestamp": 1789520564.0098512,
+   "tool": "git"
   },
   {
    "act_timestamp_ms": 1789431162200,
+   "action": "commit",
+   "agent_id": "elara-build-agent",
+   "args_hash": "7ccf67576d4fa06e5c3a847b58f6346d9972a9535a76bf1c3f7b684c94a76711",
    "authorized": true,
    "browser_verify": true,
    "flag": "valid",
+   "kind": "agent_audit",
    "mandate_ref": "2f1bf75c994da0c084fe471a7e9bb9551d9e114d815cd8c71be0aa111ed52299",
    "mandate_status": {
     "act_timestamp_ms": 1789431162200,
@@ -250,13 +289,18 @@
    },
    "record_id": "01a0a268-a558-7a22-81c3-d205a7ae96d6",
    "scope_deferred": true,
-   "timestamp": 1789431162.2000053
+   "timestamp": 1789431162.2000053,
+   "tool": "git"
   },
   {
    "act_timestamp_ms": 1789344669076,
+   "action": "commit",
+   "agent_id": "elara-build-agent",
+   "args_hash": "7a039514d4370a40d97d9b707985092581b6e570040f0ae280b79efda0e199fc",
    "authorized": true,
    "browser_verify": true,
    "flag": "valid",
+   "kind": "agent_audit",
    "mandate_ref": "2f1bf75c994da0c084fe471a7e9bb9551d9e114d815cd8c71be0aa111ed52299",
    "mandate_status": {
     "act_timestamp_ms": 1789344669076,
@@ -284,13 +328,18 @@
    },
    "record_id": "01a09d40-dd94-7992-89e5-56d624a3605a",
    "scope_deferred": true,
-   "timestamp": 1789344669.0768452
+   "timestamp": 1789344669.0768452,
+   "tool": "git"
   },
   {
    "act_timestamp_ms": 1789257835895,
+   "action": "commit",
+   "agent_id": "elara-build-agent",
+   "args_hash": "b6f4118cf0ac0172ad3b7330f5070bba4550a8cd21a57836c8becfa9736f7f82",
    "authorized": true,
    "browser_verify": true,
    "flag": "valid",
+   "kind": "agent_audit",
    "mandate_ref": "2f1bf75c994da0c084fe471a7e9bb9551d9e114d815cd8c71be0aa111ed52299",
    "mandate_status": {
     "act_timestamp_ms": 1789257835895,
@@ -318,13 +367,18 @@
    },
    "record_id": "01a09813-e577-7493-a89f-a0ab335f3021",
    "scope_deferred": true,
-   "timestamp": 1789257835.8955007
+   "timestamp": 1789257835.8955007,
+   "tool": "git"
   },
   {
    "act_timestamp_ms": 1789257621525,
+   "action": "venue-comment",
+   "agent_id": "elara-maintainer",
+   "args_hash": "e317645d13c61ab04a84c621e84833c941a1b3172d563cdc73f3c6126b9800f1",
    "authorized": true,
    "browser_verify": true,
    "flag": "valid",
+   "kind": "agent_audit",
    "mandate_ref": "605d8e66b16b0cae072b494f23ab2eeee6870111e9401c3c436fa4825fcd67cc",
    "mandate_status": {
     "act_timestamp_ms": 1789257621525,
@@ -352,13 +406,18 @@
    },
    "record_id": "01a09810-a015-7d60-a568-561dfb9fbf83",
    "scope_deferred": false,
-   "timestamp": 1789257621.5251493
+   "timestamp": 1789257621.5251493,
+   "tool": "github"
   },
   {
    "act_timestamp_ms": 1789218013731,
+   "action": "venue-comment",
+   "agent_id": "elara-maintainer",
+   "args_hash": "6613661dc9014aab5458911043a8e412b8d34375ce5b63d3713b5faf8b7148d1",
    "authorized": true,
    "browser_verify": true,
    "flag": "valid",
+   "kind": "agent_audit",
    "mandate_ref": "605d8e66b16b0cae072b494f23ab2eeee6870111e9401c3c436fa4825fcd67cc",
    "mandate_status": {
     "act_timestamp_ms": 1789218013731,
@@ -386,13 +445,18 @@
    },
    "record_id": "01a095b4-4223-7a80-965f-482980989fb3",
    "scope_deferred": false,
-   "timestamp": 1789218013.731278
+   "timestamp": 1789218013.731278,
+   "tool": "github"
   },
   {
    "act_timestamp_ms": 1789217287485,
+   "action": "outreach-email",
+   "agent_id": "elara-maintainer",
+   "args_hash": "228feba2861d3f94b40871edd11ba833e8f791b59de86085e51b38ff260b9452",
    "authorized": true,
    "browser_verify": true,
    "flag": "valid",
+   "kind": "agent_audit",
    "mandate_ref": "605d8e66b16b0cae072b494f23ab2eeee6870111e9401c3c436fa4825fcd67cc",
    "mandate_status": {
     "act_timestamp_ms": 1789217287485,
@@ -420,13 +484,18 @@
    },
    "record_id": "01a095a9-2d3d-74d0-b75a-7911ba7f5bcd",
    "scope_deferred": false,
-   "timestamp": 1789217287.4852526
+   "timestamp": 1789217287.4852526,
+   "tool": "proton-bridge"
   },
   {
    "act_timestamp_ms": 1789183454460,
+   "action": "outreach-email",
+   "agent_id": "elara-maintainer",
+   "args_hash": "044d8fbb5ea862adbff2588ac1116470b2f2ef69be06facc1b63e90f3c7d5ff3",
    "authorized": true,
    "browser_verify": true,
    "flag": "valid",
+   "kind": "agent_audit",
    "mandate_ref": "605d8e66b16b0cae072b494f23ab2eeee6870111e9401c3c436fa4825fcd67cc",
    "mandate_status": {
     "act_timestamp_ms": 1789183454460,
@@ -454,13 +523,18 @@
    },
    "record_id": "01a093a4-ecfc-7491-9425-d2dcb53226a0",
    "scope_deferred": false,
-   "timestamp": 1789183454.4600976
+   "timestamp": 1789183454.4600976,
+   "tool": "proton-bridge"
   },
   {
    "act_timestamp_ms": 1789174420726,
+   "action": "venue-comment",
+   "agent_id": "elara-maintainer",
+   "args_hash": "4d2120e5795fe0c5b6541b0402e254ad2c787f924ec7eea69020838079313eaf",
    "authorized": true,
    "browser_verify": true,
    "flag": "valid",
+   "kind": "agent_audit",
    "mandate_ref": "605d8e66b16b0cae072b494f23ab2eeee6870111e9401c3c436fa4825fcd67cc",
    "mandate_status": {
     "act_timestamp_ms": 1789174420726,
@@ -488,13 +562,18 @@
    },
    "record_id": "01a0931b-14f6-78b0-86ca-e35c61571ea1",
    "scope_deferred": false,
-   "timestamp": 1789174420.726602
+   "timestamp": 1789174420.726602,
+   "tool": "github"
   },
   {
    "act_timestamp_ms": 1789172026983,
+   "action": "venue-comment",
+   "agent_id": "elara-maintainer",
+   "args_hash": "95e731aee8876c546a2c6dd96fa1eb5962b1661de95511819a2ad18b7d8ca08e",
    "authorized": true,
    "browser_verify": true,
    "flag": "valid",
+   "kind": "agent_audit",
    "mandate_ref": "605d8e66b16b0cae072b494f23ab2eeee6870111e9401c3c436fa4825fcd67cc",
    "mandate_status": {
     "act_timestamp_ms": 1789172026983,
@@ -522,13 +601,18 @@
    },
    "record_id": "01a092f6-8e67-73b0-b05d-13264bdd831e",
    "scope_deferred": false,
-   "timestamp": 1789172026.9831946
+   "timestamp": 1789172026.9831946,
+   "tool": "github"
   },
   {
    "act_timestamp_ms": 1789169869653,
+   "action": "venue-comment",
+   "agent_id": "elara-maintainer",
+   "args_hash": "89c0c18075afad0905e8bdfef3f3989c1e541c5a5dbc4cc0b2dcd93e9308109d",
    "authorized": true,
    "browser_verify": true,
    "flag": "valid",
+   "kind": "agent_audit",
    "mandate_ref": "605d8e66b16b0cae072b494f23ab2eeee6870111e9401c3c436fa4825fcd67cc",
    "mandate_status": {
     "act_timestamp_ms": 1789169869653,
@@ -556,13 +640,18 @@
    },
    "record_id": "01a092d5-a355-7702-a9b1-a723e5976e36",
    "scope_deferred": false,
-   "timestamp": 1789169869.6536062
+   "timestamp": 1789169869.6536062,
+   "tool": "github"
   },
   {
    "act_timestamp_ms": 1789167310819,
+   "action": "venue-comment",
+   "agent_id": "elara-maintainer",
+   "args_hash": "fdbe9e9b88dc33737ec5abc28a8732d9946164708791b60328055951abea2980",
    "authorized": true,
    "browser_verify": true,
    "flag": "valid",
+   "kind": "agent_audit",
    "mandate_ref": "605d8e66b16b0cae072b494f23ab2eeee6870111e9401c3c436fa4825fcd67cc",
    "mandate_status": {
     "act_timestamp_ms": 1789167310819,
@@ -590,13 +679,18 @@
    },
    "record_id": "01a092ae-97e3-76e3-b519-a60be4b6a941",
    "scope_deferred": false,
-   "timestamp": 1789167310.8199053
+   "timestamp": 1789167310.8199053,
+   "tool": "github"
   },
   {
    "act_timestamp_ms": 1789166946390,
+   "action": "venue-comment",
+   "agent_id": "elara-maintainer",
+   "args_hash": "fdbe9e9b88dc33737ec5abc28a8732d9946164708791b60328055951abea2980",
    "authorized": true,
    "browser_verify": true,
    "flag": "valid",
+   "kind": "agent_audit",
    "mandate_ref": "605d8e66b16b0cae072b494f23ab2eeee6870111e9401c3c436fa4825fcd67cc",
    "mandate_status": {
     "act_timestamp_ms": 1789166946390,
@@ -624,13 +718,18 @@
    },
    "record_id": "01a092a9-0856-7e60-b4ff-80cc9fcf2c54",
    "scope_deferred": false,
-   "timestamp": 1789166946.390353
+   "timestamp": 1789166946.390353,
+   "tool": "github"
   },
   {
    "act_timestamp_ms": 1789165786993,
+   "action": "commit",
+   "agent_id": "elara-build-agent",
+   "args_hash": "db6f3e771a5bbd63cebc08950bebb4c9635d50e362f07c81228a1a775a56918e",
    "authorized": true,
    "browser_verify": true,
    "flag": "valid",
+   "kind": "agent_audit",
    "mandate_ref": "2f1bf75c994da0c084fe471a7e9bb9551d9e114d815cd8c71be0aa111ed52299",
    "mandate_status": {
     "act_timestamp_ms": 1789165786993,
@@ -658,13 +757,18 @@
    },
    "record_id": "01a09297-5771-7ef2-834e-62dbc7e72e72",
    "scope_deferred": true,
-   "timestamp": 1789165786.993187
+   "timestamp": 1789165786.993187,
+   "tool": "git"
   },
   {
    "act_timestamp_ms": 1788764359145,
+   "action": "outreach-email",
+   "agent_id": "elara-maintainer",
+   "args_hash": "2179a7e5d607a4e61be8f826b83a4da8b229abcb216fbd5322adce309ba8555d",
    "authorized": true,
    "browser_verify": true,
    "flag": "valid",
+   "kind": "agent_audit",
    "mandate_ref": "605d8e66b16b0cae072b494f23ab2eeee6870111e9401c3c436fa4825fcd67cc",
    "mandate_status": {
     "act_timestamp_ms": 1788764359145,
@@ -692,13 +796,18 @@
    },
    "record_id": "01a07aaa-09e9-79a1-ba40-e859bbb4e218",
    "scope_deferred": false,
-   "timestamp": 1788764359.1457112
+   "timestamp": 1788764359.1457112,
+   "tool": "proton-bridge"
   },
   {
    "act_timestamp_ms": 1788761047582,
+   "action": "outreach-email",
+   "agent_id": "elara-maintainer",
+   "args_hash": "688a9dc5a614104df0d61a8cf1a2aa8d7d3f3b12c16082b7aa6988391e2f9129",
    "authorized": true,
    "browser_verify": true,
    "flag": "valid",
+   "kind": "agent_audit",
    "mandate_ref": "605d8e66b16b0cae072b494f23ab2eeee6870111e9401c3c436fa4825fcd67cc",
    "mandate_status": {
     "act_timestamp_ms": 1788761047582,
@@ -726,13 +835,18 @@
    },
    "record_id": "01a07a77-821e-7752-9a4a-3a8ea404174e",
    "scope_deferred": false,
-   "timestamp": 1788761047.5820193
+   "timestamp": 1788761047.5820193,
+   "tool": "proton-bridge"
   },
   {
    "act_timestamp_ms": 1788759665937,
+   "action": "venue-comment",
+   "agent_id": "elara-maintainer",
+   "args_hash": "856d3280a7c6e608c3113f06e16004d4286c215698724cd8c3543617c429f398",
    "authorized": true,
    "browser_verify": true,
    "flag": "valid",
+   "kind": "agent_audit",
    "mandate_ref": "605d8e66b16b0cae072b494f23ab2eeee6870111e9401c3c436fa4825fcd67cc",
    "mandate_status": {
     "act_timestamp_ms": 1788759665937,
@@ -760,13 +874,18 @@
    },
    "record_id": "01a07a62-6d11-7780-964a-5aec81a0938c",
    "scope_deferred": false,
-   "timestamp": 1788759665.9378026
+   "timestamp": 1788759665.9378026,
+   "tool": "github"
   },
   {
    "act_timestamp_ms": 1788739213803,
+   "action": "venue-comment",
+   "agent_id": "elara-maintainer",
+   "args_hash": "4f8cf51aecaa6d885d776dc0666768c005604459e93a24f58b0f1e437390a598",
    "authorized": true,
    "browser_verify": true,
    "flag": "valid",
+   "kind": "agent_audit",
    "mandate_ref": "605d8e66b16b0cae072b494f23ab2eeee6870111e9401c3c436fa4825fcd67cc",
    "mandate_status": {
     "act_timestamp_ms": 1788739213803,
@@ -794,13 +913,18 @@
    },
    "record_id": "01a0792a-59eb-7371-bc1e-9122db0728ba",
    "scope_deferred": false,
-   "timestamp": 1788739213.8034678
+   "timestamp": 1788739213.8034678,
+   "tool": "github-api"
   },
   {
    "act_timestamp_ms": 1788717069668,
+   "action": "commit",
+   "agent_id": "elara-build-agent",
+   "args_hash": "e5a87c3c1395241808d19dc0347394f727227000a732fef474bf395af8b341ee",
    "authorized": true,
    "browser_verify": true,
    "flag": "valid",
+   "kind": "agent_audit",
    "mandate_ref": "2f1bf75c994da0c084fe471a7e9bb9551d9e114d815cd8c71be0aa111ed52299",
    "mandate_status": {
     "act_timestamp_ms": 1788717069668,
@@ -828,13 +952,18 @@
    },
    "record_id": "01a077d8-7564-7e62-a60e-43d6ff958363",
    "scope_deferred": true,
-   "timestamp": 1788717069.6680908
+   "timestamp": 1788717069.6680908,
+   "tool": "git"
   },
   {
    "act_timestamp_ms": 1788713255631,
+   "action": "venue-comment",
+   "agent_id": "elara-maintainer",
+   "args_hash": "de7eee6d1e84d3a8646381e29280587d625ebe9fc0827096bbbebc18141f64a7",
    "authorized": true,
    "browser_verify": true,
    "flag": "valid",
+   "kind": "agent_audit",
    "mandate_ref": "605d8e66b16b0cae072b494f23ab2eeee6870111e9401c3c436fa4825fcd67cc",
    "mandate_status": {
     "act_timestamp_ms": 1788713255631,
@@ -862,13 +991,18 @@
    },
    "record_id": "01a0779e-42cf-7161-97aa-8508d9a8d6e3",
    "scope_deferred": false,
-   "timestamp": 1788713255.631359
+   "timestamp": 1788713255.631359,
+   "tool": "github-api"
   },
   {
    "act_timestamp_ms": 1788652813059,
+   "action": "venue-comment",
+   "agent_id": "elara-maintainer",
+   "args_hash": "de73175485b9af3fc78897fde341aad26564ff292ae6d89c8a21231cdf790371",
    "authorized": true,
    "browser_verify": true,
    "flag": "valid",
+   "kind": "agent_audit",
    "mandate_ref": "605d8e66b16b0cae072b494f23ab2eeee6870111e9401c3c436fa4825fcd67cc",
    "mandate_status": {
     "act_timestamp_ms": 1788652813059,
@@ -896,13 +1030,18 @@
    },
    "record_id": "01a07403-fb03-7253-99e8-9770f753fbea",
    "scope_deferred": false,
-   "timestamp": 1788652813.0592387
+   "timestamp": 1788652813.0592387,
+   "tool": "github-api"
   },
   {
    "act_timestamp_ms": 1788648513239,
+   "action": "outreach-email",
+   "agent_id": "elara-maintainer",
+   "args_hash": "1f7dc00d046fde183e1ac812cd8ab4a27f89b0c0ff97c34958e6a1d1bb79ddbe",
    "authorized": true,
    "browser_verify": true,
    "flag": "valid",
+   "kind": "agent_audit",
    "mandate_ref": "605d8e66b16b0cae072b494f23ab2eeee6870111e9401c3c436fa4825fcd67cc",
    "mandate_status": {
     "act_timestamp_ms": 1788648513239,
@@ -930,13 +1069,18 @@
    },
    "record_id": "01a073c2-5ed7-7cd0-aba6-10f817a9095a",
    "scope_deferred": false,
-   "timestamp": 1788648513.2390916
+   "timestamp": 1788648513.2390916,
+   "tool": "proton-bridge"
   },
   {
    "act_timestamp_ms": 1788644952229,
+   "action": "venue-comment",
+   "agent_id": "elara-maintainer",
+   "args_hash": "7cd502ee5453420792358d34b13af667986c8f4ae9de4ebfb1d673a29a20d1e0",
    "authorized": true,
    "browser_verify": true,
    "flag": "valid",
+   "kind": "agent_audit",
    "mandate_ref": "605d8e66b16b0cae072b494f23ab2eeee6870111e9401c3c436fa4825fcd67cc",
    "mandate_status": {
     "act_timestamp_ms": 1788644952229,
@@ -964,13 +1108,18 @@
    },
    "record_id": "01a0738c-08a5-7492-9caa-7d76ac2f088d",
    "scope_deferred": false,
-   "timestamp": 1788644952.229571
+   "timestamp": 1788644952.229571,
+   "tool": "github-api"
   },
   {
    "act_timestamp_ms": 1788643330030,
+   "action": "venue-comment",
+   "agent_id": "elara-maintainer",
+   "args_hash": "5dceeb751ce22b2c86c93d42b7fe4abc9c8cac8cf6c5263f9dff6f57caa55e77",
    "authorized": true,
    "browser_verify": true,
    "flag": "valid",
+   "kind": "agent_audit",
    "mandate_ref": "605d8e66b16b0cae072b494f23ab2eeee6870111e9401c3c436fa4825fcd67cc",
    "mandate_status": {
     "act_timestamp_ms": 1788643330030,
@@ -998,13 +1147,18 @@
    },
    "record_id": "01a07373-47ee-7e71-a5e3-2f72ecd93b23",
    "scope_deferred": false,
-   "timestamp": 1788643330.0302722
+   "timestamp": 1788643330.0302722,
+   "tool": "github-api"
   },
   {
    "act_timestamp_ms": 1788637101223,
+   "action": "venue-comment",
+   "agent_id": "elara-maintainer",
+   "args_hash": "21fe16628a68e4943a2a08ad362c84079282f402a2bd1a5d77c23d7309df0e0a",
    "authorized": true,
    "browser_verify": true,
    "flag": "valid",
+   "kind": "agent_audit",
    "mandate_ref": "605d8e66b16b0cae072b494f23ab2eeee6870111e9401c3c436fa4825fcd67cc",
    "mandate_status": {
     "act_timestamp_ms": 1788637101223,
@@ -1032,13 +1186,18 @@
    },
    "record_id": "01a07314-3ca7-7e81-9878-bd56db579beb",
    "scope_deferred": false,
-   "timestamp": 1788637101.2233264
+   "timestamp": 1788637101.2233264,
+   "tool": "github-api"
   },
   {
    "act_timestamp_ms": 1788630078998,
+   "action": "commit",
+   "agent_id": "elara-build-agent",
+   "args_hash": "23f0754308693d7633c2cb79271b55fab1d5bef0ae49552f3361454c1bb23e68",
    "authorized": true,
    "browser_verify": true,
    "flag": "valid",
+   "kind": "agent_audit",
    "mandate_ref": "2f1bf75c994da0c084fe471a7e9bb9551d9e114d815cd8c71be0aa111ed52299",
    "mandate_status": {
     "act_timestamp_ms": 1788630078998,
@@ -1066,13 +1225,18 @@
    },
    "record_id": "01a072a9-1616-74b2-9303-44aa4d0057d2",
    "scope_deferred": true,
-   "timestamp": 1788630078.9985669
+   "timestamp": 1788630078.9985669,
+   "tool": "git"
   },
   {
    "act_timestamp_ms": 1788614096416,
+   "action": "venue-comment",
+   "agent_id": "elara-maintainer",
+   "args_hash": "2e076fc394fe10d9664c4ee0bcb3f805b5fca5eea7ae290e56f19c207673a2ef",
    "authorized": true,
    "browser_verify": true,
    "flag": "valid",
+   "kind": "agent_audit",
    "mandate_ref": "605d8e66b16b0cae072b494f23ab2eeee6870111e9401c3c436fa4825fcd67cc",
    "mandate_status": {
     "act_timestamp_ms": 1788614096416,
@@ -1100,13 +1264,18 @@
    },
    "record_id": "01a071b5-3620-7330-ad2a-81abf067aa3e",
    "scope_deferred": false,
-   "timestamp": 1788614096.4168317
+   "timestamp": 1788614096.4168317,
+   "tool": "github-api"
   },
   {
    "act_timestamp_ms": 1788602444198,
+   "action": "venue-comment",
+   "agent_id": "elara-maintainer",
+   "args_hash": "30e62e408d39b6eea0469a0838a2d8fe85acb1d9ed48aa5212fa7b494ad0b640",
    "authorized": true,
    "browser_verify": true,
    "flag": "valid",
+   "kind": "agent_audit",
    "mandate_ref": "605d8e66b16b0cae072b494f23ab2eeee6870111e9401c3c436fa4825fcd67cc",
    "mandate_status": {
     "act_timestamp_ms": 1788602444198,
@@ -1134,13 +1303,18 @@
    },
    "record_id": "01a07103-69a6-7e70-9e4b-f8729aaa8c64",
    "scope_deferred": false,
-   "timestamp": 1788602444.198011
+   "timestamp": 1788602444.198011,
+   "tool": "github-api"
   },
   {
    "act_timestamp_ms": 1788600870123,
+   "action": "outreach-email",
+   "agent_id": "elara-maintainer",
+   "args_hash": "516f9cc2e241aa0d634b813d112f22847efd6b162885c0d1497c417159b010e2",
    "authorized": true,
    "browser_verify": true,
    "flag": "valid",
+   "kind": "agent_audit",
    "mandate_ref": "605d8e66b16b0cae072b494f23ab2eeee6870111e9401c3c436fa4825fcd67cc",
    "mandate_status": {
     "act_timestamp_ms": 1788600870123,
@@ -1168,13 +1342,18 @@
    },
    "record_id": "01a070eb-64eb-79c3-a218-f65257d26612",
    "scope_deferred": false,
-   "timestamp": 1788600870.123408
+   "timestamp": 1788600870.123408,
+   "tool": "proton-bridge"
   },
   {
    "act_timestamp_ms": 1788600865574,
+   "action": "outreach-email",
+   "agent_id": "elara-maintainer",
+   "args_hash": "241d5db12ab7457ee51aad8c5199ab7fed984cafbc126e4573a3c4784d05ab99",
    "authorized": true,
    "browser_verify": true,
    "flag": "valid",
+   "kind": "agent_audit",
    "mandate_ref": "605d8e66b16b0cae072b494f23ab2eeee6870111e9401c3c436fa4825fcd67cc",
    "mandate_status": {
     "act_timestamp_ms": 1788600865574,
@@ -1202,13 +1381,18 @@
    },
    "record_id": "01a070eb-5326-7cc3-a99d-549f7d16ee1d",
    "scope_deferred": false,
-   "timestamp": 1788600865.5749407
+   "timestamp": 1788600865.5749407,
+   "tool": "proton-bridge"
   },
   {
    "act_timestamp_ms": 1788596283567,
+   "action": "venue-comment",
+   "agent_id": "elara-maintainer",
+   "args_hash": "e27e84f3c81810da31eccf8ea37a3cb321f0e53548347e9b7b0a998a578b866c",
    "authorized": true,
    "browser_verify": true,
    "flag": "valid",
+   "kind": "agent_audit",
    "mandate_ref": "605d8e66b16b0cae072b494f23ab2eeee6870111e9401c3c436fa4825fcd67cc",
    "mandate_status": {
     "act_timestamp_ms": 1788596283567,
@@ -1236,13 +1420,18 @@
    },
    "record_id": "01a070a5-68af-76a2-a78d-61672c8f3ae2",
    "scope_deferred": false,
-   "timestamp": 1788596283.5675952
+   "timestamp": 1788596283.5675952,
+   "tool": "github-api"
   },
   {
    "act_timestamp_ms": 1788595962510,
+   "action": "outreach-email",
+   "agent_id": "elara-maintainer",
+   "args_hash": "05be7b5c1d187c2d6436a7c62b9286e1cfa0f8314b828bccd14887794ab9ac43",
    "authorized": true,
    "browser_verify": true,
    "flag": "valid",
+   "kind": "agent_audit",
    "mandate_ref": "605d8e66b16b0cae072b494f23ab2eeee6870111e9401c3c436fa4825fcd67cc",
    "mandate_status": {
     "act_timestamp_ms": 1788595962510,
@@ -1270,13 +1459,18 @@
    },
    "record_id": "01a070a0-828e-7d13-97e1-4cbce652655f",
    "scope_deferred": false,
-   "timestamp": 1788595962.5107155
+   "timestamp": 1788595962.5107155,
+   "tool": "proton-bridge"
   },
   {
    "act_timestamp_ms": 1788559583084,
+   "action": "outreach-email",
+   "agent_id": "elara-maintainer",
+   "args_hash": "b8f5f408be7d53c3f4be16f1dea603286795c4031423ec8916c7c3eda5f44e16",
    "authorized": true,
    "browser_verify": true,
    "flag": "valid",
+   "kind": "agent_audit",
    "mandate_ref": "605d8e66b16b0cae072b494f23ab2eeee6870111e9401c3c436fa4825fcd67cc",
    "mandate_status": {
     "act_timestamp_ms": 1788559583084,
@@ -1304,13 +1498,18 @@
    },
    "record_id": "01a06e75-676c-7963-8b7f-0c0b4ab1f948",
    "scope_deferred": false,
-   "timestamp": 1788559583.0841105
+   "timestamp": 1788559583.0841105,
+   "tool": "proton-bridge"
   },
   {
    "act_timestamp_ms": 1788543519089,
+   "action": "commit",
+   "agent_id": "elara-build-agent",
+   "args_hash": "d2b45279990b39e3cf23603fd79acc1efc6a80d8cdf0171cb3c2d735274245dd",
    "authorized": true,
    "browser_verify": true,
    "flag": "valid",
+   "kind": "agent_audit",
    "mandate_ref": "2f1bf75c994da0c084fe471a7e9bb9551d9e114d815cd8c71be0aa111ed52299",
    "mandate_status": {
     "act_timestamp_ms": 1788543519089,
@@ -1338,13 +1537,18 @@
    },
    "record_id": "01a06d80-4971-7cc2-8f5f-10b35952547e",
    "scope_deferred": true,
-   "timestamp": 1788543519.0898407
+   "timestamp": 1788543519.0898407,
+   "tool": "git"
   },
   {
    "act_timestamp_ms": 1788422579356,
+   "action": "commit",
+   "agent_id": "elara-build-agent",
+   "args_hash": "8763d5a86a247350c82de225a11933bfbbb6ca11388a3ded39575dceddbf895e",
    "authorized": true,
    "browser_verify": true,
    "flag": "valid",
+   "kind": "agent_audit",
    "mandate_ref": "2f1bf75c994da0c084fe471a7e9bb9551d9e114d815cd8c71be0aa111ed52299",
    "mandate_status": {
     "act_timestamp_ms": 1788422579356,
@@ -1372,10 +1576,403 @@
    },
    "record_id": "01a0664a-e49c-7a12-9fdd-96fdcfba3f27",
    "scope_deferred": true,
-   "timestamp": 1788422579.356118
+   "timestamp": 1788422579.356118,
+   "tool": "git"
+  },
+  {
+   "act_timestamp_ms": 1788347656990,
+   "action": "commit",
+   "agent_id": "elara-build-agent",
+   "args_hash": "dbb2d919003e9ad2264d047e74e588e0494c9e2aa6ee239a6fbb06b526a8a991",
+   "authorized": true,
+   "browser_verify": true,
+   "flag": "valid",
+   "kind": "agent_audit",
+   "mandate_ref": "2f1bf75c994da0c084fe471a7e9bb9551d9e114d815cd8c71be0aa111ed52299",
+   "mandate_status": {
+    "act_timestamp_ms": 1788347656990,
+    "agent_identity_hash": "2b743c00f1baa0b614243c63e24086a896f988d00f13b3a29f183c7befb3e78e",
+    "authoritative_complete": true,
+    "authorized": true,
+    "chain_depth": 1,
+    "flag": "valid",
+    "index_entry_present": true,
+    "is_mandate_act": true,
+    "lineage": [
+     {
+      "agent_identity_hash": "2b743c00f1baa0b614243c63e24086a896f988d00f13b3a29f183c7befb3e78e",
+      "hop_index": 0,
+      "mandate_id": "2f1bf75c994da0c084fe471a7e9bb9551d9e114d815cd8c71be0aa111ed52299",
+      "principal_identity_hash": "7b4f7b17ca76937be28f01924ddc773840d264d67fad56a0280ed1ac5ac77631"
+     }
+    ],
+    "lineage_note": "leaf\u2192root verified delegation chain; hop 0's principal is this act's authorizer, ancestors are the verified chain of authority \u2014 not accused",
+    "mandate_ref": "2f1bf75c994da0c084fe471a7e9bb9551d9e114d815cd8c71be0aa111ed52299",
+    "principal_identity_hash": "7b4f7b17ca76937be28f01924ddc773840d264d67fad56a0280ed1ac5ac77631",
+    "record_id": "01a061d3-ab1e-7f83-bfc5-b1b10af009ab",
+    "record_present": true,
+    "scope_deferred": true
+   },
+   "record_id": "01a061d3-ab1e-7f83-bfc5-b1b10af009ab",
+   "scope_deferred": true,
+   "timestamp": 1788347656.9907925,
+   "tool": "git"
+  },
+  {
+   "act_timestamp_ms": 1788346336487,
+   "action": "commit",
+   "agent_id": "elara-build-agent",
+   "args_hash": "841d66b83cc1e8a3ab6088aaa5b5a87b1ce892e2ad66bce35c7ac3ee5522fa55",
+   "authorized": true,
+   "browser_verify": true,
+   "flag": "valid",
+   "kind": "agent_audit",
+   "mandate_ref": "2f1bf75c994da0c084fe471a7e9bb9551d9e114d815cd8c71be0aa111ed52299",
+   "mandate_status": {
+    "act_timestamp_ms": 1788346336487,
+    "agent_identity_hash": "2b743c00f1baa0b614243c63e24086a896f988d00f13b3a29f183c7befb3e78e",
+    "authoritative_complete": true,
+    "authorized": true,
+    "chain_depth": 1,
+    "flag": "valid",
+    "index_entry_present": true,
+    "is_mandate_act": true,
+    "lineage": [
+     {
+      "agent_identity_hash": "2b743c00f1baa0b614243c63e24086a896f988d00f13b3a29f183c7befb3e78e",
+      "hop_index": 0,
+      "mandate_id": "2f1bf75c994da0c084fe471a7e9bb9551d9e114d815cd8c71be0aa111ed52299",
+      "principal_identity_hash": "7b4f7b17ca76937be28f01924ddc773840d264d67fad56a0280ed1ac5ac77631"
+     }
+    ],
+    "lineage_note": "leaf\u2192root verified delegation chain; hop 0's principal is this act's authorizer, ancestors are the verified chain of authority \u2014 not accused",
+    "mandate_ref": "2f1bf75c994da0c084fe471a7e9bb9551d9e114d815cd8c71be0aa111ed52299",
+    "principal_identity_hash": "7b4f7b17ca76937be28f01924ddc773840d264d67fad56a0280ed1ac5ac77631",
+    "record_id": "01a061bf-84e7-7cf2-9250-6f6f7ff8784a",
+    "record_present": true,
+    "scope_deferred": true
+   },
+   "record_id": "01a061bf-84e7-7cf2-9250-6f6f7ff8784a",
+   "scope_deferred": true,
+   "timestamp": 1788346336.4875755,
+   "tool": "git"
+  },
+  {
+   "act_timestamp_ms": 1788346097297,
+   "action": "commit",
+   "agent_id": "elara-build-agent",
+   "args_hash": "e8b18bb994723d6ce64b4861dd20bbab2f9a902e9ded4577bc61e4c7e849a0fa",
+   "authorized": true,
+   "browser_verify": true,
+   "flag": "valid",
+   "kind": "agent_audit",
+   "mandate_ref": "2f1bf75c994da0c084fe471a7e9bb9551d9e114d815cd8c71be0aa111ed52299",
+   "mandate_status": {
+    "act_timestamp_ms": 1788346097297,
+    "agent_identity_hash": "2b743c00f1baa0b614243c63e24086a896f988d00f13b3a29f183c7befb3e78e",
+    "authoritative_complete": true,
+    "authorized": true,
+    "chain_depth": 1,
+    "flag": "valid",
+    "index_entry_present": true,
+    "is_mandate_act": true,
+    "lineage": [
+     {
+      "agent_identity_hash": "2b743c00f1baa0b614243c63e24086a896f988d00f13b3a29f183c7befb3e78e",
+      "hop_index": 0,
+      "mandate_id": "2f1bf75c994da0c084fe471a7e9bb9551d9e114d815cd8c71be0aa111ed52299",
+      "principal_identity_hash": "7b4f7b17ca76937be28f01924ddc773840d264d67fad56a0280ed1ac5ac77631"
+     }
+    ],
+    "lineage_note": "leaf\u2192root verified delegation chain; hop 0's principal is this act's authorizer, ancestors are the verified chain of authority \u2014 not accused",
+    "mandate_ref": "2f1bf75c994da0c084fe471a7e9bb9551d9e114d815cd8c71be0aa111ed52299",
+    "principal_identity_hash": "7b4f7b17ca76937be28f01924ddc773840d264d67fad56a0280ed1ac5ac77631",
+    "record_id": "01a061bb-de91-7112-9daf-ba002e5f7113",
+    "record_present": true,
+    "scope_deferred": true
+   },
+   "record_id": "01a061bb-de91-7112-9daf-ba002e5f7113",
+   "scope_deferred": true,
+   "timestamp": 1788346097.297405,
+   "tool": "git"
+  },
+  {
+   "act_timestamp_ms": 1788346043939,
+   "action": "commit",
+   "agent_id": "elara-build-agent",
+   "args_hash": "f225969be2baf2244e047b517c26dc499027e1e910d3c7f4fd850164fad827f1",
+   "authorized": true,
+   "browser_verify": true,
+   "flag": "valid",
+   "kind": "agent_audit",
+   "mandate_ref": "2f1bf75c994da0c084fe471a7e9bb9551d9e114d815cd8c71be0aa111ed52299",
+   "mandate_status": {
+    "act_timestamp_ms": 1788346043939,
+    "agent_identity_hash": "2b743c00f1baa0b614243c63e24086a896f988d00f13b3a29f183c7befb3e78e",
+    "authoritative_complete": true,
+    "authorized": true,
+    "chain_depth": 1,
+    "flag": "valid",
+    "index_entry_present": true,
+    "is_mandate_act": true,
+    "lineage": [
+     {
+      "agent_identity_hash": "2b743c00f1baa0b614243c63e24086a896f988d00f13b3a29f183c7befb3e78e",
+      "hop_index": 0,
+      "mandate_id": "2f1bf75c994da0c084fe471a7e9bb9551d9e114d815cd8c71be0aa111ed52299",
+      "principal_identity_hash": "7b4f7b17ca76937be28f01924ddc773840d264d67fad56a0280ed1ac5ac77631"
+     }
+    ],
+    "lineage_note": "leaf\u2192root verified delegation chain; hop 0's principal is this act's authorizer, ancestors are the verified chain of authority \u2014 not accused",
+    "mandate_ref": "2f1bf75c994da0c084fe471a7e9bb9551d9e114d815cd8c71be0aa111ed52299",
+    "principal_identity_hash": "7b4f7b17ca76937be28f01924ddc773840d264d67fad56a0280ed1ac5ac77631",
+    "record_id": "01a061bb-0e23-7353-9193-504d0648b85d",
+    "record_present": true,
+    "scope_deferred": true
+   },
+   "record_id": "01a061bb-0e23-7353-9193-504d0648b85d",
+   "scope_deferred": true,
+   "timestamp": 1788346043.9396424,
+   "tool": "git"
+  },
+  {
+   "act_timestamp_ms": 1788344702628,
+   "action": "commit",
+   "agent_id": "elara-build-agent",
+   "args_hash": "3188ce40493a980123d996f41c2511c72813451ca67f4af323e7f05ed8a8c264",
+   "authorized": true,
+   "browser_verify": true,
+   "flag": "valid",
+   "kind": "agent_audit",
+   "mandate_ref": "2f1bf75c994da0c084fe471a7e9bb9551d9e114d815cd8c71be0aa111ed52299",
+   "mandate_status": {
+    "act_timestamp_ms": 1788344702628,
+    "agent_identity_hash": "2b743c00f1baa0b614243c63e24086a896f988d00f13b3a29f183c7befb3e78e",
+    "authoritative_complete": true,
+    "authorized": true,
+    "chain_depth": 1,
+    "flag": "valid",
+    "index_entry_present": true,
+    "is_mandate_act": true,
+    "lineage": [
+     {
+      "agent_identity_hash": "2b743c00f1baa0b614243c63e24086a896f988d00f13b3a29f183c7befb3e78e",
+      "hop_index": 0,
+      "mandate_id": "2f1bf75c994da0c084fe471a7e9bb9551d9e114d815cd8c71be0aa111ed52299",
+      "principal_identity_hash": "7b4f7b17ca76937be28f01924ddc773840d264d67fad56a0280ed1ac5ac77631"
+     }
+    ],
+    "lineage_note": "leaf\u2192root verified delegation chain; hop 0's principal is this act's authorizer, ancestors are the verified chain of authority \u2014 not accused",
+    "mandate_ref": "2f1bf75c994da0c084fe471a7e9bb9551d9e114d815cd8c71be0aa111ed52299",
+    "principal_identity_hash": "7b4f7b17ca76937be28f01924ddc773840d264d67fad56a0280ed1ac5ac77631",
+    "record_id": "01a061a6-96a4-7b40-870d-5cb015e265ad",
+    "record_present": true,
+    "scope_deferred": true
+   },
+   "record_id": "01a061a6-96a4-7b40-870d-5cb015e265ad",
+   "scope_deferred": true,
+   "timestamp": 1788344702.6283371,
+   "tool": "git"
+  },
+  {
+   "act_timestamp_ms": 1788344493142,
+   "action": "commit",
+   "agent_id": "elara-build-agent",
+   "args_hash": "ed1397098b6a33e4acfb41fdf09589af3c7a1b0108dc48b902c100173311691a",
+   "authorized": true,
+   "browser_verify": true,
+   "flag": "valid",
+   "kind": "agent_audit",
+   "mandate_ref": "2f1bf75c994da0c084fe471a7e9bb9551d9e114d815cd8c71be0aa111ed52299",
+   "mandate_status": {
+    "act_timestamp_ms": 1788344493142,
+    "agent_identity_hash": "2b743c00f1baa0b614243c63e24086a896f988d00f13b3a29f183c7befb3e78e",
+    "authoritative_complete": true,
+    "authorized": true,
+    "chain_depth": 1,
+    "flag": "valid",
+    "index_entry_present": true,
+    "is_mandate_act": true,
+    "lineage": [
+     {
+      "agent_identity_hash": "2b743c00f1baa0b614243c63e24086a896f988d00f13b3a29f183c7befb3e78e",
+      "hop_index": 0,
+      "mandate_id": "2f1bf75c994da0c084fe471a7e9bb9551d9e114d815cd8c71be0aa111ed52299",
+      "principal_identity_hash": "7b4f7b17ca76937be28f01924ddc773840d264d67fad56a0280ed1ac5ac77631"
+     }
+    ],
+    "lineage_note": "leaf\u2192root verified delegation chain; hop 0's principal is this act's authorizer, ancestors are the verified chain of authority \u2014 not accused",
+    "mandate_ref": "2f1bf75c994da0c084fe471a7e9bb9551d9e114d815cd8c71be0aa111ed52299",
+    "principal_identity_hash": "7b4f7b17ca76937be28f01924ddc773840d264d67fad56a0280ed1ac5ac77631",
+    "record_id": "01a061a3-6456-7911-8178-d0f1129a1aaf",
+    "record_present": true,
+    "scope_deferred": true
+   },
+   "record_id": "01a061a3-6456-7911-8178-d0f1129a1aaf",
+   "scope_deferred": true,
+   "timestamp": 1788344493.142306,
+   "tool": "git"
+  },
+  {
+   "act_timestamp_ms": 1788342452429,
+   "action": "commit",
+   "agent_id": "elara-build-agent",
+   "args_hash": "2b432a32132bcc987463d462c446401704826303068e139a1a1059f0238dd5d0",
+   "authorized": true,
+   "browser_verify": true,
+   "flag": "valid",
+   "kind": "agent_audit",
+   "mandate_ref": "2f1bf75c994da0c084fe471a7e9bb9551d9e114d815cd8c71be0aa111ed52299",
+   "mandate_status": {
+    "act_timestamp_ms": 1788342452429,
+    "agent_identity_hash": "2b743c00f1baa0b614243c63e24086a896f988d00f13b3a29f183c7befb3e78e",
+    "authoritative_complete": true,
+    "authorized": true,
+    "chain_depth": 1,
+    "flag": "valid",
+    "index_entry_present": true,
+    "is_mandate_act": true,
+    "lineage": [
+     {
+      "agent_identity_hash": "2b743c00f1baa0b614243c63e24086a896f988d00f13b3a29f183c7befb3e78e",
+      "hop_index": 0,
+      "mandate_id": "2f1bf75c994da0c084fe471a7e9bb9551d9e114d815cd8c71be0aa111ed52299",
+      "principal_identity_hash": "7b4f7b17ca76937be28f01924ddc773840d264d67fad56a0280ed1ac5ac77631"
+     }
+    ],
+    "lineage_note": "leaf\u2192root verified delegation chain; hop 0's principal is this act's authorizer, ancestors are the verified chain of authority \u2014 not accused",
+    "mandate_ref": "2f1bf75c994da0c084fe471a7e9bb9551d9e114d815cd8c71be0aa111ed52299",
+    "principal_identity_hash": "7b4f7b17ca76937be28f01924ddc773840d264d67fad56a0280ed1ac5ac77631",
+    "record_id": "01a06184-40cd-7951-8a46-6bc716e371d9",
+    "record_present": true,
+    "scope_deferred": true
+   },
+   "record_id": "01a06184-40cd-7951-8a46-6bc716e371d9",
+   "scope_deferred": true,
+   "timestamp": 1788342452.429151,
+   "tool": "git"
+  },
+  {
+   "act_timestamp_ms": 1788336315243,
+   "action": "commit",
+   "agent_id": "elara-build-agent",
+   "args_hash": "6f02bc59c34157ca67d1588c0032af31191b7a26822b26a03e0747932a14bc60",
+   "authorized": true,
+   "browser_verify": true,
+   "flag": "valid",
+   "kind": "agent_audit",
+   "mandate_ref": "2f1bf75c994da0c084fe471a7e9bb9551d9e114d815cd8c71be0aa111ed52299",
+   "mandate_status": {
+    "act_timestamp_ms": 1788336315243,
+    "agent_identity_hash": "2b743c00f1baa0b614243c63e24086a896f988d00f13b3a29f183c7befb3e78e",
+    "authoritative_complete": true,
+    "authorized": true,
+    "chain_depth": 1,
+    "flag": "valid",
+    "index_entry_present": true,
+    "is_mandate_act": true,
+    "lineage": [
+     {
+      "agent_identity_hash": "2b743c00f1baa0b614243c63e24086a896f988d00f13b3a29f183c7befb3e78e",
+      "hop_index": 0,
+      "mandate_id": "2f1bf75c994da0c084fe471a7e9bb9551d9e114d815cd8c71be0aa111ed52299",
+      "principal_identity_hash": "7b4f7b17ca76937be28f01924ddc773840d264d67fad56a0280ed1ac5ac77631"
+     }
+    ],
+    "lineage_note": "leaf\u2192root verified delegation chain; hop 0's principal is this act's authorizer, ancestors are the verified chain of authority \u2014 not accused",
+    "mandate_ref": "2f1bf75c994da0c084fe471a7e9bb9551d9e114d815cd8c71be0aa111ed52299",
+    "principal_identity_hash": "7b4f7b17ca76937be28f01924ddc773840d264d67fad56a0280ed1ac5ac77631",
+    "record_id": "01a06126-9b6b-7c71-9538-11352d820042",
+    "record_present": true,
+    "scope_deferred": true
+   },
+   "record_id": "01a06126-9b6b-7c71-9538-11352d820042",
+   "scope_deferred": true,
+   "timestamp": 1788336315.2433004,
+   "tool": "git"
+  },
+  {
+   "act_timestamp_ms": 1788336032596,
+   "action": "commit",
+   "agent_id": "elara-build-agent",
+   "args_hash": "9777333670b059f7f872122987e765dacb27d3d210fae8db04ba240a970fa71d",
+   "authorized": true,
+   "browser_verify": true,
+   "flag": "valid",
+   "kind": "agent_audit",
+   "mandate_ref": "2f1bf75c994da0c084fe471a7e9bb9551d9e114d815cd8c71be0aa111ed52299",
+   "mandate_status": {
+    "act_timestamp_ms": 1788336032596,
+    "agent_identity_hash": "2b743c00f1baa0b614243c63e24086a896f988d00f13b3a29f183c7befb3e78e",
+    "authoritative_complete": true,
+    "authorized": true,
+    "chain_depth": 1,
+    "flag": "valid",
+    "index_entry_present": true,
+    "is_mandate_act": true,
+    "lineage": [
+     {
+      "agent_identity_hash": "2b743c00f1baa0b614243c63e24086a896f988d00f13b3a29f183c7befb3e78e",
+      "hop_index": 0,
+      "mandate_id": "2f1bf75c994da0c084fe471a7e9bb9551d9e114d815cd8c71be0aa111ed52299",
+      "principal_identity_hash": "7b4f7b17ca76937be28f01924ddc773840d264d67fad56a0280ed1ac5ac77631"
+     }
+    ],
+    "lineage_note": "leaf\u2192root verified delegation chain; hop 0's principal is this act's authorizer, ancestors are the verified chain of authority \u2014 not accused",
+    "mandate_ref": "2f1bf75c994da0c084fe471a7e9bb9551d9e114d815cd8c71be0aa111ed52299",
+    "principal_identity_hash": "7b4f7b17ca76937be28f01924ddc773840d264d67fad56a0280ed1ac5ac77631",
+    "record_id": "01a06122-4b54-7930-bd7d-497d0dabd77e",
+    "record_present": true,
+    "scope_deferred": true
+   },
+   "record_id": "01a06122-4b54-7930-bd7d-497d0dabd77e",
+   "scope_deferred": true,
+   "timestamp": 1788336032.59624,
+   "tool": "git"
+  },
+  {
+   "act_timestamp_ms": 1788328209615,
+   "action": "commit",
+   "agent_id": "elara-build-agent",
+   "archived": false,
+   "args_hash": "48d78d1a4d0bd3586ed73237eeaf1a2f238d35ffa2cb7d8e0888df5e004181ad",
+   "authorized": true,
+   "browser_verify": true,
+   "flag": "valid",
+   "kind": "agent_audit",
+   "mandate_ref": "2f1bf75c994da0c084fe471a7e9bb9551d9e114d815cd8c71be0aa111ed52299",
+   "mandate_status": {
+    "act_timestamp_ms": 1788328209615,
+    "agent_identity_hash": "2b743c00f1baa0b614243c63e24086a896f988d00f13b3a29f183c7befb3e78e",
+    "authoritative_complete": true,
+    "authorized": true,
+    "chain_depth": 1,
+    "flag": "valid",
+    "index_entry_present": true,
+    "is_mandate_act": true,
+    "lineage": [
+     {
+      "agent_identity_hash": "2b743c00f1baa0b614243c63e24086a896f988d00f13b3a29f183c7befb3e78e",
+      "hop_index": 0,
+      "mandate_id": "2f1bf75c994da0c084fe471a7e9bb9551d9e114d815cd8c71be0aa111ed52299",
+      "principal_identity_hash": "7b4f7b17ca76937be28f01924ddc773840d264d67fad56a0280ed1ac5ac77631"
+     }
+    ],
+    "lineage_note": "leaf\u2192root verified delegation chain; hop 0's principal is this act's authorizer, ancestors are the verified chain of authority \u2014 not accused",
+    "mandate_ref": "2f1bf75c994da0c084fe471a7e9bb9551d9e114d815cd8c71be0aa111ed52299",
+    "principal_identity_hash": "7b4f7b17ca76937be28f01924ddc773840d264d67fad56a0280ed1ac5ac77631",
+    "record_id": "01a060aa-eccf-7502-a10d-55b1b3994d58",
+    "record_present": true,
+    "scope_deferred": true
+   },
+   "record_id": "01a060aa-eccf-7502-a10d-55b1b3994d58",
+   "scope_deferred": true,
+   "timestamp": 1788328209.6156867,
+   "tool": "git"
   },
   {
    "act_timestamp_ms": 1788327989479,
+   "archived": false,
    "authorized": true,
    "browser_verify": true,
    "flag": "valid",
@@ -1410,6 +2007,7 @@
   },
   {
    "act_timestamp_ms": 1788326567058,
+   "archived": false,
    "authorized": true,
    "browser_verify": true,
    "flag": "valid",
@@ -1444,6 +2042,7 @@
   },
   {
    "act_timestamp_ms": 1788326451482,
+   "archived": false,
    "authorized": true,
    "browser_verify": true,
    "flag": "valid",
@@ -1478,6 +2077,7 @@
   },
   {
    "act_timestamp_ms": 1788326100437,
+   "archived": false,
    "authorized": true,
    "browser_verify": true,
    "flag": "valid",
@@ -1512,6 +2112,7 @@
   },
   {
    "act_timestamp_ms": 1788319619059,
+   "archived": false,
    "authorized": true,
    "browser_verify": true,
    "flag": "valid",
@@ -1546,6 +2147,7 @@
   },
   {
    "act_timestamp_ms": 1788319459272,
+   "archived": false,
    "authorized": true,
    "browser_verify": true,
    "flag": "valid",
@@ -1580,6 +2182,7 @@
   },
   {
    "act_timestamp_ms": 1788318709760,
+   "archived": false,
    "authorized": true,
    "browser_verify": true,
    "flag": "valid",
@@ -1614,6 +2217,7 @@
   },
   {
    "act_timestamp_ms": 1788315993828,
+   "archived": false,
    "authorized": true,
    "browser_verify": true,
    "flag": "valid",
@@ -1648,6 +2252,7 @@
   },
   {
    "act_timestamp_ms": 1788309442507,
+   "archived": false,
    "authorized": true,
    "browser_verify": true,
    "flag": "valid",
@@ -40858,8 +41463,8 @@
  ],
  "archived_count": 50,
  "authoritative_complete": false,
- "count": 1077,
- "generated_at_utc": "2026-09-25T16:00:06Z",
+ "count": 1087,
+ "generated_at_utc": "2026-09-26T04:00:05Z",
  "mandate_id": "605d8e66b16b0cae072b494f23ab2eeee6870111e9401c3c436fa4825fcd67cc",
  "note": "Static convenience snapshot of the PUBLIC mandate-acts feed. Not a trust root: check any live row against a mesh node via /record/{record_id} and /mandate/status/{record_id}, or fully offline with elara-verify. Rows marked archived have aged out of the node's bounded hot tier (records prune into sealed history by design) \u2014 the live routes no longer serve them; their offline envelopes, where present, remain verifiable."
 }

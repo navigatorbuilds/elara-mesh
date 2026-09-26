@@ -1,15 +1,12 @@
 //! NIST ACVP SLH-DSA-SHAKE-192f verification vectors (FIPS 205, INTERNAL
-//! interface). Companion to acvp_slhdsa192f.rs (the SHA2-192f divergence pin):
-//! SHAKE H_msg is category-uniform (SHAKE256 for all sets), so the SHA2
-//! category-3 SHA-512 bug does not apply — this test checks whether the
-//! backend's SHAKE path IS FIPS 205-conformant, which is migration option (b)
-//! in internal design notes. Passing = option (b) is
-//! evidence-backed: moving the second signature leg to SLH-DSA-SHAKE-192f
-//! yields standard-conformant verification without waiting on an upstream fix
-//! (still a signing-domain change — suite-transition rules apply regardless).
+//! interface), run against both copies of `lattice-slh-dsa` (see
+//! acvp_slhdsa192f.rs). SHAKE H_msg is category-uniform (SHAKE256 for all
+//! sets), so the legacy copy's SHA2 category-3 SHA-512 bug does not apply
+//! here: both copies must match NIST.
 
 use slh_dsa::params::SLH_DSA_SHAKE_192F;
-use slh_dsa::safe_api::SlhDsaSignature;
+use slh_dsa_legacy::params::SLH_DSA_SHAKE_192F as LEGACY_SHAKE_192F;
+use slh_dsa_legacy::safe_api::SlhDsaSignature as LegacySignature;
 
 fn unhex(s: &str) -> Vec<u8> {
     assert!(s.len().is_multiple_of(2), "odd hex length");
@@ -32,8 +29,10 @@ fn acvp_slhdsa_shake_192f_sigver_internal() {
         assert_eq!(f.len(), 6, "malformed vector line");
         let (tc, expect) = (f[0], f[1] == "P");
         let (pk, msg, sig) = (unhex(f[3]), unhex(f[4]), unhex(f[5]));
-        let got = SlhDsaSignature::verify(&sig, &pk, &msg, SLH_DSA_SHAKE_192F);
-        assert_eq!(got, expect, "ACVP tc{tc} ({}): got {got}", f[2]);
+        let legacy = LegacySignature::verify(&sig, &pk, &msg, LEGACY_SHAKE_192F);
+        assert_eq!(legacy, expect, "legacy: ACVP tc{tc} ({}): got {legacy}", f[2]);
+        let got = slh_dsa::verify_internal(&pk, &sig, &msg, SLH_DSA_SHAKE_192F);
+        assert_eq!(got, expect, "FIPS 205: ACVP tc{tc} ({}): got {got}", f[2]);
         ran += 1;
     }
     assert_eq!(ran, 4, "vector file truncated: {ran}/4 cases ran");

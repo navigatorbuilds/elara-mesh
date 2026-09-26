@@ -9,16 +9,17 @@
 use crate::RecordError;
 use dilithium::safe_api::{DilithiumKeyPair, DilithiumSignature};
 use dilithium::params::DilithiumMode;
-use slh_dsa::safe_api::SlhDsaSignature;
-use slh_dsa::params::SLH_DSA_SHA2_192F;
+use slh_dsa_legacy::safe_api::SlhDsaSignature;
+use slh_dsa_legacy::params::SLH_DSA_SHA2_192F;
 
 const MODE: DilithiumMode = DilithiumMode::Dilithium3;
 
 /// Algorithm ID for ML-DSA-65 (FIPS 204) — Dilithium3. Canonical definition —
 /// the node's `crypto` module re-exports these; record wire bytes carry them.
 pub const ALG_DILITHIUM3: u8 = 0x01;
-/// Algorithm ID for SPHINCS+-SHA2-192f. The backend hashes with SHA-256 throughout, where
-/// FIPS 205 requires SHA-512 at this category, so this is not FIPS 205 SLH-DSA-SHA2-192f
+/// Algorithm ID for SPHINCS+-SHA2-192f. The backend (`lattice-slh-dsa` =0.3.3, the
+/// `slh_dsa_legacy` dependency) hashes with SHA-256 throughout, where FIPS 205 requires
+/// SHA-512 at this category, so this is not FIPS 205 SLH-DSA-SHA2-192f
 /// (`tests/acvp_slhdsa192f.rs` pins it).
 pub const ALG_SPHINCS_SHA2_192F: u8 = 0x02;
 
@@ -72,11 +73,10 @@ pub fn mldsa44_verify(message: &[u8], signature: &[u8], public_key: &[u8]) -> Re
 mod tests {
     use super::*;
 
-    /// Committed verify KATs (public data only: message / public key / signature).
-    /// Regenerate with `cargo test -p elara-record --lib -- --ignored gen_pqc_kat_vectors --nocapture`
-    /// and paste the output over src/pqc_kat.hex — needed only if the fixture is
-    /// ever lost; the vectors themselves must stay stable across dep upgrades
-    /// (that stability is what the KAT tests pin).
+    /// Committed verify KATs (public data only: message / public key / signature),
+    /// generated 2026-07-10 with dilithium-rs 0.2.0 and lattice-slh-dsa 0.3.3 and
+    /// frozen: they are never regenerated, since their stability across dep
+    /// upgrades is what the KAT tests pin. The SLH-DSA vector is a legacy 0x02 leg.
     fn kat(key: &str) -> Vec<u8> {
         const KAT: &str = include_str!("pqc_kat.hex");
         let prefix = format!("{key}=");
@@ -211,24 +211,16 @@ mod tests {
         }
     }
 
-    /// One-off fixture generator for src/pqc_kat.hex — run manually, never in CI:
-    /// `cargo test -p elara-record --lib -- --ignored gen_pqc_kat_vectors --nocapture`
     #[test]
-    #[ignore]
-    fn gen_pqc_kat_vectors() {
-        use slh_dsa::safe_api::SlhDsaKeyPair;
-        let msg = b"elara-record pqc verify KAT v1 (public data only)";
-        let dkp = DilithiumKeyPair::generate(MODE).expect("mldsa keygen");
-        let dsig = dkp.sign(msg, b"").expect("mldsa sign");
-        let skp = SlhDsaKeyPair::generate(SLH_DSA_SHA2_192F).expect("slhdsa keygen");
-        let ssig = skp.sign(msg).expect("slhdsa sign");
-        println!("# elara-record pqc verify KATs — PUBLIC data only (message/public-key/signature).");
-        println!("# Generated once by gen_pqc_kat_vectors; stability across dep upgrades is the pin.");
-        println!("mldsa65.msg={}", hex::encode(msg));
-        println!("mldsa65.pk={}", hex::encode(dkp.public_key()));
-        println!("mldsa65.sig={}", hex::encode(dsig.as_bytes()));
-        println!("slhdsa192f.msg={}", hex::encode(msg));
-        println!("slhdsa192f.pk={}", hex::encode(skp.public_key()));
-        println!("slhdsa192f.sig={}", hex::encode(ssig.to_bytes()));
+    fn slhdsa192f_kat_is_a_legacy_leg() {
+        // The committed vector is a 0x02 leg: the legacy verifier accepts it, and
+        // final FIPS 205 rejects it on both interfaces, since its H_msg differs.
+        let msg = kat("slhdsa192f.msg");
+        let pk = kat("slhdsa192f.pk");
+        let sig = kat("slhdsa192f.sig");
+        assert!(sphincs_verify(&msg, &sig, &pk).unwrap());
+        let fips205 = slh_dsa::params::SLH_DSA_SHA2_192F;
+        assert!(!slh_dsa::verify_internal(&pk, &sig, &msg, fips205));
+        assert!(!slh_dsa::verify(&pk, &sig, &msg, fips205));
     }
 }

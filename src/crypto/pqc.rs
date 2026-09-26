@@ -6,7 +6,8 @@
 //! Key/signature sizes (ML-DSA-65): pk=1952, sk=4032, sig=3309 bytes.
 //! Compatible with PQClean outputs — same FIPS 204 standard.
 //!
-//! SPHINCS+: pure Rust via `lattice-slh-dsa` crate. Works on all platforms.
+//! SPHINCS+: pure Rust via `lattice-slh-dsa` =0.3.3 (`slh_dsa_legacy`, not FIPS 205).
+//! Works on all platforms.
 //! Profile A = dual-sig (Dilithium3 + SPHINCS+). Profile B = Dilithium3 only.
 
 //!
@@ -111,8 +112,8 @@ pub fn dilithium3_sign_with_pk(message: &[u8], secret_key: &[u8], public_key: &[
 
 // ─── SPHINCS+-SHA2-192f, not FIPS 205 (pure Rust, all platforms) ───────────
 
-use slh_dsa::safe_api::SlhDsaKeyPair;
-use slh_dsa::params::SLH_DSA_SHA2_192F;
+use slh_dsa_legacy::safe_api::SlhDsaKeyPair;
+use slh_dsa_legacy::params::SLH_DSA_SHA2_192F;
 
 pub fn sphincs_keygen() -> Result<SphincsKeypair> {
     let kp = SlhDsaKeyPair::generate(SLH_DSA_SHA2_192F)
@@ -124,12 +125,40 @@ pub fn sphincs_keygen() -> Result<SphincsKeypair> {
 }
 
 /// Sign with both secret key and public key.
+///
+/// Refuses a key pair that does not hang together rather than emit a leg every
+/// peer rejects: the public root is recomputed from the secret seeds, and the
+/// signature is verified under `public_key` before it is returned. A secret key
+/// loaded by a backend it was not generated with signs without error, and
+/// nothing else would notice.
 pub fn sphincs_sign_with_pk(message: &[u8], secret_key: &[u8], public_key: &[u8]) -> Result<Vec<u8>> {
-    let kp = SlhDsaKeyPair::from_bytes(SLH_DSA_SHA2_192F, public_key, secret_key)
+    let mode = SLH_DSA_SHA2_192F;
+    if secret_key.len() != mode.sk_bytes() || public_key.len() != mode.pk_bytes() {
+        return Err(ElaraError::Crypto("invalid SPHINCS+ keys: wrong length".into()));
+    }
+    // The secret key is SK.seed ‖ SK.prf ‖ PK.seed ‖ PK.root, and the root is
+    // derived from the seeds, so rebuilding the pair from them must reproduce
+    // both keys.
+    let seeds = mode.seed_bytes();
+    let kp = SlhDsaKeyPair::from_seed(mode, &secret_key[..seeds])
         .map_err(|e| ElaraError::Crypto(format!("invalid SPHINCS+ keys: {e:?}")))?;
+    // Only the public halves can differ: the public key, and the root copy the
+    // secret key carries (its last n bytes). The secret seeds are never compared.
+    if kp.public_key() != public_key || kp.secret_key()[seeds..] != secret_key[seeds..] {
+        return Err(ElaraError::Crypto(
+            "SPHINCS+ key pair does not match its seeds: refusing to sign".into(),
+        ));
+    }
     let sig = kp.sign(message)
-        .map_err(|e| ElaraError::Crypto(format!("SPHINCS+ sign failed: {e:?}")))?;
-    Ok(sig.to_bytes().to_vec())
+        .map_err(|e| ElaraError::Crypto(format!("SPHINCS+ sign failed: {e:?}")))?
+        .to_bytes()
+        .to_vec();
+    if !sphincs_verify(message, &sig, public_key)? {
+        return Err(ElaraError::Crypto(
+            "SPHINCS+ signature does not verify under its public key: refusing to emit it".into(),
+        ));
+    }
+    Ok(sig)
 }
 
 // sphincs_verify moved to elara-record::pqc (re-exported at the top of this module).
@@ -205,6 +234,36 @@ mod tests {
         let kp = sphincs_keygen().unwrap();
         let sig = sphincs_sign_with_pk(b"correct", &kp.secret_key, &kp.public_key).unwrap();
         assert!(!sphincs_verify(b"wrong", &sig, &kp.public_key).unwrap());
+    }
+
+    #[test]
+    fn test_sphincs_sign_refuses_mismatched_pair() {
+        // One key's secret half with another key's public half: every peer
+        // would reject the leg, so the signer must refuse before signing.
+        let kp1 = sphincs_keygen().unwrap();
+        let kp2 = sphincs_keygen().unwrap();
+        let err = sphincs_sign_with_pk(b"m", &kp1.secret_key, &kp2.public_key).unwrap_err();
+        assert!(err.to_string().contains("does not match its seeds"), "{err}");
+    }
+
+    #[test]
+    fn test_sphincs_sign_refuses_root_not_derived_from_seeds() {
+        // Both keys carry the same root, but not the one the seeds derive.
+        let kp = sphincs_keygen().unwrap();
+        let mut sk = kp.secret_key.clone();
+        let mut pk = kp.public_key.clone();
+        let (skl, pkl) = (sk.len(), pk.len());
+        sk[skl - 1] ^= 1;
+        pk[pkl - 1] ^= 1;
+        let err = sphincs_sign_with_pk(b"m", &sk, &pk).unwrap_err();
+        assert!(err.to_string().contains("does not match its seeds"), "{err}");
+    }
+
+    #[test]
+    fn test_sphincs_sign_rejects_wrong_key_lengths() {
+        let kp = sphincs_keygen().unwrap();
+        assert!(sphincs_sign_with_pk(b"m", &kp.secret_key[..72], &kp.public_key).is_err());
+        assert!(sphincs_sign_with_pk(b"m", &kp.secret_key, &kp.public_key[..47]).is_err());
     }
 
     /// AUDIT-8: the same 32-byte seed MUST produce the same Dilithium3 keypair

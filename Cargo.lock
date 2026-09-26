@@ -1064,7 +1064,8 @@ dependencies = [
  "dilithium-rs",
  "hex",
  "js-sys",
- "lattice-slh-dsa",
+ "lattice-slh-dsa 0.3.3",
+ "lattice-slh-dsa 0.4.0",
  "serde",
  "serde_json",
  "sha3",
@@ -1107,7 +1108,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "js-sys",
- "lattice-slh-dsa",
+ "lattice-slh-dsa 0.3.3",
  "libc",
  "mdns-sd",
  "memmap2",
@@ -1909,6 +1910,19 @@ name = "lattice-slh-dsa"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c4f99d3ef9863a4445c1b77825e4534cf3c36e9ee707eff6ffc1f1e772add166"
+dependencies = [
+ "getrandom 0.2.17",
+ "sha2 0.10.9",
+ "sha3",
+ "subtle",
+ "zeroize",
+]
+
+[[package]]
+name = "lattice-slh-dsa"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "389835d427f23a2618e8d5651e55bbcd13025390241bf39bc5ad412478587adb"
 dependencies = [
  "getrandom 0.2.17",
  "sha2 0.10.9",
