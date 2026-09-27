@@ -26,10 +26,12 @@ Scope note (honest): this decodes the FULL §4.3 frame in stream order — the
 hack, which would have silently mis-parsed any v6 record (v6 appends the
 u16-prefixed ``network_id`` AFTER the nonce, so the old tail read returned
 garbage with no error — exactly the failure a reference decoder must never
-have). Supported versions mirror the Rust decoder exactly: v4..v7
+have). Supported versions mirror the Rust decoder exactly: v4..v8
 (``WIRE_VERSION_MIN``=4 since 2026-08-18 — v1-v3 decode retired with the T80
 codec asymmetry; see docs/WIRE-FORMAT.md §5.3). Anything outside that range
-fails LOUDLY with a message saying which side it fell off. This script itself
+fails LOUDLY with a message saying which side it fell off. v8 (2026-09-26) adds
+the FIPS 205 second leg: its preimage commits both algorithm bytes and the
+second-leg key, and each version accepts only its own second-leg algorithm byte. This script itself
 stays pure-stdlib (no signature math); the anchor/creator signature over
 ``signable_bytes`` is checked independently by ``verify_pq.py`` (liboqs
 ML-DSA-65) and by the Rust ``elara-verify`` binary (see README).
@@ -150,9 +152,25 @@ def decode_metadata(r: Reader) -> dict:
 
 
 WIRE_VERSION_MIN = 4  # mirrors crates/elara-record/src/wire.rs (raised 1→4, 2026-08-18)
-WIRE_VERSION = 7      # decode ceiling; v7 (2026-08-23 flag day) is byte-for-byte v6's
+WIRE_VERSION = 8      # decode ceiling; v7 (2026-08-23 flag day) is byte-for-byte v6's
                       # layout — it only signals the seal-tree fold, no preimage change.
+                      # v8 (2026-09-26) appends the second-leg commitment to the preimage.
                       # Pinned to the Rust ceiling by a test in src/conformance.rs.
+
+# The one second-leg algorithm byte each record version accepts (mirrors
+# crates/elara-record/src/pqc.rs record_second_leg_algorithm; pinned by the same
+# test): 0x02 legacy SPHINCS+ up to v7, 0x04 FIPS 205 SLH-DSA-SHA2-192f at v8.
+LEGACY_SECOND_LEG_MAX_RECORD_VERSION = 7
+FIPS205_SECOND_LEG_MAX_RECORD_VERSION = 8
+ALG_DILITHIUM3 = 0x01
+
+
+def second_leg_algorithm(version: int):
+    if version <= LEGACY_SECOND_LEG_MAX_RECORD_VERSION:
+        return 0x02
+    if version <= FIPS205_SECOND_LEG_MAX_RECORD_VERSION:
+        return 0x04
+    return None
 
 
 def decode_record(wire: bytes) -> dict:
@@ -205,7 +223,23 @@ def decode_record(wire: bytes) -> dict:
     spk_len = r.u16()
     creator_sphincs_pk = r.take(spk_len) if spk_len else None
     sig_algorithm = r.u8()
-    sphincs_algorithm = r.u8() or None
+    secondary = r.u8()
+    # Algorithm bytes are checked exactly as the Rust decoder does (AUDIT-7).
+    if sig_algorithm != ALG_DILITHIUM3:
+        raise ValueError(f"unsupported sig_algorithm byte: 0x{sig_algorithm:02x} "
+                         f"(only 0x{ALG_DILITHIUM3:02x} Dilithium3 is currently accepted)")
+    expected = second_leg_algorithm(version)
+    if secondary not in (0, expected):
+        raise ValueError(f"unsupported sphincs_algorithm byte: 0x{secondary:02x} at record "
+                         f"version {version} (only 0x{expected:02x} or 0x00 are accepted)")
+    sphincs_algorithm = secondary or None
+    # The algorithm byte and the leg it names must agree (AUDIT-7, as in Rust).
+    if sphincs_algorithm and sphincs_signature is None:
+        raise ValueError("sphincs_algorithm declared but no SPHINCS+ signature attached")
+    if sphincs_signature is not None and not sphincs_algorithm:
+        raise ValueError("SPHINCS+ signature attached but sphincs_algorithm byte is 0")
+    if sphincs_algorithm and creator_sphincs_pk is None:
+        raise ValueError("sphincs_algorithm declared but no SPHINCS+ public key attached")
     # v3+: zone assignment (flag + u16-prefixed zone path when present)
     zone = None
     if r.u8() == 1:
@@ -283,6 +317,13 @@ def signable_bytes(rec: dict) -> bytes:
         buf += struct.pack(">I", len(zk)) + zk             # zk_proof_len u32 BE + bytes
     else:
         buf += struct.pack(">I", 0)                        # 0 if absent
+    # v8+: the second-leg commitment (Rust: record.rs signable_bytes v8 arm).
+    # Profile B commits 0x00 and an empty key; the second signature stays out.
+    if rec["version"] >= 8:
+        pk = rec["creator_sphincs_pk"] or b""
+        buf += struct.pack("B", rec["sig_algorithm"])      # primary algorithm u8
+        buf += struct.pack("B", rec["sphincs_algorithm"] or 0)  # second-leg algorithm u8
+        buf += struct.pack(">H", len(pk)) + pk             # second-leg key, u16 BE prefix
     return bytes(buf)
 
 

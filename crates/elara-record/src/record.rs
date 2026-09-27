@@ -177,8 +177,10 @@ pub struct ValidationRecord {
     /// 0x01 = ML-DSA-65 (Dilithium3). Defaults to 0x01 if absent (backwards compat).
     #[serde(default = "default_sig_algorithm")]
     pub sig_algorithm: u8,
-    /// Algorithm ID for secondary signature, if present.
-    /// 0x02 = SPHINCS+-SHA2-192f (not FIPS 205). None for Profile B.
+    /// Algorithm ID for secondary signature, if present, fixed by the record's
+    /// wire version (`crate::pqc::record_second_leg_algorithm`): 0x02 =
+    /// SPHINCS+-SHA2-192f (not FIPS 205) up to v7, 0x04 = SLH-DSA-SHA2-192f
+    /// (FIPS 205) from v8. None for Profile B.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sphincs_algorithm: Option<u8>,
     /// Explicit zone assignment (wire format v3+).
@@ -533,7 +535,7 @@ impl ValidationRecord {
     /// reporting forgery: nobody without the key can produce a signature valid
     /// under any construction. It must never upgrade a verdict.
     ///
-    /// Only three constructions are distinct: `< 5`, `== 5`, and `>= 6`.
+    /// Only four constructions are distinct: `< 5`, `== 5`, `6..=7`, and `>= 8`.
     pub fn signable_bytes_under(&self, construction_version: u16) -> Vec<u8> {
         let mut buf = Vec::with_capacity(512);
 
@@ -608,6 +610,23 @@ impl ValidationRecord {
             }
         }
 
+        // v8+: both algorithm bytes and the second leg's key are signed, so nobody
+        // can strip or swap the second leg, or relabel either algorithm, without
+        // breaking the first signature. Profile B commits 0x00 and an empty key (the
+        // wire encodes an absent key and an empty one alike). The second signature
+        // itself stays outside: it signs these bytes. v≤7 preimages are unchanged.
+        if construction_version >= 8 {
+            buf.push(self.sig_algorithm);
+            buf.push(self.sphincs_algorithm.unwrap_or(0));
+            let pk = self.creator_sphincs_pk.as_deref().unwrap_or(&[]);
+            debug_assert!(
+                pk.len() <= u16::MAX as usize,
+                "second-leg key exceeds its u16 wire prefix — decode rejects this, emitters must too"
+            );
+            buf.extend_from_slice(&(pk.len() as u16).to_be_bytes());
+            buf.extend_from_slice(pk);
+        }
+
         // NOTE: ITC stamp and zone_refs are NOT included in signable_bytes.
         // They are added by nodes during insertion, not by the record creator,
         // so they must not affect signature verification.
@@ -615,14 +634,52 @@ impl ValidationRecord {
         buf
     }
 
-    /// Strip SPHINCS+ signature and public key from this record.
-    /// Used in light mode: Profile A identity creates records but strips the
-    /// 35KB SPHINCS+ signature + 48B public key, producing a Profile B record.
-    /// Safe to call after signing — signable_bytes doesn't include SPHINCS+ data.
-    pub fn strip_sphincs(&mut self) {
+    /// Strip the second signature, its public key and its algorithm byte from this
+    /// record, producing a Profile B record (~35 KB smaller).
+    ///
+    /// Up to wire v7 this is safe after signing: those preimages carry no second-leg
+    /// data. From v8 the preimage commits the second leg's algorithm byte and key,
+    /// so stripping the leg of a signed record would break its first signature. That
+    /// is refused and the record is left unchanged; strip before signing instead.
+    pub fn strip_sphincs(&mut self) -> Result<()> {
+        let has_leg = self.sphincs_signature.is_some()
+            || self.creator_sphincs_pk.is_some()
+            || self.sphincs_algorithm.is_some();
+        if self.version >= 8 && self.signature.is_some() && has_leg {
+            return Err(RecordError::Crypto(format!(
+                "stripping the second leg of a signed record version {} breaks its first signature",
+                self.version
+            )));
+        }
         self.sphincs_signature = None;
         self.creator_sphincs_pk = None;
         self.sphincs_algorithm = None;
+        Ok(())
+    }
+
+    /// Check this record's second signature over `signable` (its
+    /// [`signable_bytes`](Self::signable_bytes)) through the one chokepoint,
+    /// [`crate::pqc::verify_second_leg`]. `Ok(None)` means there is no second leg
+    /// (Profile B) and `Ok(Some(valid))` is the verdict. A signature without a key, or a
+    /// key without a signature, is a wire error.
+    pub fn check_second_leg(&self, signable: &[u8]) -> Result<Option<bool>> {
+        match (&self.sphincs_signature, &self.creator_sphincs_pk) {
+            (None, None) => Ok(None),
+            (Some(sig), Some(pk)) => crate::pqc::verify_second_leg(
+                crate::pqc::SignedFormat::Record(self.version),
+                self.sphincs_algorithm,
+                signable,
+                sig,
+                pk,
+            )
+            .map(Some),
+            (Some(_), None) => Err(RecordError::Wire(
+                "SPHINCS+ signature present but no SPHINCS+ public key in record".into(),
+            )),
+            (None, Some(_)) => Err(RecordError::Wire(
+                "SPHINCS+ public key present but no SPHINCS+ signature (incomplete Profile A)".into(),
+            )),
+        }
     }
 
     /// Serialize to binary wire format (byte-identical to Python's to_bytes()).
@@ -846,10 +903,11 @@ impl ValidationRecord {
 
         // Algorithm IDs (Protocol §4.4).
         //
-        // AUDIT-7: both bytes are validated against the currently-accepted set
-        // {ALG_DILITHIUM3 primary, ALG_SPHINCS_SHA2_192F secondary}. Unknown IDs
-        // are rejected at decode — the bytes are NOT in signable_bytes, so without
-        // decode-side enforcement an attacker could rewrite them in transit
+        // AUDIT-7: the primary byte must be ALG_DILITHIUM3, and the secondary byte
+        // 0x00 or the one second-leg algorithm of this record's wire version
+        // (`record_second_leg_algorithm`: 0x02 up to v7, 0x04 from v8). Unknown IDs
+        // are rejected at decode: before v8 the bytes are NOT in signable_bytes, so
+        // without decode-side enforcement an attacker could rewrite them in transit
         // without invalidating the signature, silently bypassing any future
         // dispatch logic. Until a second primary algorithm ships, the dispatch
         // invariant *is* the wire-level equality check here.
@@ -862,15 +920,20 @@ impl ValidationRecord {
                     primary, crate::pqc::ALG_DILITHIUM3,
                 )));
             }
+            let expected = crate::pqc::record_second_leg_algorithm(version);
             let sphincs_alg = if secondary == 0 {
                 None
-            } else if secondary == crate::pqc::ALG_SPHINCS_SHA2_192F {
+            } else if Some(secondary) == expected {
                 Some(secondary)
             } else {
-                return Err(RecordError::Wire(format!(
-                    "unsupported sphincs_algorithm byte: 0x{:02x} (only 0x{:02x} SPHINCS+-SHA2-192f or 0x00 are accepted)",
-                    secondary, crate::pqc::ALG_SPHINCS_SHA2_192F,
-                )));
+                return Err(RecordError::Wire(match expected {
+                    Some(alg) => format!(
+                        "unsupported sphincs_algorithm byte: 0x{secondary:02x} at record version {version} (only 0x{alg:02x} or 0x00 are accepted)"
+                    ),
+                    None => format!(
+                        "unsupported sphincs_algorithm byte: 0x{secondary:02x} at record version {version} (it has no second leg)"
+                    ),
+                }));
             };
             (primary, sphincs_alg)
         } else {
@@ -1028,6 +1091,52 @@ mod tests {
 
     fn dummy_pk() -> Vec<u8> {
         vec![0xAA; 1952]
+    }
+
+    #[test]
+    fn check_second_leg_routes_by_signed_version_and_refuses_half_legs() {
+        use crate::pqc::tests::kat;
+        use crate::pqc::ALG_SPHINCS_SHA2_192F;
+        // The committed KAT message stands in for signable bytes: the check verifies
+        // over what it is given and never recomputes the preimage.
+        let (msg, pk, sig) = (kat("slhdsa192f.msg"), kat("slhdsa192f.pk"), kat("slhdsa192f.sig"));
+        let mut rec = ValidationRecord::create(b"leg", dummy_pk(), vec![], Classification::Public, None);
+        assert_eq!(rec.check_second_leg(&msg).unwrap(), None, "Profile B has no second leg");
+
+        rec.sphincs_signature = Some(sig.clone());
+        let err = rec.check_second_leg(&msg).unwrap_err().to_string();
+        assert_eq!(err, "SPHINCS+ signature present but no SPHINCS+ public key in record");
+        rec.sphincs_signature = None;
+        rec.creator_sphincs_pk = Some(pk.clone());
+        let err = rec.check_second_leg(&msg).unwrap_err().to_string();
+        assert_eq!(err, "SPHINCS+ public key present but no SPHINCS+ signature (incomplete Profile A)");
+
+        rec.sphincs_signature = Some(sig);
+        rec.sphincs_algorithm = Some(ALG_SPHINCS_SHA2_192F);
+        rec.version = 7;
+        assert_eq!(rec.check_second_leg(&msg).unwrap(), Some(true));
+        assert_eq!(rec.check_second_leg(b"other bytes").unwrap(), Some(false));
+        rec.sphincs_algorithm = None;
+        assert_eq!(rec.check_second_leg(&msg).unwrap(), Some(true), "no byte = the legacy leg");
+        rec.sphincs_algorithm = Some(0x03);
+        assert!(rec.check_second_leg(&msg).is_err(), "an unknown byte never verifies");
+        rec.sphincs_algorithm = Some(ALG_SPHINCS_SHA2_192F);
+        rec.version = 8;
+        let err = rec.check_second_leg(&msg).unwrap_err().to_string();
+        assert_eq!(err, "second-leg algorithm 0x02 is not valid at record version 8");
+        rec.sphincs_algorithm = None;
+        let err = rec.check_second_leg(&msg).unwrap_err().to_string();
+        assert_eq!(err, "no second-leg algorithm byte at record version 8");
+
+        let [_, pk, msg, sig] = crate::pqc::tests::fips205_leg_vector();
+        rec.sphincs_signature = Some(sig);
+        rec.creator_sphincs_pk = Some(pk);
+        rec.sphincs_algorithm = Some(crate::pqc::ALG_SLH_DSA_SHA2_192F);
+        assert_eq!(rec.check_second_leg(&msg).unwrap(), Some(true));
+        assert_eq!(rec.check_second_leg(b"other bytes").unwrap(), Some(false));
+        rec.version = 9;
+        let err = rec.check_second_leg(&msg).unwrap_err().to_string();
+        assert_eq!(err, "no second-leg verifier for record version 9");
     }
 
     #[test]
@@ -1285,12 +1394,12 @@ mod tests {
         );
     }
 
-    /// Exactly three preimage constructions are distinct (`< 5`, `== 5`, `>= 6`),
-    /// which is what bounds the verifier's disagreement probe to two extra
-    /// signature checks. If a future wire version branches `signable_bytes`
+    /// Exactly four preimage constructions are distinct (`< 5`, `== 5`, `6..=7`,
+    /// `>= 8`), which is what bounds the verifier's disagreement probe to three
+    /// extra signature checks. If a future wire version branches `signable_bytes`
     /// again, this test fails and the probe's construction set must grow with it.
     #[test]
-    fn signable_bytes_under_has_exactly_three_distinct_constructions() {
+    fn signable_bytes_under_has_exactly_four_distinct_constructions() {
         let rec = ValidationRecord::create(
             b"construction-classes",
             dummy_pk(),
@@ -1301,14 +1410,55 @@ mod tests {
         let v4 = rec.signable_bytes_under(4);
         let v5 = rec.signable_bytes_under(5);
         let v6 = rec.signable_bytes_under(6);
+        let v8 = rec.signable_bytes_under(8);
         assert_ne!(v4, v5, "the v5 branch signs the slot nonce");
         assert_ne!(v5, v6, "the v6 branch prepends the domain tag");
-        assert_ne!(v4, v6);
+        assert_ne!(v6, v8, "the v8 branch appends the second-leg commitment");
+        for (a, b) in [(&v4, &v6), (&v4, &v8), (&v5, &v8)] {
+            assert_ne!(a, b);
+        }
         // Same class, same bytes, on both sides of the branch points.
         assert_eq!(v4, rec.signable_bytes_under(0));
-        assert_eq!(v6, rec.signable_bytes_under(crate::wire::WIRE_VERSION));
+        assert_eq!(v6, rec.signable_bytes_under(7));
+        assert_eq!(v8, rec.signable_bytes_under(crate::wire::WIRE_VERSION));
+        assert_eq!(v8, rec.signable_bytes_under(u16::MAX));
         // The field value is signed as carried and never follows the construction.
         assert!(v4.windows(2).any(|w| w == rec.version.to_be_bytes()));
+    }
+
+    /// The v8 preimage is the v6/v7 one plus exactly the second-leg commitment:
+    /// both algorithm bytes, then the length-prefixed key (0x00 and empty for
+    /// Profile B). Each committed field moves the v8 preimage and not the v7 one.
+    #[test]
+    fn v8_signable_suffix_commits_both_algorithm_bytes_and_the_second_leg_key() {
+        let mut rec = ValidationRecord::create(b"v8-suffix", dummy_pk(), vec![], Classification::Public, None);
+        rec.version = 8;
+        let v7 = rec.signable_bytes_under(7);
+        let profile_b = rec.signable_bytes();
+        assert_eq!(profile_b, [&v7[..], &[0x01, 0x00, 0x00, 0x00]].concat());
+
+        let key = vec![0xEE; 48];
+        rec.creator_sphincs_pk = Some(key.clone());
+        rec.sphincs_algorithm = Some(crate::pqc::ALG_SLH_DSA_SHA2_192F);
+        let profile_a = rec.signable_bytes();
+        let suffix = [&[0x01, 0x04, 0x00, 0x30][..], &key].concat();
+        assert_eq!(profile_a, [&v7[..], &suffix].concat());
+        assert_eq!(rec.signable_bytes_under(7), v7, "v7 never sees the second leg");
+
+        let mut swapped = rec.clone();
+        swapped.creator_sphincs_pk = Some(vec![0xEF; 48]);
+        assert_ne!(swapped.signable_bytes(), profile_a, "a swapped key is a different preimage");
+        let mut relabelled = rec.clone();
+        relabelled.sphincs_algorithm = Some(crate::pqc::ALG_SPHINCS_SHA2_192F);
+        assert_ne!(relabelled.signable_bytes(), profile_a, "a relabelled leg is a different preimage");
+        let mut primary = rec.clone();
+        primary.sig_algorithm = 0x05;
+        assert_ne!(primary.signable_bytes(), profile_a, "the primary byte is signed too");
+        // An absent key and an empty one encode alike on the wire, and so here.
+        let mut empty = rec.clone();
+        empty.creator_sphincs_pk = Some(Vec::new());
+        empty.sphincs_algorithm = None;
+        assert_eq!(empty.signable_bytes(), profile_b);
     }
 
     #[test]
@@ -1463,9 +1613,9 @@ mod tests {
 
     #[test]
     fn test_wire_with_sphincs_sig() {
-        let rec = ValidationRecord {
+        let mut rec = ValidationRecord {
             id: "019506e0-1234-7000-8000-000000000001".to_string(),
-            version: WIRE_VERSION,
+            version: 7,
             content_hash: sha3_256(b"content").to_vec(),
             creator_public_key: dummy_pk(),
             timestamp: 1739712345.0,
@@ -1493,6 +1643,14 @@ mod tests {
         assert_eq!(decoded.creator_sphincs_pk.as_ref().unwrap().len(), 48);
         assert_eq!(decoded.sig_algorithm, 0x01);
         assert_eq!(decoded.sphincs_algorithm, Some(0x02));
+
+        rec.version = 8;
+        rec.sphincs_algorithm = Some(0x04);
+        let decoded = ValidationRecord::from_bytes(&rec.to_bytes()).unwrap();
+        assert_eq!(decoded.version, 8);
+        assert_eq!(decoded.sphincs_signature.as_ref().unwrap().len(), 35664);
+        assert_eq!(decoded.creator_sphincs_pk.as_ref().unwrap().len(), 48);
+        assert_eq!(decoded.sphincs_algorithm, Some(0x04));
     }
 
 
@@ -1735,54 +1893,134 @@ mod tests {
         }
     }
 
+    /// The two second-leg eras as (record version, its one second-leg algorithm):
+    /// (7, 0x02) and (8, 0x04).
+    fn audit7_eras() -> [(u16, u8); 2] {
+        [crate::pqc::LEGACY_SECOND_LEG_MAX_RECORD_VERSION, crate::pqc::FIPS205_SECOND_LEG_MAX_RECORD_VERSION]
+            .map(|v| (v, crate::pqc::record_second_leg_algorithm(v).expect("an era")))
+    }
+
     /// AUDIT-7: sphincs_algorithm declared with no signature attached is rejected.
     #[test]
     fn test_audit7_rejects_sphincs_algorithm_without_signature() {
-        let mut rec = audit7_base_record();
-        rec.sphincs_signature = None;
-        rec.creator_sphincs_pk = Some(vec![0xEE; 48]);
-        rec.sphincs_algorithm = Some(crate::pqc::ALG_SPHINCS_SHA2_192F);
-        let wire = rec.to_bytes();
-        let err = ValidationRecord::from_bytes(&wire).unwrap_err();
-        match err {
-            RecordError::Wire(msg) => assert!(
-                msg.contains("sphincs_algorithm declared but no SPHINCS+ signature"),
-                "unexpected wire error: {msg}"
-            ),
-            other => panic!("expected Wire error, got {other:?}"),
+        for (version, alg) in audit7_eras() {
+            let mut rec = audit7_base_record();
+            rec.version = version;
+            rec.sphincs_signature = None;
+            rec.creator_sphincs_pk = Some(vec![0xEE; 48]);
+            rec.sphincs_algorithm = Some(alg);
+            let wire = rec.to_bytes();
+            let err = ValidationRecord::from_bytes(&wire).unwrap_err();
+            match err {
+                RecordError::Wire(msg) => assert!(
+                    msg.contains("sphincs_algorithm declared but no SPHINCS+ signature"),
+                    "v{version}: unexpected wire error: {msg}"
+                ),
+                other => panic!("v{version}: expected Wire error, got {other:?}"),
+            }
         }
     }
 
     /// AUDIT-7: sphincs_algorithm declared without creator_sphincs_pk is rejected.
     #[test]
     fn test_audit7_rejects_sphincs_algorithm_without_pk() {
-        let mut rec = audit7_base_record();
-        rec.sphincs_signature = Some(vec![0xDD; 35664]);
-        rec.creator_sphincs_pk = None;
-        rec.sphincs_algorithm = Some(crate::pqc::ALG_SPHINCS_SHA2_192F);
-        let wire = rec.to_bytes();
-        let err = ValidationRecord::from_bytes(&wire).unwrap_err();
-        match err {
-            RecordError::Wire(msg) => assert!(
-                msg.contains("sphincs_algorithm declared but no SPHINCS+ public key"),
-                "unexpected wire error: {msg}"
-            ),
-            other => panic!("expected Wire error, got {other:?}"),
+        for (version, alg) in audit7_eras() {
+            let mut rec = audit7_base_record();
+            rec.version = version;
+            rec.sphincs_signature = Some(vec![0xDD; 35664]);
+            rec.creator_sphincs_pk = None;
+            rec.sphincs_algorithm = Some(alg);
+            let wire = rec.to_bytes();
+            let err = ValidationRecord::from_bytes(&wire).unwrap_err();
+            match err {
+                RecordError::Wire(msg) => assert!(
+                    msg.contains("sphincs_algorithm declared but no SPHINCS+ public key"),
+                    "v{version}: unexpected wire error: {msg}"
+                ),
+                other => panic!("v{version}: expected Wire error, got {other:?}"),
+            }
         }
     }
 
-    /// AUDIT-7: canonical Profile A (Dilithium3 + SPHINCS+) record still round-trips.
-    /// The validation paths above must not regress the valid case.
+    /// AUDIT-7: canonical Profile A (Dilithium3 + second leg) records still round-trip
+    /// in both eras. The validation paths above must not regress the valid case.
     #[test]
     fn test_audit7_profile_a_still_roundtrips() {
-        let mut rec = audit7_base_record();
-        rec.sphincs_signature = Some(vec![0xDD; 35664]);
-        rec.creator_sphincs_pk = Some(vec![0xEE; 48]);
-        rec.sphincs_algorithm = Some(crate::pqc::ALG_SPHINCS_SHA2_192F);
-        let wire = rec.to_bytes();
-        let decoded = ValidationRecord::from_bytes(&wire).expect("profile A record must decode");
-        assert_eq!(decoded.sig_algorithm, crate::pqc::ALG_DILITHIUM3);
-        assert_eq!(decoded.sphincs_algorithm, Some(crate::pqc::ALG_SPHINCS_SHA2_192F));
+        for (version, alg) in audit7_eras() {
+            let mut rec = audit7_base_record();
+            rec.version = version;
+            rec.sphincs_signature = Some(vec![0xDD; 35664]);
+            rec.creator_sphincs_pk = Some(vec![0xEE; 48]);
+            rec.sphincs_algorithm = Some(alg);
+            let wire = rec.to_bytes();
+            let decoded = ValidationRecord::from_bytes(&wire).expect("profile A record must decode");
+            assert_eq!(decoded.version, version);
+            assert_eq!(decoded.sig_algorithm, crate::pqc::ALG_DILITHIUM3);
+            assert_eq!(decoded.sphincs_algorithm, Some(alg));
+        }
+    }
+
+    /// Each era's decoder accepts its own second-leg byte only: 0x02 is refused
+    /// from v8, 0x04 up to v7, whatever else the record carries.
+    #[test]
+    fn decode_refuses_a_second_leg_byte_from_the_other_era() {
+        let [(v7, legacy), (v8, fips205)] = audit7_eras();
+        for (version, foreign, own) in [(v7, fips205, legacy), (v8, legacy, fips205)] {
+            let mut rec = audit7_base_record();
+            rec.version = version;
+            rec.sphincs_signature = Some(vec![0xDD; 35664]);
+            rec.creator_sphincs_pk = Some(vec![0xEE; 48]);
+            rec.sphincs_algorithm = Some(foreign);
+            match ValidationRecord::from_bytes(&rec.to_bytes()).unwrap_err() {
+                RecordError::Wire(msg) => assert_eq!(
+                    msg,
+                    format!(
+                        "unsupported sphincs_algorithm byte: 0x{foreign:02x} at record version {version} (only 0x{own:02x} or 0x00 are accepted)"
+                    )
+                ),
+                other => panic!("v{version}: expected Wire error, got {other:?}"),
+            }
+        }
+    }
+
+    /// The whole v8 path with real keys: a Profile A record signs both legs over a
+    /// preimage that commits the second leg, survives the wire, and verifies. Swapping
+    /// or stripping the second leg afterwards breaks the FIRST signature, which is
+    /// why `strip_sphincs` refuses it.
+    #[test]
+    fn v8_profile_a_signs_round_trips_and_binds_its_second_leg() {
+        use dilithium::safe_api::DilithiumKeyPair;
+        let [sk, slh_pk, _, _] = crate::pqc::tests::fips205_leg_vector();
+        let kp = DilithiumKeyPair::generate(dilithium::params::DilithiumMode::Dilithium3).expect("keygen");
+        let mut rec = ValidationRecord::create(b"v8-e2e", kp.public_key().to_vec(), vec![], Classification::Public, None);
+        rec.version = 8;
+        rec.creator_sphincs_pk = Some(slh_pk.clone());
+        rec.sphincs_algorithm = Some(crate::pqc::ALG_SLH_DSA_SHA2_192F);
+        let signable = rec.signable_bytes();
+        rec.signature = Some(kp.sign(&signable, b"").expect("sign").as_bytes().to_vec());
+        let second = slh_dsa::sign(&sk, &signable, slh_dsa::params::SLH_DSA_SHA2_192F);
+        assert_eq!(second.len(), 35664, "FIPS 205 SLH-DSA-SHA2-192f signature size");
+        rec.sphincs_signature = Some(second);
+
+        let dec = ValidationRecord::from_bytes(&rec.to_bytes()).expect("v8 Profile A decodes");
+        let signable = dec.signable_bytes();
+        let first = dec.signature.as_deref().expect("first signature");
+        assert!(crate::pqc::dilithium3_verify(&signable, first, &dec.creator_public_key).unwrap());
+        assert_eq!(dec.check_second_leg(&signable).unwrap(), Some(true));
+
+        let mut swapped = dec.clone();
+        swapped.creator_sphincs_pk = Some(vec![0x5A; slh_pk.len()]);
+        assert!(!crate::pqc::dilithium3_verify(&swapped.signable_bytes(), first, &dec.creator_public_key).unwrap());
+        let mut stripped = dec.clone();
+        stripped.sphincs_signature = None;
+        stripped.creator_sphincs_pk = None;
+        stripped.sphincs_algorithm = None;
+        assert!(!crate::pqc::dilithium3_verify(&stripped.signable_bytes(), first, &dec.creator_public_key).unwrap());
+
+        let mut refused = dec.clone();
+        let err = refused.strip_sphincs().unwrap_err().to_string();
+        assert_eq!(err, "stripping the second leg of a signed record version 8 breaks its first signature");
+        assert_eq!(refused.to_bytes(), dec.to_bytes(), "a refused strip leaves the record unchanged");
     }
 
     /// Panic-hardening: the record decoder must bound `num_parents` at the wire
@@ -2023,8 +2261,9 @@ mod tests {
         rec.sphincs_signature = Some(vec![0xDD; 35664]);
         rec.creator_sphincs_pk = Some(vec![0xEE; 48]);
         rec.sphincs_algorithm = Some(0x02);
+        rec.signature = Some(vec![0xCC; 3309]);
 
-        rec.strip_sphincs();
+        rec.strip_sphincs().expect("a signed v7 record strips: its preimage has no second leg");
 
         assert!(rec.sphincs_signature.is_none(),
             "strip_sphincs must clear sphincs_signature");
@@ -2039,6 +2278,21 @@ mod tests {
             "strip_sphincs must leave primary algorithm intact");
         assert_eq!(rec.classification, Classification::Public,
             "strip_sphincs must not touch classification");
+
+        // From v8 only a signed record's leg is pinned: unsigned it strips, and a
+        // signed record with no leg left has nothing to strip.
+        rec.version = 8;
+        rec.signature = None;
+        rec.sphincs_signature = Some(vec![0xDD; 35664]);
+        rec.creator_sphincs_pk = Some(vec![0xEE; 48]);
+        rec.sphincs_algorithm = Some(0x04);
+        rec.strip_sphincs().expect("an unsigned v8 record strips");
+        assert!(rec.sphincs_signature.is_none() && rec.creator_sphincs_pk.is_none());
+        rec.signature = Some(vec![0xCC; 3309]);
+        rec.strip_sphincs().expect("a signed v8 Profile B record has nothing to strip");
+        rec.creator_sphincs_pk = Some(vec![0xEE; 48]);
+        assert!(rec.strip_sphincs().is_err(), "a signed v8 key is part of the first signature's preimage");
+        assert_eq!(rec.creator_sphincs_pk, Some(vec![0xEE; 48]));
     }
 
     #[test]
@@ -2437,9 +2691,10 @@ mod tests {
             "got: {err}"
         );
 
-        // Header ceiling: v7 accepted, v8 rejected — the decode-capability
+        // Header ceiling: v8 accepted, v9 rejected — the decode-capability
         // line (CONSCIOUS EDIT 2026-08-23: ceiling 6→7, Merkle fold-tag flag
-        // day, MERKLE-FOLD-TAG-BRIEF-V2; v6 stays decodable forever).
+        // day, MERKLE-FOLD-TAG-BRIEF-V2; CONSCIOUS EDIT 2026-09-26: ceiling
+        // 7→8, FIPS 205 second leg, step 5b; v6 and v7 stay decodable forever).
         let mut buf = Vec::new();
         crate::wire::encode_header(&mut buf, 6);
         assert!(crate::wire::WireReader::new(&buf).read_header().is_ok(), "v6 must decode");
@@ -2448,7 +2703,10 @@ mod tests {
         assert!(crate::wire::WireReader::new(&buf7).read_header().is_ok(), "v7 must decode");
         let mut buf8 = Vec::new();
         crate::wire::encode_header(&mut buf8, 8);
-        assert!(crate::wire::WireReader::new(&buf8).read_header().is_err(), "v8 must be rejected");
+        assert!(crate::wire::WireReader::new(&buf8).read_header().is_ok(), "v8 must decode");
+        let mut buf9 = Vec::new();
+        crate::wire::encode_header(&mut buf9, 9);
+        assert!(crate::wire::WireReader::new(&buf9).read_header().is_err(), "v9 must be rejected");
     }
 
     #[test]
@@ -2475,7 +2733,7 @@ mod tests {
     // Extends the example-based round-trip tests (`test_wire_roundtrip`,
     // `batch_b_metadata_roundtrip_seven_variants`) into a randomized sweep over
     // the full ValidationRecord input space. Three properties per generated
-    // record, across every accepted wire version {4..=7}:
+    // record, across every accepted wire version (WIRE_VERSION_MIN..=WIRE_VERSION):
     //
     //   INV-IDEMPOTENT  to_bytes(from_bytes(to_bytes(r))) == to_bytes(r)
     //                   The anti-corruption invariant the codec comments guard
@@ -2589,7 +2847,8 @@ mod tests {
         for seed in 0..ITERATIONS {
             let mut rng = SplitMix64(seed.wrapping_mul(0x2545F4914F6CDD1D).wrapping_add(1));
 
-            let version: u16 = 4 + rng.below(4) as u16; // {4,5,6,7} = WIRE_VERSION_MIN..=WIRE_VERSION
+            let span = u64::from(WIRE_VERSION - WIRE_VERSION_MIN) + 1;
+            let version: u16 = WIRE_VERSION_MIN + rng.below(span) as u16; // WIRE_VERSION_MIN..=WIRE_VERSION
             let np = rng.below(5) as usize;
             let parents: Vec<String> = (0..np).map(|_| gen_wire_id(&mut rng)).collect();
             let nz = rng.below(4) as usize;
@@ -2624,7 +2883,7 @@ mod tests {
             let (sphincs_algorithm, sphincs_signature, creator_sphincs_pk) = if use_sphincs {
                 let sig = rng.bytes_1to(64);
                 let pk = rng.bytes_1to(64);
-                (Some(crate::pqc::ALG_SPHINCS_SHA2_192F), Some(sig), Some(pk))
+                (crate::pqc::record_second_leg_algorithm(version), Some(sig), Some(pk))
             } else {
                 let pk = if rng.boolean() { Some(rng.bytes_1to(64)) } else { None };
                 (None, None, pk)
@@ -2713,6 +2972,8 @@ mod tests {
             let _ = ValidationRecord::from_bytes(&random_buf);
         }
         assert_eq!(idempotent, ITERATIONS, "every record must survive the round trip");
-        eprintln!("wire property sweep OK: {ITERATIONS} records, versions 4..=7, 0 divergences");
+        eprintln!(
+            "wire property sweep OK: {ITERATIONS} records, versions {WIRE_VERSION_MIN}..={WIRE_VERSION}, 0 divergences"
+        );
     }
 }

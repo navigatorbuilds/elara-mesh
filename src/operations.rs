@@ -81,7 +81,8 @@ impl<S: Storage> DamVm<S> {
                         .ok_or_else(|| ElaraError::Wire(
                             "SPHINCS+ signature present but no SPHINCS+ public key".to_string()
                         ))?;
-                    if !crate::crypto::pqc::sphincs_verify(&signable, sphincs_sig, sphincs_pk)? {
+                    let format = crate::crypto::pqc::SignedFormat::Record(record.version);
+                    if !crate::crypto::pqc::verify_second_leg(format, record.sphincs_algorithm, &signable, sphincs_sig, sphincs_pk)? {
                         return Err(ElaraError::InvalidSignature);
                     }
                 }

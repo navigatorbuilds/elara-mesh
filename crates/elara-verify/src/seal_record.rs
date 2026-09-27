@@ -55,6 +55,10 @@ pub enum SealRecordVerifyError {
     /// caller may want to retry against a different seed before bumping
     /// a forgery counter.
     VerifyError(String),
+    /// The record's second (SPHINCS+) signature is present but does not verify,
+    /// or cannot be checked: a half leg, or a record version with no second-leg
+    /// verifier. Refused even when the anchor and the Dilithium3 signature pass.
+    SecondSignature(String),
 }
 
 impl core::fmt::Display for SealRecordVerifyError {
@@ -74,6 +78,7 @@ impl core::fmt::Display for SealRecordVerifyError {
             ),
             Self::InvalidSignature => f.write_str("seal Dilithium3 signature invalid"),
             Self::VerifyError(msg) => write!(f, "seal Dilithium3 verify error: {msg}"),
+            Self::SecondSignature(msg) => write!(f, "seal second signature (SPHINCS+): {msg}"),
         }
     }
 }
@@ -93,6 +98,8 @@ impl std::error::Error for SealRecordVerifyError {}
 ///      non-anchor pubkey is rejected without spending CPU on Dilithium3.
 ///   5. Confirm `dilithium3_verify(signable_bytes, signature, creator_public_key)`
 ///      returns `Ok(true)`.
+///   6. Confirm the second (SPHINCS+) signature, when present, verifies through
+///      the chokepoint (`check_second_leg`); a half leg refuses.
 ///
 /// Caller fetches `wire_bytes` via any transport, supplies the expected
 /// record hash from a header they trust, and supplies the anchor set
@@ -144,6 +151,13 @@ pub fn verify_seal_record_against_anchor(
         .map_err(|e| SealRecordVerifyError::VerifyError(format!("Crypto error: {e}")))?;
     if !ok {
         return Err(SealRecordVerifyError::InvalidSignature);
+    }
+    match rec.check_second_leg(&signable) {
+        Ok(None) | Ok(Some(true)) => {}
+        Ok(Some(false)) => {
+            return Err(SealRecordVerifyError::SecondSignature("does not verify".into()));
+        }
+        Err(e) => return Err(SealRecordVerifyError::SecondSignature(e.to_string())),
     }
     Ok(())
 }

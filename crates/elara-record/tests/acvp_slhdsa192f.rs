@@ -14,15 +14,17 @@
 //!
 //! `slh_dsa` (=0.4.0) is final FIPS 205 and must match NIST on both the
 //! internal interface and the external pure one (M' = 0x00 || len(ctx) ||
-//! ctx || M). It is the backend for the second-leg algorithm that will
-//! replace 0x02.
+//! ctx || M). It is the backend for the record second leg from WIRE_VERSION 8
+//! (algorithm 0x04, replacing 0x02): the external pure interface with an EMPTY
+//! context, signed deterministically. The v8-leg vectors below run through
+//! `verify_second_leg`, the chokepoint every verifier calls.
 //!
 //! Security note: the divergence is a conformance/interop one, not a
 //! weakness — the SPHINCS+ structure and margins are unaffected by which
 //! approved hash feeds H_msg. The ML-DSA-65 leg (the primary signature) is
 //! FIPS 204 FINAL, proven in acvp_mldsa65.rs.
 
-use elara_record::pqc::sphincs_verify;
+use elara_record::pqc::{sphincs_verify, verify_second_leg, SignedFormat, ALG_SLH_DSA_SHA2_192F};
 use slh_dsa::params::SLH_DSA_SHA2_192F;
 use slh_dsa::safe_api::SlhDsaSignature;
 use slh_dsa_legacy::params::SLH_DSA_SHA2_192F as LEGACY_SHA2_192F;
@@ -30,6 +32,10 @@ use slh_dsa_legacy::safe_api::SlhDsaSignature as LegacySignature;
 
 const INTERNAL: &str = include_str!("vectors/acvp_slhdsa192f_sigver.txt");
 const EXTERNAL: &str = include_str!("vectors/acvp_slhdsa192f_external_sigver.txt");
+const V8_LEG: &str = include_str!("vectors/acvp_slhdsa192f_v8_leg.txt");
+
+/// The second leg of a record version 8 is algorithm 0x04.
+const V8: SignedFormat = SignedFormat::Record(8);
 
 fn unhex(s: &str) -> Vec<u8> {
     assert!(s.len().is_multiple_of(2), "odd hex length");
@@ -124,6 +130,44 @@ fn slh_dsa_sha2_192f_fips205_external_sigver() {
                 "tc{tc}: verifies without the external-interface wrapper"
             );
         }
+        // The v8 leg is this interface with the EMPTY context, so a signature
+        // bound to any other context never verifies as a record second leg.
+        assert_eq!(
+            verify_second_leg(V8, Some(ALG_SLH_DSA_SHA2_192F), msg, sig, pk).expect("v8 routes to FIPS 205"),
+            expect && ctx.is_empty(),
+            "tc{tc}: the v8 second leg must bind the empty context"
+        );
     });
     assert_eq!(ran, 3, "vector file truncated: {ran}/3 cases ran");
+}
+
+#[test]
+fn slh_dsa_sha2_192f_v8_second_leg_through_the_chokepoint() {
+    let mut signed = 0usize;
+    let ran = each_case(V8_LEG, 4, |tc, expect, reason, f| {
+        let (sk, pk, msg, sig) = (&f[0], &f[1], &f[2], &f[3]);
+        assert!(expect, "tc{tc}: the v8-leg file holds valid signatures only");
+        let leg = |m: &[u8], s: &[u8]| {
+            verify_second_leg(V8, Some(ALG_SLH_DSA_SHA2_192F), m, s, pk).expect("v8 routes to FIPS 205")
+        };
+        assert!(leg(msg, sig), "ACVP tc{tc} ({reason}) must verify as a v8 second leg");
+        assert!(slh_dsa::verify(pk, sig, msg, SLH_DSA_SHA2_192F), "tc{tc}: backend disagrees with the chokepoint");
+        assert!(!sphincs_verify(msg, sig, pk).unwrap_or(false), "tc{tc}: the legacy 0x02 leg accepted a FIPS 205 signature");
+
+        let mut bad_sig = sig.clone();
+        bad_sig[0] ^= 0x01;
+        assert!(!leg(msg, &bad_sig), "tc{tc}: a tampered signature verified");
+        let mut bad_msg = msg.clone();
+        bad_msg.push(0x00);
+        assert!(!leg(&bad_msg, sig), "tc{tc}: a changed message verified");
+
+        // Deterministic signing (opt_rand = PK.seed) is what the v8 leg does, so
+        // the one deterministic case pins signing byte for byte.
+        if !sk.is_empty() {
+            assert!(slh_dsa::sign(sk, msg, SLH_DSA_SHA2_192F) == *sig, "tc{tc}: deterministic signing drifted");
+            signed += 1;
+        }
+    });
+    assert_eq!(ran, 2, "vector file truncated: {ran}/2 cases ran");
+    assert_eq!(signed, 1, "the deterministic signing case did not run");
 }

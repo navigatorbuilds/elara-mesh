@@ -14,8 +14,8 @@ use zeroize::Zeroize;
 
 use crate::crypto::hash::{sha3_256, sha3_256_hex};
 use crate::crypto::pqc::{
-    dilithium3_keygen, dilithium3_sign_with_pk, dilithium3_verify, sphincs_keygen, sphincs_sign_with_pk,
-    sphincs_verify,
+    dilithium3_keygen, dilithium3_sign_with_pk, dilithium3_verify, slh_dsa_check_pair, slh_dsa_keygen,
+    sphincs_keygen, sphincs_sign_with_pk, sphincs_verify,
 };
 use crate::errors::{ElaraError, Result};
 
@@ -240,6 +240,51 @@ impl AttestationLevel {
     }
 }
 
+/// The SPHINCS+ parameter set an identity's second-leg key belongs to.
+///
+/// Both sets have the same key and signature sizes, so the bytes cannot tell a
+/// legacy key from a FIPS 205 one; the identity file says which. A file without
+/// the `sphincs_suite` field holds a legacy key, as every file written before
+/// the FIPS 205 migration does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SphincsSuite {
+    /// Pre-standard SPHINCS+-SHA2-192f, the key every node holds today.
+    #[default]
+    Legacy,
+    /// FIPS 205 SLH-DSA-SHA2-192f: the second leg of a version 8 record.
+    Fips205,
+}
+
+impl SphincsSuite {
+    const LEGACY_TAG: &'static str = "sphincs-sha2-192f-legacy";
+    const FIPS205_TAG: &'static str = "slh-dsa-sha2-192f";
+
+    /// The `sphincs_suite` value an identity file carries for this suite.
+    pub fn tag(&self) -> &'static str {
+        match self {
+            Self::Legacy => Self::LEGACY_TAG,
+            Self::Fips205 => Self::FIPS205_TAG,
+        }
+    }
+
+    /// The second-leg algorithm byte a record signed with this suite carries.
+    pub fn algorithm(&self) -> u8 {
+        match self {
+            Self::Legacy => crate::crypto::ALG_SPHINCS_SHA2_192F,
+            Self::Fips205 => crate::crypto::ALG_SLH_DSA_SHA2_192F,
+        }
+    }
+
+    /// Read a `sphincs_suite` value. An unknown one is refused, never guessed.
+    pub fn parse(tag: &str) -> Result<Self> {
+        match tag {
+            Self::LEGACY_TAG => Ok(Self::Legacy),
+            Self::FIPS205_TAG => Ok(Self::Fips205),
+            other => Err(ElaraError::Crypto(format!("unknown sphincs_suite: {other}"))),
+        }
+    }
+}
+
 /// An Elara Protocol identity — a self-sovereign cryptographic keypair.
 ///
 /// Secret keys are zeroed from memory when the Identity is dropped,
@@ -260,6 +305,7 @@ pub struct Identity {
     secret_key: Option<Vec<u8>>,
     sphincs_public_key: Option<Vec<u8>>,
     sphincs_secret_key: Option<Vec<u8>>,
+    sphincs_suite: SphincsSuite,
 }
 
 impl std::fmt::Debug for Identity {
@@ -276,6 +322,7 @@ impl std::fmt::Debug for Identity {
             .field("pow_difficulty", &self.pow_difficulty)
             .field("secret_key", &self.secret_key.as_ref().map(|_| REDACTED))
             .field("sphincs_public_key", &self.sphincs_public_key)
+            .field("sphincs_suite", &self.sphincs_suite)
             .field("sphincs_secret_key", &self.sphincs_secret_key.as_ref().map(|_| REDACTED))
             .finish()
     }
@@ -330,6 +377,27 @@ fn mine_pow(public_key: &[u8], difficulty: u8) -> (u64, u64) {
     }
 }
 
+/// Refuse a new SLH-DSA secret key that repeats a seed of the old one, or uses
+/// one value for two of its own seeds. Both keys are SK.seed ‖ SK.prf ‖ PK.seed
+/// ‖ PK.root, four n-byte parts; the root is derived, so only the seeds count.
+/// Both keys belong to the caller, so the comparisons need not be constant-time.
+fn check_fresh_seeds(old_sk: &[u8], new_sk: &[u8]) -> Result<()> {
+    let n = new_sk.len() / 4;
+    if n == 0 || !new_sk.len().is_multiple_of(4) || old_sk.len() != new_sk.len() {
+        return Err(ElaraError::Crypto("SLH-DSA seed check: keys of the wrong length".into()));
+    }
+    let old: Vec<&[u8]> = old_sk[..3 * n].chunks(n).collect();
+    let new: Vec<&[u8]> = new_sk[..3 * n].chunks(n).collect();
+    for (i, seed) in new.iter().enumerate() {
+        if old.contains(seed) || new[i + 1..].contains(seed) {
+            return Err(ElaraError::Crypto(
+                "a new SLH-DSA seed repeats an earlier value: refusing the key".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 impl Identity {
     /// Generate a new identity with fresh keypairs (no PoW — difficulty=0).
     /// Profile A generates both Dilithium3 and SPHINCS+ keypairs.
@@ -360,6 +428,7 @@ impl Identity {
             secret_key: Some(dil_sk),
             sphincs_public_key: sphincs_pk,
             sphincs_secret_key: sphincs_sk,
+            sphincs_suite: SphincsSuite::Legacy,
         })
     }
 
@@ -404,6 +473,7 @@ impl Identity {
             secret_key: Some(dil_sk),
             sphincs_public_key: sphincs_pk,
             sphincs_secret_key: sphincs_sk,
+            sphincs_suite: SphincsSuite::Legacy,
         })
     }
 
@@ -438,7 +508,16 @@ impl Identity {
     }
 
     /// Sign a message with SPHINCS+ (Profile A only).
+    ///
+    /// A FIPS 205 key refuses: a bare message carries no signed format to say
+    /// which verifier its signature needs, so it would be checked as a legacy one.
+    /// That key signs only the second leg of a version 8 record.
     pub fn sign_sphincs(&self, message: &[u8]) -> Result<Vec<u8>> {
+        if self.sphincs_suite == SphincsSuite::Fips205 {
+            return Err(ElaraError::Crypto(
+                "a FIPS 205 second-leg key signs only a version 8 record, never a bare message".into(),
+            ));
+        }
         let sk = self
             .sphincs_secret_key
             .as_ref()
@@ -455,7 +534,10 @@ impl Identity {
         dilithium3_verify(message, signature, public_key).map_err(Into::into)
     }
 
-    /// Verify a SPHINCS+ signature.
+    /// Verify a SPHINCS+ signature over a bare message with the legacy verifier. A
+    /// record's or snapshot's second signature goes through
+    /// [`crate::crypto::pqc::verify_second_leg`] instead, which picks the verifier from
+    /// the signed format.
     pub fn verify_sphincs(message: &[u8], signature: &[u8], public_key: &[u8]) -> Result<bool> {
         sphincs_verify(message, signature, public_key).map_err(Into::into)
     }
@@ -473,30 +555,97 @@ impl Identity {
     }
 
     /// Sign a ValidationRecord with appropriate signatures for this identity's profile.
-    /// Profile A: Dilithium3 + SPHINCS+ (dual-sig) + sets sphincs public key.
+    /// Profile A: Dilithium3 + the second leg the record's version fixes (SPHINCS+
+    /// up to v7, FIPS 205 SLH-DSA from v8) + that leg's public key.
     /// Profile B/C: Dilithium3 only.
+    ///
+    /// From v8 the preimage commits both algorithm bytes and the second leg's key,
+    /// so every field it reads is set before it is built. On any error the record
+    /// carries no signature and no second-leg fields: nothing half-signed escapes.
     pub fn sign_record(&self, record: &mut crate::record::ValidationRecord) -> Result<()> {
-        let signable = record.signable_bytes();
-        let (dil_sig, sphincs_sig) = self.dual_sign(&signable)?;
-        record.signature = Some(dil_sig);
+        let signed = self.sign_record_fields(record);
+        if signed.is_err() {
+            record.signature = None;
+            record.sphincs_signature = None;
+            record.creator_sphincs_pk = None;
+            record.sphincs_algorithm = None;
+        }
+        signed
+    }
+
+    fn sign_record_fields(&self, record: &mut crate::record::ValidationRecord) -> Result<()> {
+        record.signature = None;
+        record.sphincs_signature = None;
+        record.creator_sphincs_pk = None;
+        record.sphincs_algorithm = None;
         record.sig_algorithm = crate::crypto::ALG_DILITHIUM3;
-        record.sphincs_signature = sphincs_sig;
         if self.profile == CryptoProfile::ProfileA {
+            let have = self.sphincs_suite.algorithm();
+            match crate::crypto::pqc::record_second_leg_algorithm(record.version) {
+                None => {
+                    return Err(ElaraError::Crypto(format!(
+                        "no second-leg verifier for record version {}",
+                        record.version
+                    )))
+                }
+                Some(wanted) if wanted != have => {
+                    return Err(ElaraError::Crypto(format!(
+                        "record version {} needs second-leg algorithm 0x{wanted:02x}, this key is 0x{have:02x}",
+                        record.version
+                    )))
+                }
+                Some(_) => {}
+            }
             record.creator_sphincs_pk = self.sphincs_public_key.clone();
-            record.sphincs_algorithm = Some(crate::crypto::ALG_SPHINCS_SHA2_192F);
+            record.sphincs_algorithm = Some(have);
+        }
+        let signable = record.signable_bytes();
+        record.signature = Some(self.sign(&signable)?);
+        if self.profile == CryptoProfile::ProfileA {
+            record.sphincs_signature = Some(self.sign_second_leg(&signable)?);
+            // Emit only what the network can verify: the second leg must pass the same
+            // chokepoint every verifier runs, under this record's signed version.
+            let verdict = record.check_second_leg(&signable);
+            if !matches!(verdict, Ok(Some(true))) {
+                let why = match verdict {
+                    Err(e) => e.to_string(),
+                    _ => "it does not verify".to_string(),
+                };
+                return Err(ElaraError::Crypto(format!(
+                    "refusing to emit a record version {} second signature: {why}",
+                    record.version
+                )));
+            }
         }
         Ok(())
+    }
+
+    /// The second-leg signature over a record preimage, by this key's suite.
+    fn sign_second_leg(&self, signable: &[u8]) -> Result<Vec<u8>> {
+        match self.sphincs_suite {
+            SphincsSuite::Legacy => self.sign_sphincs(signable),
+            SphincsSuite::Fips205 => Err(ElaraError::Crypto(
+                "a FIPS 205 second leg is not signed until its key is bound to the creator identity".into(),
+            )),
+        }
     }
 
     /// Sign a record in light mode: Dilithium3 only, stripping SPHINCS+ data.
     /// Produces a valid Profile B record regardless of this identity's profile.
     /// Wire size: ~5.6KB instead of ~41KB (7.4x). Use for non-critical records on
     /// resource-constrained nodes.
+    ///
+    /// The second leg is cleared BEFORE the preimage is built: from v8 it commits
+    /// the leg's key and algorithm byte, so a key signed over and then dropped
+    /// would break the signature.
     pub fn sign_record_light(&self, record: &mut crate::record::ValidationRecord) -> Result<()> {
+        record.signature = None;
+        record.sphincs_signature = None;
+        record.creator_sphincs_pk = None;
+        record.sphincs_algorithm = None;
+        record.sig_algorithm = crate::crypto::ALG_DILITHIUM3;
         let signable = record.signable_bytes();
         record.signature = Some(self.sign(&signable)?);
-        record.sig_algorithm = crate::crypto::ALG_DILITHIUM3;
-        record.strip_sphincs();
         Ok(())
     }
 
@@ -514,6 +663,74 @@ impl Identity {
         self.sphincs_public_key.as_deref()
     }
 
+    /// The parameter set the SPHINCS+ key belongs to.
+    pub fn sphincs_suite(&self) -> SphincsSuite {
+        self.sphincs_suite
+    }
+
+    /// A copy of this identity holding a fresh FIPS 205 SLH-DSA-SHA2-192f
+    /// second-leg key in place of its legacy SPHINCS+ one.
+    ///
+    /// The key comes from fresh OS randomness, never from the old key's seeds
+    /// (FIPS 205 §3.1), and is refused if any seed repeats one the old key holds.
+    /// The ML-DSA key, identity hash, proof of work and creation time stay as
+    /// they are. The copy's second-leg key signs only a version 8 record, and
+    /// nothing until that key is bound to the creator identity (plan step 5d).
+    pub fn with_fresh_fips205_key(&self) -> Result<Self> {
+        let secret_key = self
+            .secret_key
+            .as_ref()
+            .ok_or_else(|| ElaraError::Crypto("no secret key (public identity)".into()))?;
+        if self.profile != CryptoProfile::ProfileA {
+            return Err(ElaraError::Crypto("a second-leg key is Profile A only".into()));
+        }
+        let old_sk = self
+            .sphincs_secret_key
+            .as_ref()
+            .ok_or_else(|| ElaraError::Crypto("no SPHINCS+ key (Profile A only)".into()))?;
+        if self.sphincs_suite != SphincsSuite::Legacy {
+            return Err(ElaraError::Crypto(
+                "this identity already holds a FIPS 205 key".into(),
+            ));
+        }
+        // Checked while the pair still owns the secret, so a refusal zeroizes it.
+        let kp = slh_dsa_keygen()?;
+        check_fresh_seeds(old_sk, &kp.secret_key)?;
+        slh_dsa_check_pair(&kp.secret_key, &kp.public_key)?;
+        let (sphincs_pk, sphincs_sk) = kp.into_parts();
+        Ok(Self {
+            public_key: self.public_key.clone(),
+            identity_hash: self.identity_hash.clone(),
+            entity_type: self.entity_type.clone(),
+            created: self.created,
+            algorithm: self.algorithm.clone(),
+            profile: self.profile.clone(),
+            pow_nonce: self.pow_nonce,
+            pow_difficulty: self.pow_difficulty,
+            secret_key: Some(secret_key.clone()),
+            sphincs_public_key: Some(sphincs_pk),
+            sphincs_secret_key: Some(sphincs_sk),
+            sphincs_suite: SphincsSuite::Fips205,
+        })
+    }
+
+    /// Run the FIPS 205 §3.1 key check on this identity's second-leg key. Only a
+    /// FIPS 205 key passes.
+    pub fn check_fips205_key(&self) -> Result<()> {
+        if self.sphincs_suite != SphincsSuite::Fips205 {
+            return Err(ElaraError::Crypto("not a FIPS 205 second-leg key".into()));
+        }
+        let sk = self
+            .sphincs_secret_key
+            .as_ref()
+            .ok_or_else(|| ElaraError::Crypto("no SPHINCS+ key (Profile A only)".into()))?;
+        let pk = self
+            .sphincs_public_key
+            .as_ref()
+            .ok_or_else(|| ElaraError::Crypto("no SPHINCS+ public key".into()))?;
+        slh_dsa_check_pair(sk, pk)
+    }
+
     /// Return a copy without secret keys (safe to share).
     pub fn public_identity(&self) -> Self {
         Self {
@@ -528,6 +745,7 @@ impl Identity {
             secret_key: None,
             sphincs_public_key: self.sphincs_public_key.clone(),
             sphincs_secret_key: None,
+            sphincs_suite: self.sphincs_suite,
         }
     }
 
@@ -582,6 +800,14 @@ impl Identity {
                 serde_json::Value::String(hex::encode(spk)),
             );
         }
+        // Legacy is the absent field, so a legacy identity's file stays exactly
+        // what it was before the suite existed.
+        if self.sphincs_suite != SphincsSuite::Legacy {
+            data.insert(
+                "sphincs_suite".into(),
+                serde_json::Value::String(self.sphincs_suite.tag().into()),
+            );
+        }
         if let Some(ssk) = &self.sphincs_secret_key {
             data.insert(
                 "sphincs_secret_key".into(),
@@ -603,6 +829,13 @@ impl Identity {
         let public_key =
             hex::decode(get_str("public_key")?).map_err(|e| ElaraError::Crypto(e.to_string()))?;
         let identity_hash = get_str("identity_hash")?;
+        // Everything else names this identity by its hash, so the hash must be
+        // the one the key gives, not just the one the file says.
+        if sha3_256_hex(&public_key) != identity_hash {
+            return Err(ElaraError::Crypto(
+                "identity_hash does not match public_key".into(),
+            ));
+        }
         let entity_type = match get_str("entity_type")?.as_str() {
             "HUMAN" => EntityType::Human,
             "AI" => EntityType::Ai,
@@ -662,6 +895,21 @@ impl Identity {
             .transpose()
             .map_err(|e| ElaraError::Crypto(e.to_string()))?;
 
+        let sphincs_suite = match data.get("sphincs_suite") {
+            None => SphincsSuite::Legacy,
+            Some(v) => {
+                let tag = v
+                    .as_str()
+                    .ok_or_else(|| ElaraError::Crypto("sphincs_suite is not a string".into()))?;
+                if sphincs_public_key.is_none() {
+                    return Err(ElaraError::Crypto(
+                        "sphincs_suite on an identity with no SPHINCS+ key".into(),
+                    ));
+                }
+                SphincsSuite::parse(tag)?
+            }
+        };
+
         Ok(Self {
             public_key,
             identity_hash,
@@ -674,6 +922,7 @@ impl Identity {
             secret_key,
             sphincs_public_key,
             sphincs_secret_key,
+            sphincs_suite,
         })
     }
 }
@@ -682,6 +931,10 @@ impl Identity {
 
 /// Encrypted identity file format version.
 pub const ENCRYPTED_FORMAT_V1: &str = "aes-256-gcm-argon2id-v1";
+
+/// Encrypted identity file format, version 2: each encrypted secret also
+/// authenticates the public fields that say what it is (see `secret_aad`).
+pub const ENCRYPTED_FORMAT_V2: &str = "aes-256-gcm-argon2id-v2";
 
 /// Argon2id parameters — 64 MiB memory, 3 iterations, 1 lane.
 /// Balances security against startup latency (~0.5s on modern hardware).
@@ -705,9 +958,39 @@ fn derive_key(passphrase: &[u8], salt: &[u8]) -> Result<[u8; 32]> {
     Ok(key)
 }
 
-/// Encrypt a byte slice with AES-256-GCM. Returns nonce || ciphertext || tag.
-fn encrypt_field(key: &[u8; 32], plaintext: &[u8]) -> Result<Vec<u8>> {
-    use aes_gcm::{aead::Aead, Aes256Gcm, KeyInit, Nonce};
+/// The additional authenticated data a v2 file binds to one encrypted secret.
+///
+/// It covers the field the secret sits in, the identity hash, and the SPHINCS+
+/// suite and public key, so editing any of them in the file's cleartext makes
+/// decryption fail instead of loading the key under another suite. Each part is
+/// length-prefixed, so two different sets of parts never give the same bytes.
+fn secret_aad(
+    field: &str,
+    identity_hash: &str,
+    suite: SphincsSuite,
+    sphincs_public_key: Option<&[u8]>,
+) -> Vec<u8> {
+    let sphincs_pk_digest = sphincs_public_key.map(sha3_256_hex).unwrap_or_default();
+    let parts: [&[u8]; 6] = [
+        b"elara-identity-secret-aad-v2",
+        ENCRYPTED_FORMAT_V2.as_bytes(),
+        field.as_bytes(),
+        identity_hash.as_bytes(),
+        suite.tag().as_bytes(),
+        sphincs_pk_digest.as_bytes(),
+    ];
+    let mut aad = Vec::new();
+    for part in parts {
+        aad.extend_from_slice(&(part.len() as u64).to_be_bytes());
+        aad.extend_from_slice(part);
+    }
+    aad
+}
+
+/// Encrypt a byte slice with AES-256-GCM, authenticating `aad` with it (empty
+/// in a v1 file). Returns nonce || ciphertext || tag.
+fn encrypt_field(key: &[u8; 32], plaintext: &[u8], aad: &[u8]) -> Result<Vec<u8>> {
+    use aes_gcm::{aead::{Aead, Payload}, Aes256Gcm, KeyInit, Nonce};
 
     let cipher = Aes256Gcm::new_from_slice(key)
         .map_err(|e| ElaraError::Crypto(format!("AES-256-GCM init failed: {e}")))?;
@@ -716,7 +999,7 @@ fn encrypt_field(key: &[u8; 32], plaintext: &[u8]) -> Result<Vec<u8>> {
         .map_err(|e| ElaraError::Crypto(format!("nonce generation failed: {e}")))?;
     let nonce = Nonce::from_slice(&nonce_bytes);
     let ciphertext = cipher
-        .encrypt(nonce, plaintext)
+        .encrypt(nonce, Payload { msg: plaintext, aad })
         .map_err(|e| ElaraError::Crypto(format!("AES-256-GCM encryption failed: {e}")))?;
 
     let mut result = nonce_bytes.to_vec();
@@ -724,9 +1007,9 @@ fn encrypt_field(key: &[u8; 32], plaintext: &[u8]) -> Result<Vec<u8>> {
     Ok(result)
 }
 
-/// Decrypt nonce || ciphertext || tag with AES-256-GCM.
-fn decrypt_field(key: &[u8; 32], data: &[u8]) -> Result<Vec<u8>> {
-    use aes_gcm::{aead::Aead, Aes256Gcm, KeyInit, Nonce};
+/// Decrypt nonce || ciphertext || tag with AES-256-GCM, checking `aad`.
+fn decrypt_field(key: &[u8; 32], data: &[u8], aad: &[u8]) -> Result<Vec<u8>> {
+    use aes_gcm::{aead::{Aead, Payload}, Aes256Gcm, KeyInit, Nonce};
 
     if data.len() < NONCE_LEN + 16 {
         return Err(ElaraError::Crypto("encrypted data too short".into()));
@@ -735,7 +1018,7 @@ fn decrypt_field(key: &[u8; 32], data: &[u8]) -> Result<Vec<u8>> {
         .map_err(|e| ElaraError::Crypto(format!("AES-256-GCM init failed: {e}")))?;
     let nonce = Nonce::from_slice(&data[..NONCE_LEN]);
     let plaintext = cipher
-        .decrypt(nonce, &data[NONCE_LEN..])
+        .decrypt(nonce, Payload { msg: &data[NONCE_LEN..], aad })
         .map_err(|_| {
             ElaraError::Crypto(
                 "decryption failed — wrong passphrase or corrupted data".into(),
@@ -755,9 +1038,22 @@ impl Identity {
     /// Public fields (public_key, identity_hash, profile, etc.) stay in cleartext
     /// so the node can identify itself without decryption. Only secret keys are
     /// encrypted.
+    ///
+    /// A legacy-suite identity is written in format v1, which every earlier
+    /// release reads, so this binary can be rolled back. Any other suite is
+    /// written in v2, which also authenticates the suite (see `secret_aad`).
     pub fn to_encrypted_json(
         &self,
         passphrase: &[u8],
+    ) -> Result<BTreeMap<String, serde_json::Value>> {
+        self.encrypted_json(passphrase, self.sphincs_suite != SphincsSuite::Legacy)
+    }
+
+    /// [`Identity::to_encrypted_json`] in format v2 when `v2`, else v1.
+    fn encrypted_json(
+        &self,
+        passphrase: &[u8],
+        v2: bool,
     ) -> Result<BTreeMap<String, serde_json::Value>> {
         if passphrase.is_empty() {
             return Err(ElaraError::Crypto("passphrase must not be empty".into()));
@@ -778,7 +1074,7 @@ impl Identity {
 
         // Encryption metadata
         let enc_meta = serde_json::json!({
-            "format": ENCRYPTED_FORMAT_V1,
+            "format": if v2 { ENCRYPTED_FORMAT_V2 } else { ENCRYPTED_FORMAT_V1 },
             "argon2_salt": hex::encode(salt),
             "argon2_m_cost": ARGON2_M_COST,
             "argon2_t_cost": ARGON2_T_COST,
@@ -787,15 +1083,22 @@ impl Identity {
         data.insert("encryption".into(), enc_meta);
 
         // Encrypt secret keys
+        let aad = |field: &str| {
+            if v2 {
+                secret_aad(field, &self.identity_hash, self.sphincs_suite, self.sphincs_public_key())
+            } else {
+                Vec::new()
+            }
+        };
         if let Some(sk) = &self.secret_key {
-            let encrypted = encrypt_field(&key, sk)?;
+            let encrypted = encrypt_field(&key, sk, &aad("encrypted_secret_key"))?;
             data.insert(
                 "encrypted_secret_key".into(),
                 serde_json::Value::String(hex::encode(&encrypted)),
             );
         }
         if let Some(ssk) = &self.sphincs_secret_key {
-            let encrypted = encrypt_field(&key, ssk)?;
+            let encrypted = encrypt_field(&key, ssk, &aad("encrypted_sphincs_secret_key"))?;
             data.insert(
                 "encrypted_sphincs_secret_key".into(),
                 serde_json::Value::String(hex::encode(&encrypted)),
@@ -807,8 +1110,8 @@ impl Identity {
 
     /// Load identity from encrypted JSON format.
     ///
-    /// Parses public fields from cleartext, then decrypts secret keys using
-    /// the provided passphrase.
+    /// Parses and checks the public fields from cleartext, then decrypts the
+    /// secret keys using the provided passphrase. Reads format v1 and v2.
     pub fn from_encrypted_json(
         data: &BTreeMap<String, serde_json::Value>,
         passphrase: &[u8],
@@ -825,10 +1128,21 @@ impl Identity {
             .get("format")
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        if format != ENCRYPTED_FORMAT_V1 {
-            return Err(ElaraError::Crypto(format!(
-                "unsupported encryption format: {format}"
-            )));
+        let v2 = match format {
+            ENCRYPTED_FORMAT_V1 => false,
+            ENCRYPTED_FORMAT_V2 => true,
+            other => {
+                return Err(ElaraError::Crypto(format!(
+                    "unsupported encryption format: {other}"
+                )))
+            }
+        };
+        // Nothing in a v1 file authenticates a suite written beside its secrets,
+        // so anyone able to edit the file could have put it there.
+        if !v2 && data.contains_key("sphincs_suite") {
+            return Err(ElaraError::Crypto(
+                "sphincs_suite in a v1 encrypted identity, where nothing authenticates it".into(),
+            ));
         }
         let salt_hex = enc
             .get("argon2_salt")
@@ -837,12 +1151,25 @@ impl Identity {
         let salt =
             hex::decode(salt_hex).map_err(|e| ElaraError::Crypto(format!("bad salt hex: {e}")))?;
 
+        // The public fields first, checked: a v2 secret is bound to them.
+        let mut identity = Self::from_json(data)?;
+        let aad = |field: &str| {
+            if v2 {
+                secret_aad(
+                    field,
+                    &identity.identity_hash,
+                    identity.sphincs_suite,
+                    identity.sphincs_public_key(),
+                )
+            } else {
+                Vec::new()
+            }
+        };
+        let secret_key_aad = aad("encrypted_secret_key");
+        let sphincs_secret_key_aad = aad("encrypted_sphincs_secret_key");
+
         // Derive key
         let key = derive_key(passphrase, &salt)?;
-
-        // Build a temporary data map with decrypted secret keys for from_json()
-        let mut decrypted_data = data.clone();
-        decrypted_data.remove("encryption");
 
         // Decrypt secret key
         if let Some(v) = data
@@ -851,12 +1178,7 @@ impl Identity {
         {
             let encrypted = hex::decode(v)
                 .map_err(|e| ElaraError::Crypto(format!("bad encrypted_secret_key hex: {e}")))?;
-            let plaintext = decrypt_field(&key, &encrypted)?;
-            decrypted_data.remove("encrypted_secret_key");
-            decrypted_data.insert(
-                "secret_key".into(),
-                serde_json::Value::String(hex::encode(&plaintext)),
-            );
+            identity.secret_key = Some(decrypt_field(&key, &encrypted, &secret_key_aad)?);
         }
 
         // Decrypt SPHINCS+ secret key
@@ -866,16 +1188,11 @@ impl Identity {
         {
             let encrypted = hex::decode(v)
                 .map_err(|e| ElaraError::Crypto(format!("bad encrypted_sphincs_secret_key hex: {e}")))?;
-            let plaintext = decrypt_field(&key, &encrypted)?;
-            decrypted_data.remove("encrypted_sphincs_secret_key");
-            decrypted_data.insert(
-                "sphincs_secret_key".into(),
-                serde_json::Value::String(hex::encode(&plaintext)),
-            );
+            identity.sphincs_secret_key =
+                Some(decrypt_field(&key, &encrypted, &sphincs_secret_key_aad)?);
         }
 
-        // Reuse from_json() for the rest
-        Self::from_json(&decrypted_data)
+        Ok(identity)
     }
 }
 
@@ -1266,6 +1583,114 @@ mod tests {
     }
 
     #[test]
+    fn sign_record_refuses_a_second_leg_no_verifier_accepts() {
+        let id = Identity::generate(EntityType::Human, CryptoProfile::ProfileA).unwrap();
+        let mut record = crate::record::ValidationRecord::create(
+            b"test content",
+            id.public_key.clone(),
+            vec![],
+            crate::record::Classification::Public,
+            None,
+        );
+        id.sign_record(&mut record).unwrap();
+        assert_eq!(record.check_second_leg(&record.signable_bytes()).unwrap(), Some(true));
+
+        // The next era fixes another algorithm, and past it there is no verifier
+        // yet. Either way nothing half-signed escapes.
+        let refusals = [
+            (
+                crate::crypto::pqc::LEGACY_SECOND_LEG_MAX_RECORD_VERSION + 1,
+                "record version 8 needs second-leg algorithm 0x04, this key is 0x02",
+            ),
+            (
+                crate::crypto::pqc::FIPS205_SECOND_LEG_MAX_RECORD_VERSION + 1,
+                "no second-leg verifier for record version 9",
+            ),
+        ];
+        for (version, want) in refusals {
+            record.signature = Some(vec![1]);
+            record.sphincs_signature = Some(vec![2]);
+            record.creator_sphincs_pk = Some(vec![3]);
+            record.sphincs_algorithm = Some(crate::crypto::ALG_SPHINCS_SHA2_192F);
+            record.version = version;
+            let err = id.sign_record(&mut record).unwrap_err().to_string();
+            assert!(err.contains(want), "v{version}: {err}");
+            assert!(record.signature.is_none() && record.sphincs_signature.is_none());
+            assert!(record.creator_sphincs_pk.is_none() && record.sphincs_algorithm.is_none());
+        }
+    }
+
+    fn v8_record(signer: &Identity) -> crate::record::ValidationRecord {
+        let mut record = crate::record::ValidationRecord::create(
+            b"v8 content",
+            signer.public_key.clone(),
+            vec![],
+            crate::record::Classification::Public,
+            None,
+        );
+        record.version = crate::crypto::pqc::FIPS205_SECOND_LEG_MAX_RECORD_VERSION;
+        record
+    }
+
+    #[test]
+    fn a_v8_profile_b_record_signs_its_own_preimage_and_round_trips() {
+        let id = Identity::generate(EntityType::Device, CryptoProfile::ProfileB).unwrap();
+        let mut record = v8_record(&id);
+        id.sign_record(&mut record).unwrap();
+        assert!(record.sphincs_signature.is_none() && record.creator_sphincs_pk.is_none());
+        assert!(record.sphincs_algorithm.is_none());
+
+        let decoded = crate::record::ValidationRecord::from_bytes(&record.to_bytes()).unwrap();
+        assert_eq!(decoded.version, 8);
+        let signable = decoded.signable_bytes();
+        assert_ne!(signable, decoded.signable_bytes_under(7), "the v8 suffix is committed");
+        assert!(Identity::verify(&signable, decoded.signature.as_ref().unwrap(), &id.public_key).unwrap());
+        assert_eq!(decoded.check_second_leg(&signable).unwrap(), None);
+    }
+
+    #[test]
+    fn a_fips205_key_signs_no_record_second_leg_yet() {
+        let mut id = Identity::generate(EntityType::Device, CryptoProfile::ProfileA).unwrap();
+        id.sphincs_suite = SphincsSuite::Fips205;
+        let refusals = [
+            (
+                crate::crypto::pqc::LEGACY_SECOND_LEG_MAX_RECORD_VERSION,
+                "record version 7 needs second-leg algorithm 0x02, this key is 0x04",
+            ),
+            (
+                crate::crypto::pqc::FIPS205_SECOND_LEG_MAX_RECORD_VERSION,
+                "not signed until its key is bound to the creator identity",
+            ),
+        ];
+        for (version, want) in refusals {
+            let mut record = v8_record(&id);
+            record.version = version;
+            let err = id.sign_record(&mut record).unwrap_err().to_string();
+            assert!(err.contains(want), "v{version}: {err}");
+            assert!(record.signature.is_none() && record.sphincs_signature.is_none());
+            assert!(record.creator_sphincs_pk.is_none() && record.sphincs_algorithm.is_none());
+        }
+    }
+
+    #[test]
+    fn sign_record_light_drops_the_second_leg_before_the_v8_preimage() {
+        let id = Identity::generate(EntityType::Device, CryptoProfile::ProfileA).unwrap();
+        let mut record = v8_record(&id);
+        record.sphincs_signature = Some(vec![0xAB; 64]);
+        record.creator_sphincs_pk = Some(vec![0xCD; 48]);
+        record.sphincs_algorithm = Some(crate::crypto::ALG_SLH_DSA_SHA2_192F);
+        id.sign_record_light(&mut record).unwrap();
+        assert!(record.sphincs_signature.is_none() && record.creator_sphincs_pk.is_none());
+        assert!(record.sphincs_algorithm.is_none());
+
+        let decoded = crate::record::ValidationRecord::from_bytes(&record.to_bytes()).unwrap();
+        let signable = decoded.signable_bytes();
+        assert!(Identity::verify(&signable, decoded.signature.as_ref().unwrap(), &id.public_key).unwrap());
+        let mut stripped = decoded;
+        stripped.strip_sphincs().expect("a light v8 record carries no second leg to strip");
+    }
+
+    #[test]
     fn test_sign_record_profile_b() {
         let id = Identity::generate(EntityType::Device, CryptoProfile::ProfileB).unwrap();
         let mut record = crate::record::ValidationRecord::create(
@@ -1559,6 +1984,268 @@ mod tests {
         let r1 = Identity::from_encrypted_json(&enc1, passphrase).unwrap();
         let r2 = Identity::from_encrypted_json(&enc2, passphrase).unwrap();
         assert_eq!(r1.secret_key, r2.secret_key);
+    }
+
+    // ─── SPHINCS+ suite and encrypted format v2 ─────────────────────
+
+    /// An encrypted identity file written by the release before the suite
+    /// existed. Throwaway keys that no node uses; its passphrase is below.
+    const V1_FIXTURE: &str =
+        include_str!("../tests/fixtures/identity_v1_encrypted_profile_a.test-only.json");
+    const V1_FIXTURE_PASSPHRASE: &[u8] = b"elara-test-fixture-v1-throwaway";
+
+    fn v1_fixture() -> BTreeMap<String, serde_json::Value> {
+        serde_json::from_str(V1_FIXTURE).unwrap()
+    }
+
+    fn format_of(file: &BTreeMap<String, serde_json::Value>) -> &str {
+        file["encryption"]["format"].as_str().unwrap()
+    }
+
+    #[test]
+    fn a_file_from_before_the_suite_existed_loads_unchanged() {
+        let file = v1_fixture();
+        let id = Identity::from_encrypted_json(&file, V1_FIXTURE_PASSPHRASE).unwrap();
+        assert_eq!(
+            id.identity_hash,
+            "640e30a2d4546755d1338d1cf9497cde0d77fda311c789c2d16105751cb2a95c"
+        );
+        assert_eq!(id.sphincs_suite(), SphincsSuite::Legacy);
+        assert_eq!(id.profile, CryptoProfile::ProfileA);
+        assert!(id.verify_pow());
+
+        // Its public fields write back exactly as they were read.
+        for (field, value) in &id.public_identity().to_json() {
+            assert_eq!(file.get(field), Some(value), "{field}");
+        }
+
+        // Both legs still sign with the keys it holds.
+        let (dil, sphincs) = id.dual_sign(b"fixture").unwrap();
+        assert!(Identity::verify(b"fixture", &dil, &id.public_key).unwrap());
+        let spk = id.sphincs_public_key().unwrap();
+        assert!(Identity::verify_sphincs(b"fixture", &sphincs.unwrap(), spk).unwrap());
+
+        // Written again it is still format v1, with no suite field.
+        let again = id.to_encrypted_json(b"another-passphrase").unwrap();
+        assert_eq!(format_of(&again), ENCRYPTED_FORMAT_V1);
+        assert!(!again.contains_key("sphincs_suite"));
+    }
+
+    #[test]
+    fn a_legacy_identity_writes_no_suite_field() {
+        let json = Identity::generate(EntityType::Device, CryptoProfile::ProfileA)
+            .unwrap()
+            .to_json();
+        assert!(!json.contains_key("sphincs_suite"));
+        assert_eq!(Identity::from_json(&json).unwrap().sphincs_suite(), SphincsSuite::Legacy);
+
+        // Naming the legacy suite outright reads the same.
+        let mut named = json;
+        named.insert("sphincs_suite".into(), SphincsSuite::Legacy.tag().into());
+        assert_eq!(Identity::from_json(&named).unwrap().sphincs_suite(), SphincsSuite::Legacy);
+    }
+
+    #[test]
+    fn a_hash_the_key_does_not_give_is_refused() {
+        let mut json = Identity::generate(EntityType::Device, CryptoProfile::ProfileB)
+            .unwrap()
+            .to_json();
+        json.insert("identity_hash".into(), "00".repeat(32).into());
+        let err = Identity::from_json(&json).unwrap_err().to_string();
+        assert!(err.contains("identity_hash does not match"), "{err}");
+
+        // Encrypted too, and before any key derivation.
+        let mut file = v1_fixture();
+        file.insert("identity_hash".into(), "00".repeat(32).into());
+        let err = Identity::from_encrypted_json(&file, V1_FIXTURE_PASSPHRASE)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("identity_hash does not match"), "{err}");
+    }
+
+    #[test]
+    fn a_suite_field_that_cannot_be_trusted_is_refused() {
+        let a = Identity::generate(EntityType::Device, CryptoProfile::ProfileA).unwrap().to_json();
+        let b = Identity::generate(EntityType::Device, CryptoProfile::ProfileB).unwrap().to_json();
+        let with = |base: &BTreeMap<String, serde_json::Value>, suite: serde_json::Value| {
+            let mut json = base.clone();
+            json.insert("sphincs_suite".into(), suite);
+            Identity::from_json(&json)
+        };
+        assert!(with(&a, "sphincs-sha2-256s".into()).is_err(), "unknown suite");
+        assert!(with(&a, serde_json::json!(1)).is_err(), "not a string");
+        assert!(with(&a, serde_json::Value::Null).is_err(), "null");
+        assert!(with(&b, SphincsSuite::Fips205.tag().into()).is_err(), "no SPHINCS+ key");
+        let fips = with(&a, SphincsSuite::Fips205.tag().into()).unwrap();
+        assert_eq!(fips.sphincs_suite(), SphincsSuite::Fips205);
+    }
+
+    #[test]
+    fn a_fips205_key_refuses_a_bare_second_leg_signature() {
+        let mut id = Identity::generate(EntityType::Device, CryptoProfile::ProfileA).unwrap();
+        id.sphincs_suite = SphincsSuite::Fips205;
+        let err = id.sign_sphincs(b"m").unwrap_err().to_string();
+        assert!(err.contains("never a bare message"), "{err}");
+        assert!(id.dual_sign(b"m").is_err());
+        assert!(id.sign(b"m").is_ok(), "the Dilithium3 leg is unaffected");
+    }
+
+    #[test]
+    fn a_v2_file_binds_its_secrets_to_the_suite_and_keys() {
+        let mut id = Identity::generate(EntityType::Device, CryptoProfile::ProfileA).unwrap();
+        id.sphincs_suite = SphincsSuite::Fips205;
+        let pass: &[u8] = b"v2-passphrase";
+        let file = id.to_encrypted_json(pass).unwrap();
+        assert_eq!(format_of(&file), ENCRYPTED_FORMAT_V2);
+        assert_eq!(file["sphincs_suite"], SphincsSuite::Fips205.tag());
+        let back = Identity::from_encrypted_json(&file, pass).unwrap();
+        assert_eq!(back.sphincs_suite(), SphincsSuite::Fips205);
+        assert_eq!(back.secret_key, id.secret_key);
+        assert_eq!(back.sphincs_secret_key, id.sphincs_secret_key);
+
+        fn refused(
+            file: &BTreeMap<String, serde_json::Value>,
+            pass: &[u8],
+            edit: impl FnOnce(&mut BTreeMap<String, serde_json::Value>),
+        ) -> bool {
+            let mut edited = file.clone();
+            edit(&mut edited);
+            Identity::from_encrypted_json(&edited, pass).is_err()
+        }
+        assert!(refused(&file, pass, |f| {
+            f.remove("sphincs_suite");
+        }), "suite stripped");
+        assert!(refused(&file, pass, |f| {
+            f.insert("sphincs_suite".into(), SphincsSuite::Legacy.tag().into());
+        }), "suite swapped");
+        assert!(refused(&file, pass, |f| {
+            f.remove("sphincs_suite");
+            f.get_mut("encryption").unwrap()["format"] = ENCRYPTED_FORMAT_V1.into();
+        }), "downgraded to v1");
+        let other = Identity::generate(EntityType::Device, CryptoProfile::ProfileA).unwrap();
+        let other_spk = hex::encode(other.sphincs_public_key().unwrap());
+        assert!(refused(&file, pass, |f| {
+            f.insert("sphincs_public_key".into(), other_spk.into());
+        }), "SPHINCS+ public key swapped");
+        assert!(refused(&file, pass, |f| {
+            let sk = f.remove("encrypted_secret_key").unwrap();
+            let ssk = f.insert("encrypted_sphincs_secret_key".into(), sk).unwrap();
+            f.insert("encrypted_secret_key".into(), ssk);
+        }), "secrets swapped between fields");
+    }
+
+    #[test]
+    fn a_v1_file_never_carries_a_suite() {
+        for suite in [SphincsSuite::Legacy, SphincsSuite::Fips205] {
+            let mut file = v1_fixture();
+            file.insert("sphincs_suite".into(), suite.tag().into());
+            let err = Identity::from_encrypted_json(&file, V1_FIXTURE_PASSPHRASE)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("v1 encrypted identity"), "{suite:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn the_v2_reader_takes_a_legacy_identity_too() {
+        let id = Identity::generate(EntityType::Device, CryptoProfile::ProfileB).unwrap();
+        let file = id.encrypted_json(b"p", true).unwrap();
+        assert_eq!(format_of(&file), ENCRYPTED_FORMAT_V2);
+        let back = Identity::from_encrypted_json(&file, b"p").unwrap();
+        assert_eq!(back.sphincs_suite(), SphincsSuite::Legacy);
+        assert_eq!(back.secret_key, id.secret_key);
+    }
+
+    // ─── A fresh FIPS 205 second-leg key ─────────────────────────────
+
+    /// The three n-byte seeds of an SLH-DSA secret key; the root is derived.
+    fn seeds_of(sk: &[u8]) -> Vec<&[u8]> {
+        let n = sk.len() / 4;
+        sk[..3 * n].chunks(n).collect()
+    }
+
+    #[test]
+    fn a_fresh_fips205_key_shares_no_seed_with_the_old_one() {
+        let old = Identity::generate(EntityType::Device, CryptoProfile::ProfileA).unwrap();
+        let new = old.with_fresh_fips205_key().unwrap();
+        assert_eq!(new.sphincs_suite(), SphincsSuite::Fips205);
+        assert_eq!(new.identity_hash, old.identity_hash);
+        assert_eq!(new.public_key, old.public_key);
+        assert_eq!(new.secret_key, old.secret_key);
+        assert_eq!((new.pow_nonce, new.pow_difficulty), (old.pow_nonce, old.pow_difficulty));
+        assert_eq!(new.created, old.created);
+        assert_ne!(new.sphincs_public_key, old.sphincs_public_key);
+
+        let old_seeds = seeds_of(old.sphincs_secret_key.as_ref().unwrap());
+        let new_seeds = seeds_of(new.sphincs_secret_key.as_ref().unwrap());
+        assert_eq!(new_seeds.len(), 3);
+        for (i, seed) in new_seeds.iter().enumerate() {
+            assert!(!old_seeds.contains(seed), "new seed {i} repeats an old seed");
+            assert!(!new_seeds[i + 1..].contains(seed), "new seed {i} is used twice");
+        }
+
+        assert!(new.check_fips205_key().is_ok());
+        assert!(old.check_fips205_key().is_err());
+        let mut mislabelled = old.clone();
+        mislabelled.sphincs_suite = SphincsSuite::Fips205;
+        assert!(mislabelled.check_fips205_key().is_err(), "a legacy key under a FIPS 205 tag");
+        assert!(new.sign_sphincs(b"m").is_err(), "a FIPS 205 key signs no bare message");
+        assert!(new.sign(b"m").is_ok());
+
+        let again = old.with_fresh_fips205_key().unwrap();
+        assert_ne!(again.sphincs_secret_key, new.sphincs_secret_key);
+    }
+
+    #[test]
+    fn a_fresh_fips205_key_is_refused_where_it_cannot_belong() {
+        let err = |id: &Identity| id.with_fresh_fips205_key().unwrap_err().to_string();
+        let a = Identity::generate(EntityType::Device, CryptoProfile::ProfileA).unwrap();
+        assert!(err(&a.public_identity()).contains("public identity"));
+        let b = Identity::generate(EntityType::Device, CryptoProfile::ProfileB).unwrap();
+        assert!(err(&b).contains("Profile A"));
+        let fresh = a.with_fresh_fips205_key().unwrap();
+        assert!(err(&fresh).contains("already holds"));
+    }
+
+    #[test]
+    fn a_seed_that_repeats_is_refused() {
+        // n = 2: SK.seed ‖ SK.prf ‖ PK.seed ‖ PK.root.
+        let old: &[u8] = &[1, 1, 2, 2, 3, 3, 9, 9];
+        let fresh: &[u8] = &[4, 4, 5, 5, 6, 6, 9, 9];
+        assert!(check_fresh_seeds(old, fresh).is_ok(), "the root is derived, not a seed");
+        let repeats: [(&[u8], &str); 3] = [
+            (&[4, 4, 5, 5, 1, 1, 7, 7], "an old SK.seed as PK.seed"),
+            (&[4, 4, 3, 3, 6, 6, 7, 7], "an old PK.seed as SK.prf"),
+            (&[4, 4, 5, 5, 4, 4, 7, 7], "one value used twice"),
+        ];
+        for (new, why) in repeats {
+            let err = check_fresh_seeds(old, new).unwrap_err().to_string();
+            assert!(err.contains("repeats an earlier value"), "{why}: {err}");
+        }
+        assert!(check_fresh_seeds(&[1, 1, 1, 2, 2, 2, 3, 3, 3, 9, 9, 9], fresh).is_err());
+        assert!(check_fresh_seeds(&[1, 2, 3], &[4, 5, 6]).is_err());
+        assert!(check_fresh_seeds(&[], &[]).is_err());
+    }
+
+    #[test]
+    fn a_fresh_fips205_key_round_trips_through_both_files() {
+        let id = Identity::generate(EntityType::Device, CryptoProfile::ProfileA)
+            .unwrap()
+            .with_fresh_fips205_key()
+            .unwrap();
+
+        let plain = Identity::from_json(&id.to_json()).unwrap();
+        assert_eq!(plain.sphincs_suite(), SphincsSuite::Fips205);
+        assert_eq!(plain.sphincs_secret_key, id.sphincs_secret_key);
+        assert!(plain.check_fips205_key().is_ok());
+
+        let file = id.to_encrypted_json(b"p").unwrap();
+        assert_eq!(format_of(&file), ENCRYPTED_FORMAT_V2);
+        let back = Identity::from_encrypted_json(&file, b"p").unwrap();
+        assert_eq!(back.sphincs_suite(), SphincsSuite::Fips205);
+        assert_eq!(back.secret_key, id.secret_key);
+        assert_eq!(back.sphincs_secret_key, id.sphincs_secret_key);
+        assert!(back.check_fips205_key().is_ok());
     }
 
     // ─── Adaptive PoW Rate Tracker Tests ─────────────────────────────────

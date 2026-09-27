@@ -31,13 +31,39 @@ All notable changes to elara-runtime.
   advance), not protection against back-dating. The reference branch, whose BLS signature is
   unverified, no longer prints "provably fresh". JSON field names are unchanged.
 
-## Crates — elara-verify, unreleased (the next publish is 0.3.4, never a second 0.3.3)
+## Crates — elara-record 0.4.0 · elara-verify 0.4.0, unreleased
 
-Pins Bitcoin block 965547 (added 2026-09-05), so the second matured sample in
-`examples/verify/` (epoch seal 107599) grades its existed-by leg verified (pin-authenticated). The published
-0.3.3 predates this pin and grades that sample PARTIAL. The repository's Cargo.toml still
-reads 0.3.3, so a source build and the crates.io build of "0.3.3" differ until the bump.
+Both manifests read 0.4.0. crates.io still serves elara-record 0.3.0 and elara-verify
+0.3.3, so a source build and a crates.io build differ until the next publish. Both
+public APIs changed in ways that can break a caller, so neither publish can be a 0.3.x
+patch:
+
+- **elara-record:** `ValidationRecord::strip_sphincs` returns a `Result`. It refuses to
+  strip the second leg of a signed version-8 record, because that record's first
+  signature covers the second leg's algorithm byte and key. The decoder accepts wire
+  version 8 (`WIRE_VERSION` is 8), and each record version accepts one second-leg
+  algorithm byte only: 0x02 (SPHINCS+) up to version 7 and 0x04 (SLH-DSA-SHA2-192f) at
+  version 8 (`record_second_leg_algorithm`). Every second signature is checked through
+  one function, `verify_second_leg`. No node signs version-8 records yet. Also new:
+  `slh_dsa_verify`, `mldsa44_verify`, `ValidationRecord::check_second_leg` and
+  `ValidationRecord::signable_bytes_under`.
+- **elara-verify:** `SealRecordVerifyError` gains a `SecondSignature` variant. The seal
+  check now also verifies a second signature the record carries, and refuses one that
+  does not verify or cannot be checked (a half leg, or a record version with no
+  second-leg verifier). The enum is not `#[non_exhaustive]`, so an exhaustive `match`
+  on it needs the new arm.
+
+`elara-mcp` now requires both crates at 0.4.0, so its next publish needs a new version
+too.
+
+The other elara-verify changes since 0.3.3: it pins Bitcoin block 965547 (added
+2026-09-05), so the second matured sample in `examples/verify/` (epoch seal 107599)
+grades its existed-by leg verified (pin-authenticated); the published 0.3.3 predates
+this pin and grades that sample PARTIAL. When a signature fails, the verifier tries the
+other two preimage constructions and names the one the signer used, if either matches,
+instead of calling the record a forgery; the verdict stays a failure.
 Output wording also changed, so a source build and the published 0.3.3 print different text:
+verdict strings name ML-DSA-65 first,
 the summary says "the ✓ checks listed" (it prints before the checks, so "above" was wrong),
 and each time bound states its trust assumption instead of calling the bracket trustless.
 The sample output in `examples/verify/README.md` is regenerated from a source build.

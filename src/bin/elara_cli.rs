@@ -1998,10 +1998,11 @@ enum SubmitOutcome {
 ///   limit exceeded", hourly "exceeds propagation rate limit", global
 ///   "global rate limit exceeded"); drain STOPS, retries next run.
 /// - "embargoed" — the node's gossip_rejected memo ("previously_rejected"):
-///   it remembers refusing this id once and short-circuits every resubmit
-///   until the memo clears (node restart, or the transient-reject
-///   reclassification). Not the record's fault: drain keeps the file, burns
-///   NO attempt, continues.
+///   it refused these exact bytes before on a relayed path (a pull, or a
+///   push naming its sender) and short-circuits every resubmit until the
+///   memo clears (node restart). A first-hop submit never enters the memo
+///   (H-1), so the drain's own refusals come back as "error" with the
+///   node's reason. Drain keeps the file, burns NO attempt, continues.
 /// - "duplicate" — duplicate-shaped rejection (already on chain via a path
 ///   that errors instead of the success-shaped storage dedup); drain treats
 ///   as landed.

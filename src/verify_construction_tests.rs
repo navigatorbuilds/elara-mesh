@@ -74,6 +74,28 @@ mod tests {
         );
     }
 
+    /// The v8 branch (the second-leg commitment) is a construction of its own in
+    /// both directions: a v8 record signed by v7 code, and a v7 record signed by
+    /// v8 code, each name the construction the signer used.
+    #[test]
+    fn construction_disagreement_names_the_v8_boundary_both_ways() {
+        let id = Identity::generate(EntityType::Ai, CryptoProfile::ProfileB).unwrap();
+        for (declared, signed_under) in [(8u16, 6u16), (7, 8)] {
+            let mut rec = unsigned_record(&id);
+            rec.version = declared;
+            let other = rec.signable_bytes_under(signed_under);
+            rec.signature = Some(id.sign(&other).expect("sign"));
+            rec.sig_algorithm = crate::crypto::ALG_DILITHIUM3;
+
+            let (status, detail) = signature_check_detail(&rec);
+            assert_eq!(status, Status::Fail, "v{declared}: a disagreement must never pass");
+            assert!(
+                detail.contains(&format!("v{signed_under} preimage construction")),
+                "v{declared} signed under v{signed_under}: got {detail}"
+            );
+        }
+    }
+
     /// A signature over unrelated bytes verifies under NO construction, so the
     /// detail stays plain: the probe never invents a disagreement.
     #[test]

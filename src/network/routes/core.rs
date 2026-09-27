@@ -660,8 +660,10 @@ pub async fn submit_record(
     }
     // Check gossip rejection cache — skip records we already tried and rejected.
     // This prevents infinite push/pull retry of permanently invalid records.
+    // Keyed on the wire bytes (H-1): a tampered copy never embargoes the id.
+    let reject_key = crate::network::gossip::RejectKey::of(&record);
     {
-        let already_rejected = state.gossip_rejected.lock_recover().contains(&record_id);
+        let already_rejected = state.gossip_rejected.lock_recover().contains(&reject_key);
         if already_rejected {
             state.gossip_rejected_dedup_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             return Ok(Json(
@@ -895,10 +897,13 @@ recent_bad_sig_record_ids: std::collections::VecDeque::new(),
                         // Park it instead (not consulted by pull skips).
                         // 8b invariant: seal-class disposes first — a TRUSTED
                         // push's seal reject was still an embargo leak here.
+                        // Release the pre-validation `seen` mark first (H-1): a
+                        // refused copy must not dedup the genuine record out.
+                        state_bg.seen.lock_recover().remove(rid.as_str());
                         if crate::network::gossip::dispose_seal_ingest_failure(&state_bg, &rc, 0) {
                             // seal-class disposed (declined or bounded park)
                         } else if crate::network::gossip::should_permanent_reject(!push_trusted, &reason) {
-                            state_bg.gossip_rejected.lock_recover().insert(rid);
+                            state_bg.gossip_rejected.lock_recover().insert(reject_key);
                         } else {
                             crate::network::gossip::park_retryable(&state_bg, &rid);
                         }
@@ -911,6 +916,7 @@ recent_bad_sig_record_ids: std::collections::VecDeque::new(),
                         // gossip_rejected entry is consult-and-skip on every pull
                         // driver, so embargoing an infra failure makes the record
                         // un-repullable on this node (P0 silent-loss).
+                        state_bg.seen.lock_recover().remove(rid.as_str());
                         if !crate::network::gossip::dispose_seal_ingest_failure(&state_bg, &rc, 0) {
                             crate::network::gossip::park_retryable(&state_bg, &rid);
                         }
@@ -946,11 +952,13 @@ recent_bad_sig_record_ids: std::collections::VecDeque::new(),
                     state
                         .throttle_refused_dropped_total
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                } else if !crate::network::gossip::is_retryable_ingest_rejection(&reason) {
-                    state.gossip_rejected.lock_recover().insert(record_id.clone());
-                } else {
+                } else if crate::network::gossip::is_retryable_ingest_rejection(&reason) {
                     crate::network::gossip::park_retryable(&state, &record_id);
                 }
+                // Any other refusal is dropped, never embargoed (H-1): this
+                // first-hop verdict ran the timestamp defense, which pulls skip,
+                // so it must not refuse the same bytes arriving by pull. The
+                // submitter already has the reason in the response.
                 return Ok(Json(serde_json::json!({"accepted": false, "reason": reason, "id": record_id})));
             }
             crate::network::state_core::InsertResult::Error { message } => {
@@ -1111,13 +1119,9 @@ pub async fn receive_announcements(
             have.push(ann.record_id.clone());
             continue;
         }
-        // Check gossip rejection cache — don't request records we already rejected
-        let already_rejected = state.gossip_rejected.lock_recover().contains(&ann.record_id);
-        if already_rejected {
-            state.gossip_rejected_dedup_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            have.push(ann.record_id.clone());
-            continue;
-        }
+        // The reject cache is not consulted (H-1): it keys on wire bytes and
+        // an announcement carries only an id. A refused copy costs one fetch
+        // and is refused again on arrival by its bytes.
         let in_storage = state.rocks.record_exists(&ann.record_id).unwrap_or(false);
         if in_storage {
             have.push(ann.record_id.clone());
@@ -4272,5 +4276,60 @@ mod tests {
             "has_pow must be true when pow_difficulty > 0 — defends \
              refactor hardcoding has_pow = false or swapping `> 0` for `< 0`",
         );
+    }
+
+    /// H-1, loopback gossip push: a refused copy releases its pre-validation
+    /// `seen` mark and is embargoed by its bytes, so the genuine record with
+    /// the same id is still stored afterwards.
+    #[tokio::test]
+    async fn h1_http_push_refusal_releases_seen_for_the_genuine_record() {
+        use crate::identity::{CryptoProfile, EntityType, Identity};
+        use std::time::{Duration, Instant};
+        let state = crate::network::state::build_test_node_state();
+        let core = crate::network::state_core::spawn_state_core(state.clone());
+        let _ = state.state_core.set(core);
+
+        let id = Identity::generate(EntityType::Device, CryptoProfile::ProfileB).expect("identity");
+        let mut genuine = ValidationRecord::create(
+            b"h1_http_push",
+            id.public_key.clone(),
+            vec![],
+            crate::record::Classification::Public,
+            None,
+        );
+        id.sign_record(&mut genuine).expect("sign");
+        let mut tampered = genuine.clone();
+        tampered.signature.as_mut().expect("signature")[0] ^= 0x01;
+
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("x-elara-network-id", state.config.network_id.parse().expect("header"));
+        headers.insert("x-elara-sender", "c3".repeat(32).parse().expect("header"));
+        let push = |rec: &ValidationRecord| {
+            submit_record(
+                State(state.clone()),
+                lo_ci(),
+                headers.clone(),
+                axum::body::Bytes::from(rec.to_bytes()),
+            )
+        };
+
+        let queued = push(&tampered).await.map_err(|e| e.0).expect("queued");
+        assert_eq!(queued.0["accepted"], serde_json::json!(true));
+        // The refusal lands in the background, after the `seen` release.
+        let key = crate::network::gossip::RejectKey::of(&tampered);
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !state.gossip_rejected.lock_recover().contains(&key) {
+            assert!(Instant::now() < deadline, "tampered copy never refused");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(!state.seen.lock_recover().contains(&genuine.id), "refusal kept the seen mark");
+
+        let queued = push(&genuine).await.map_err(|e| e.0).expect("queued");
+        assert_eq!(queued.0["accepted"], serde_json::json!(true), "got {}", queued.0);
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while state.rocks.get_record(&genuine.id).expect("read").is_none() {
+            assert!(Instant::now() < deadline, "genuine record never stored");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     }
 }

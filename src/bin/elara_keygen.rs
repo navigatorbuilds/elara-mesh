@@ -10,6 +10,9 @@
 //   verify   — read a JSON identity, check structure + PoW, print summary
 //   pubkey   — strip secret material from a JSON identity, emit publishable
 //              subset (for QR-out / paper-out from an air-gap host)
+//   rekey    — rotate the passphrase of an encrypted identity file
+//   fips205  — write a copy of an identity holding a fresh FIPS 205 SLH-DSA
+//              second-leg key
 //
 // No network, no database, no tokio runtime. Pure CPU + filesystem.
 
@@ -19,7 +22,7 @@ use std::process::ExitCode;
 
 use elara_runtime::identity::{
     is_encrypted_identity, write_identity_file, CryptoProfile, EntityType, Identity,
-    MAX_POW_DIFFICULTY,
+    SphincsSuite, MAX_POW_DIFFICULTY,
 };
 
 const USAGE: &str = "\
@@ -31,6 +34,8 @@ USAGE:
     elara-keygen verify <PATH>
     elara-keygen pubkey <PATH> [--output <PUB_PATH>] [--quiet]
     elara-keygen rekey <PATH>       (env: ELARA_OLD_PASSPHRASE, ELARA_NEW_PASSPHRASE)
+    elara-keygen fips205 <PATH> --output <NEW_PATH> [--quiet]
+                                    (env: ELARA_IDENTITY_PASSPHRASE if PATH is encrypted)
     elara-keygen -h | --help
 
 SUBCOMMANDS:
@@ -39,6 +44,13 @@ SUBCOMMANDS:
     pubkey     Read a JSON identity and emit the publishable subset
                (no secret_key / no sphincs_secret_key) — suitable for
                transferring out of an air-gap host via QR or paper.
+    rekey      Rotate the passphrase of an encrypted identity file in place.
+    fips205    Write a copy of a Profile A identity holding a fresh FIPS 205
+               SLH-DSA-SHA2-192f second-leg key, drawn from OS randomness and
+               never derived from the old key. The ML-DSA key and identity_hash
+               stay as they are; PATH is never changed. NEW_PATH is encrypted,
+               under the same passphrase, when PATH is. The new key signs only
+               from WIRE_VERSION 8.
 
 GEN OPTIONS:
     --output PATH          Where to write the identity JSON file (0o600).
@@ -67,7 +79,8 @@ OUTPUT:
 
     On `pubkey`, the publishable JSON (public_key, identity_hash,
     entity_type, profile, algorithm, created, pow_nonce, pow_difficulty,
-    sphincs_public_key) is emitted. No secret_key, no sphincs_secret_key.
+    sphincs_public_key, and sphincs_suite for a FIPS 205 key) is emitted.
+    No secret_key, no sphincs_secret_key.
 
 GENESIS USE:
     Run `gen` on an air-gapped machine (Tails live image, factory-fresh
@@ -243,6 +256,9 @@ fn run_verify(rest: Vec<String>) -> std::result::Result<(), String> {
             .map(|v| v.len())
             .unwrap_or(0)
     );
+    if identity.sphincs_public_key().is_some() {
+        eprintln!("  sphincs_suite:    {}", identity.sphincs_suite().tag());
+    }
     eprintln!("  pow_difficulty:   {}", identity.pow_difficulty);
     eprintln!("  pow_nonce:        {}", identity.pow_nonce);
     eprintln!("  pow_valid:        {}", pow_ok);
@@ -351,6 +367,147 @@ fn run_pubkey(args: PubkeyArgs) -> std::result::Result<(), String> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
+// fips205 — a copy of an identity with a fresh FIPS 205 second-leg key
+// ─────────────────────────────────────────────────────────────────────────
+
+#[derive(Debug)]
+struct Fips205Args {
+    input: PathBuf,
+    output: PathBuf,
+    quiet: bool,
+}
+
+fn parse_fips205(rest: Vec<String>) -> std::result::Result<Fips205Args, String> {
+    let mut input: Option<PathBuf> = None;
+    let mut output: Option<PathBuf> = None;
+    let mut quiet = false;
+
+    let mut it = rest.into_iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--quiet" => quiet = true,
+            "--output" => {
+                output = Some(PathBuf::from(
+                    it.next().ok_or("--output requires a path".to_string())?,
+                ));
+            }
+            other if other.starts_with("--") => {
+                return Err(format!("unknown argument to fips205: {other}"));
+            }
+            other => {
+                if input.is_some() {
+                    return Err("fips205 takes one positional path".to_string());
+                }
+                input = Some(PathBuf::from(other));
+            }
+        }
+    }
+
+    Ok(Fips205Args {
+        input: input.ok_or("fips205 requires a path argument".to_string())?,
+        output: output
+            .ok_or("fips205 requires --output: the source file is never changed".to_string())?,
+        quiet,
+    })
+}
+
+/// The identity file `data` with a fresh FIPS 205 second-leg key, and its
+/// identity hash. The new file is encrypted, under the same passphrase, when
+/// `data` is. It is read back and checked in memory before anything is written.
+fn fips205_file(
+    data: &BTreeMap<String, serde_json::Value>,
+    passphrase: Option<&[u8]>,
+) -> std::result::Result<(BTreeMap<String, serde_json::Value>, String), String> {
+    let passphrase = match (is_encrypted_identity(data), passphrase) {
+        (true, None) => {
+            return Err("the identity file is encrypted: set ELARA_IDENTITY_PASSPHRASE".to_string())
+        }
+        (true, pass) => pass,
+        (false, _) => None,
+    };
+    let open = |file: &BTreeMap<String, serde_json::Value>| match passphrase {
+        Some(pass) => Identity::from_encrypted_json(file, pass),
+        None => Identity::from_json(file),
+    };
+
+    let old = open(data).map_err(|e| format!("invalid identity: {e}"))?;
+    let new = old
+        .with_fresh_fips205_key()
+        .map_err(|e| format!("no FIPS 205 key written: {e}"))?;
+    let file = match passphrase {
+        Some(pass) => new.to_encrypted_json(pass),
+        None => Ok(new.to_json()),
+    }
+    .map_err(|e| format!("serialize failed: {e}"))?;
+
+    let back = open(&file).map_err(|e| format!("read-back failed, nothing written: {e}"))?;
+    let unchanged = |id: &Identity| {
+        let mut public = id.public_identity().to_json();
+        public.remove("sphincs_public_key");
+        public.remove("sphincs_suite");
+        public
+    };
+    if unchanged(&back) != unchanged(&old) {
+        return Err("read-back changed the identity, nothing written".to_string());
+    }
+    if back.sphincs_suite() != SphincsSuite::Fips205
+        || back.sphincs_public_key() != new.sphincs_public_key()
+    {
+        return Err("read-back lost the new key, nothing written".to_string());
+    }
+    let probe = b"elara-keygen fips205 read-back";
+    let sig = back
+        .sign(probe)
+        .map_err(|e| format!("read-back ML-DSA key failed to sign, nothing written: {e}"))?;
+    if !Identity::verify(probe, &sig, &back.public_key).unwrap_or(false) {
+        return Err("read-back ML-DSA key does not verify, nothing written".to_string());
+    }
+    back.check_fips205_key()
+        .map_err(|e| format!("read-back key check failed, nothing written: {e}"))?;
+    Ok((file, back.identity_hash.clone()))
+}
+
+/// Write a copy of the identity at `input` holding a fresh FIPS 205 SLH-DSA
+/// second-leg key to `output`, a new file. The source is only read.
+fn run_fips205(args: Fips205Args) -> std::result::Result<(), String> {
+    if args.output.exists() {
+        return Err(format!(
+            "refusing to overwrite existing file: {}",
+            args.output.display()
+        ));
+    }
+    let data = read_identity_file(&args.input)?;
+    let passphrase = if is_encrypted_identity(&data) {
+        // Read as the node reads it: an empty value counts as unset.
+        let pass = std::env::var("ELARA_IDENTITY_PASSPHRASE")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .ok_or("the identity file is encrypted: set ELARA_IDENTITY_PASSPHRASE".to_string())?;
+        Some(zeroize::Zeroizing::new(pass))
+    } else {
+        None
+    };
+    let (file, hash) = fips205_file(&data, passphrase.as_ref().map(|p| p.as_bytes()))?;
+    write_identity_file(&args.output, &file).map_err(|e| format!("write failed: {e}"))?;
+    if read_identity_file(&args.output)? != file {
+        return Err(format!(
+            "{} does not read back as written: do not use it",
+            args.output.display()
+        ));
+    }
+
+    if !args.quiet {
+        eprintln!("elara-keygen fips205: wrote {}", args.output.display());
+        eprintln!("  second leg:       {}", SphincsSuite::Fips205.tag());
+        eprintln!("  encrypted:        {}", passphrase.is_some());
+        eprintln!("  source untouched: {}", args.input.display());
+        eprintln!("  it signs its second leg only from WIRE_VERSION 8");
+    }
+    println!("{hash}");
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────
 // dispatch
 // ─────────────────────────────────────────────────────────────────────────
 
@@ -362,7 +519,7 @@ fn run_with_args(mut args: Vec<String>) -> std::result::Result<(), String> {
 
     let subcommand = if let Some(first) = args.first() {
         match first.as_str() {
-            "gen" | "verify" | "pubkey" | "rekey" => {
+            "gen" | "verify" | "pubkey" | "rekey" | "fips205" => {
                 let s = first.clone();
                 args.remove(0);
                 s
@@ -372,7 +529,7 @@ fn run_with_args(mut args: Vec<String>) -> std::result::Result<(), String> {
             other if other.starts_with('-') => "gen".to_string(),
             other => {
                 return Err(format!(
-                    "unknown subcommand '{other}' — valid: gen, verify, pubkey, rekey"
+                    "unknown subcommand '{other}' — valid: gen, verify, pubkey, rekey, fips205"
                 ));
             }
         }
@@ -385,6 +542,7 @@ fn run_with_args(mut args: Vec<String>) -> std::result::Result<(), String> {
         "verify" => run_verify(args),
         "pubkey" => run_pubkey(parse_pubkey(args)?),
         "rekey" => run_rekey(args),
+        "fips205" => run_fips205(parse_fips205(args)?),
         _ => Err(format!("unexpected subcommand: {subcommand}")),
     }
 }
@@ -1005,5 +1163,102 @@ mod tests {
         // subcommand error — confirming the flag-first path still reaches gen.
         let err = run_with_args(args(&["--output"])).unwrap_err();
         assert!(!err.contains("unknown subcommand"), "{err}");
+    }
+
+    // ─── fips205 — a fresh FIPS 205 second-leg key ────────────────────────
+
+    fn profile_a_file(dir: &Path) -> PathBuf {
+        let path = dir.join("ident.json");
+        run_gen(GenArgs {
+            output: path.clone(),
+            profile: CryptoProfile::ProfileA,
+            entity: EntityType::Device,
+            difficulty: 0,
+            quiet: true,
+        })
+        .expect("gen");
+        path
+    }
+
+    #[test]
+    fn fips205_writes_a_new_file_and_leaves_the_source_alone() {
+        let dir = tmp_dir("fips205");
+        let src = profile_a_file(&dir);
+        let before = std::fs::read(&src).unwrap();
+        let out = dir.join("fips205.json");
+
+        run_fips205(Fips205Args { input: src.clone(), output: out.clone(), quiet: true })
+            .expect("fips205");
+
+        assert_eq!(std::fs::read(&src).unwrap(), before, "the source file is never changed");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&out).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "identity file must be 0o600, got 0o{mode:o}");
+        }
+        let old = Identity::from_json(&read_identity_file(&src).unwrap()).unwrap();
+        let new = Identity::from_json(&read_identity_file(&out).unwrap()).unwrap();
+        assert_eq!(new.identity_hash, old.identity_hash);
+        assert_eq!(new.public_key, old.public_key);
+        assert_eq!(new.sphincs_suite(), SphincsSuite::Fips205);
+        assert_ne!(new.sphincs_public_key(), old.sphincs_public_key());
+        new.check_fips205_key().expect("the new key passes the FIPS 205 key check");
+        run_verify(vec![out.display().to_string()]).expect("verify reads the new file");
+
+        let err = run_fips205(Fips205Args { input: src, output: out, quiet: true }).unwrap_err();
+        assert!(err.contains("refusing to overwrite"), "{err}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn fips205_keeps_an_encrypted_file_encrypted() {
+        let id = Identity::generate_with_pow(EntityType::Device, CryptoProfile::ProfileA, 0)
+            .expect("gen identity");
+        let data = id.to_encrypted_json(b"pass").expect("encrypt");
+
+        let err = fips205_file(&data, None).unwrap_err();
+        assert!(err.contains("ELARA_IDENTITY_PASSPHRASE"), "{err}");
+        assert!(fips205_file(&data, Some(b"wrong")).is_err());
+
+        let (file, hash) = fips205_file(&data, Some(b"pass")).expect("fips205");
+        assert_eq!(hash, id.identity_hash);
+        assert!(is_encrypted_identity(&file));
+        assert_eq!(file["sphincs_suite"], SphincsSuite::Fips205.tag());
+        assert!(!file.contains_key("secret_key"));
+        assert!(!file.contains_key("sphincs_secret_key"));
+        let back = Identity::from_encrypted_json(&file, b"pass").expect("decrypt");
+        back.check_fips205_key().expect("the new key passes the FIPS 205 key check");
+    }
+
+    #[test]
+    fn fips205_refuses_what_cannot_take_a_second_leg_key() {
+        let a = Identity::generate_with_pow(EntityType::Device, CryptoProfile::ProfileA, 0)
+            .expect("gen A");
+        let b = Identity::generate_with_pow(EntityType::Device, CryptoProfile::ProfileB, 0)
+            .expect("gen B");
+        let (fresh, _) = fips205_file(&a.to_json(), None).expect("fips205");
+        for (data, why) in [
+            (b.to_json(), "Profile B"),
+            (a.public_identity().to_json(), "a public-only file"),
+            (fresh, "a file that already holds a FIPS 205 key"),
+        ] {
+            let err = fips205_file(&data, None).unwrap_err();
+            assert!(err.contains("no FIPS 205 key written"), "{why}: {err}");
+        }
+    }
+
+    #[test]
+    fn parse_fips205_needs_a_path_and_an_output() {
+        let err = parse_fips205(args(&["in.json"])).unwrap_err();
+        assert!(err.contains("--output"), "{err}");
+        let err = parse_fips205(args(&["--output", "out.json"])).unwrap_err();
+        assert!(err.contains("path argument"), "{err}");
+        let f = parse_fips205(args(&["in.json", "--output", "out.json", "--quiet"])).unwrap();
+        assert_eq!(f.input, PathBuf::from("in.json"));
+        assert_eq!(f.output, PathBuf::from("out.json"));
+        assert!(f.quiet);
+        let err = run_with_args(args(&["fips205", "in.json", "--output"])).unwrap_err();
+        assert!(err.contains("--output requires a path"), "{err}");
     }
 }

@@ -50,7 +50,15 @@ pub const MAGIC: &[u8; 4] = b"ELRA";
 /// `CURRENT_SIGNING_VERSION` is raised on its own named day, and old (v6-
 /// ceiling) binaries reject v7 seals cleanly at decode (fail-closed-by-
 /// rejection — the R2 dispatch rationale).
-pub const WIRE_VERSION: u16 = 7;
+/// v8 (2026-09-26, FIPS 205 second leg — verdict
+/// `FIPS205-SLH-DSA-MIGRATION-VERDICT-2026-09-26`, plan step 5b): the
+/// `signable_bytes()` preimage gains a suffix committing both algorithm bytes
+/// and the length-prefixed second-leg public key (0x00 and an empty key for
+/// Profile B), and the second leg is SLH-DSA-SHA2-192f (FIPS 205, algorithm
+/// 0x04) from v8 on; 0x02 (SPHINCS+, not FIPS 205) stays the leg up to v7.
+/// Decode capability only — nothing emits v8 until `CURRENT_SIGNING_VERSION`
+/// is raised on the step-7 flag day.
+pub const WIRE_VERSION: u16 = 8;
 /// The version stamped on FRESH records by `create()`/`create_from_hash()` —
 /// the emission version, split from the [`WIRE_VERSION`] decode ceiling so the
 /// fleet can become v6-decode-capable everywhere before any node emits v6
@@ -597,7 +605,7 @@ mod tests {
     // Five fixture-free axes pinning the wire-format primitives that the
     // earlier 6-test surface covered only at happy-path / single-value
     // granularity:
-    //   1. module constants (MAGIC bytes, WIRE_VERSION=7 ceiling,
+    //   1. module constants (MAGIC bytes, WIRE_VERSION=8 ceiling,
     //      CURRENT_SIGNING_VERSION=7 emission, WIRE_VERSION_MIN=4,
     //      HEADER_SIZE=8, MAX_METADATA_ENTRIES=256, META_* tags 0..=6)
     //   2. encode_u16_prefixed u16::MAX boundary (clean encode) + u16::MAX+1
@@ -617,16 +625,17 @@ mod tests {
         assert_eq!(MAGIC, b"ELRA");
         assert_eq!(MAGIC.len(), 4);
 
-        // WIRE_VERSION literal — v7 DECODE CEILING (Merkle fold-tag dispatch
-        // signal, MERKLE-FOLD-TAG-BRIEF-V2-2026-08-22; CONSCIOUS EDIT
-        // 2026-08-23). Same discipline as the v6 raise (T63/T65, 2026-08-18):
-        // ceiling first while CURRENT_SIGNING_VERSION stays 6 — decode-capable
-        // everywhere before emitting anywhere. v7 changes NO byte shapes; it
-        // is the per-seal fold-recipe signal (>=7 folds tagged v2). The
-        // emission split still closes the ARCH-4 zombie hazard: fresh records
-        // stamp CURRENT_SIGNING_VERSION, and signable_bytes()/to_bytes() both
+        // WIRE_VERSION literal — v8 DECODE CEILING (FIPS 205 second leg,
+        // FIPS205-STEPS-3-8-PLAN-2026-09-26 step 5b; CONSCIOUS EDIT
+        // 2026-09-26; the v7 raise was 2026-08-23, the Merkle fold-tag
+        // signal). Same discipline as every raise: ceiling first while
+        // CURRENT_SIGNING_VERSION stays 7 — decode-capable everywhere before
+        // emitting anywhere. v8 appends the second-leg commitment to the
+        // preimage and moves the leg to SLH-DSA (0x04). The emission split
+        // still closes the ARCH-4 zombie hazard: fresh records stamp
+        // CURRENT_SIGNING_VERSION, and signable_bytes()/to_bytes() both
         // branch on self.version, so a bumped ceiling re-writes NOTHING.
-        assert_eq!(WIRE_VERSION, 7);
+        assert_eq!(WIRE_VERSION, 8);
 
         // CURRENT_SIGNING_VERSION — the emission version. CONSCIOUS EDIT
         // 2026-08-23: 6 → 7 — THE MERKLE FOLD FLAG DAY FIRED (operator-named

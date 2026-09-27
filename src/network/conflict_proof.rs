@@ -72,6 +72,11 @@ impl ConflictProof {
     ///    a new one for an occupied slot.
     /// 5. Both Dilithium3 signatures verify under the shared public key
     ///    against each record's `signable_bytes()`.
+    /// 6. Each record's second (SPHINCS+) signature, when present, verifies
+    ///    through the chokepoint, and a half leg (a signature without its key
+    ///    or a key without its signature) refuses. Every first leg is checked
+    ///    before any second leg, so a record its creator did not sign never
+    ///    costs an SLH-DSA verify. An absent second leg still passes.
     pub fn verify(&self) -> Result<()> {
         // (1) wire v5+ gate
         if self.record_a.version < 5 || self.record_b.version < 5 {
@@ -111,6 +116,7 @@ impl ConflictProof {
         }
 
         // (5) both signatures verify
+        let mut signed = Vec::with_capacity(2);
         for (label, rec) in [("record_a", &self.record_a), ("record_b", &self.record_b)] {
             let sig = rec.signature.as_deref().ok_or_else(|| {
                 ElaraError::Wire(format!("ConflictProof {label} missing signature"))
@@ -121,6 +127,24 @@ impl ConflictProof {
                 return Err(ElaraError::Crypto(format!(
                     "ConflictProof {label} signature invalid"
                 )));
+            }
+            signed.push((label, rec, msg));
+        }
+
+        // (6) each present second signature verifies too
+        for (label, rec, msg) in signed {
+            match rec.check_second_leg(&msg) {
+                Ok(None) | Ok(Some(true)) => {}
+                Ok(Some(false)) => {
+                    return Err(ElaraError::Crypto(format!(
+                        "ConflictProof {label} second signature invalid"
+                    )));
+                }
+                Err(e) => {
+                    return Err(ElaraError::Crypto(format!(
+                        "ConflictProof {label} second signature: {e}"
+                    )));
+                }
             }
         }
 
@@ -303,6 +327,42 @@ mod tests {
             format!("{err}").contains("signature invalid") || format!("{err}").contains("Crypto"),
             "got: {err}"
         );
+    }
+
+    #[test]
+    fn present_second_signature_must_verify() {
+        let id = Identity::generate(EntityType::Device, CryptoProfile::ProfileA).unwrap();
+        let dual_v5 = |content: &[u8]| {
+            let mut rec = ValidationRecord::create(
+                content,
+                id.public_key.clone(),
+                vec![],
+                Classification::Public,
+                Some(BTreeMap::new()),
+            );
+            rec.version = 5;
+            rec.nonce = 21;
+            id.sign_record(&mut rec).unwrap();
+            rec
+        };
+        let a = dual_v5(b"content-alpha");
+        let b = dual_v5(b"content-beta");
+        ConflictProof::new(a.clone(), b.clone()).verify().expect("both legs valid");
+
+        let mut bad = b.clone();
+        bad.sphincs_signature.as_mut().unwrap()[100] ^= 0x01;
+        let err = ConflictProof::new(a.clone(), bad).verify().unwrap_err().to_string();
+        assert!(err.contains("ConflictProof record_b second signature invalid"), "got: {err}");
+
+        let mut half = b.clone();
+        half.creator_sphincs_pk = None;
+        let err = ConflictProof::new(half, a.clone()).verify().unwrap_err().to_string();
+        assert!(err.contains("ConflictProof record_a second signature: SPHINCS+ signature present"), "got: {err}");
+
+        // An absent second leg still passes until identities are bound to their key.
+        let mut stripped = b;
+        stripped.strip_sphincs().expect("a v5 preimage leaves the second leg out");
+        ConflictProof::new(a, stripped).verify().expect("absent leg passes");
     }
 
     #[test]

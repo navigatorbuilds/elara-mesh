@@ -354,6 +354,31 @@ pub(crate) fn is_admission_throttle_rejection(reason: &str) -> bool {
         || reason.contains("global rate limit exceeded")
 }
 
+/// Key of the `gossip_rejected` embargo: SHA3-256 over the record's full wire
+/// encoding (both signatures, the second-leg key and the algorithm bytes
+/// included), never the record id. An id-keyed embargo let one tampered copy
+/// (a flipped signature byte, or another record reusing the id) block the
+/// genuine record on every path (FIPS 205 verdict, decision 7, H-1). Compute
+/// it on the record exactly as received, before any move or mutation.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct RejectKey([u8; 32]);
+
+impl RejectKey {
+    pub fn of(record: &ValidationRecord) -> Self {
+        Self(crate::crypto::hash::sha3_256(&record.to_bytes()))
+    }
+}
+
+/// Key of the `attestation_bad_sigs` cache: the attestation's record and
+/// witness plus SHA3-256 of its signature bytes, so a forged signature caches
+/// only itself and never blocks the witness's genuine attestation (H-1).
+pub(crate) fn attestation_bad_sig_key(record_id: &str, witness_hash: &str, signature: &[u8]) -> String {
+    format!(
+        "{record_id}:{witness_hash}:{}",
+        hex::encode(crate::crypto::hash::sha3_256(signature))
+    )
+}
+
 /// Epoch gap beyond which an incoming epoch seal is too far behind the node's
 /// local view to be worth applying (DAG convergence will have superseded it).
 pub(crate) const STALE_EPOCH_SEAL_GAP: u64 = 100;
@@ -776,6 +801,7 @@ async fn retry_parked_lane(state: &Arc<NodeState>, base_url: &str, lane: ParkLan
         };
         // 8b: probe before the move — the reject arm needs seal metadata.
         let probe = seal_reject_probe(&record);
+        let reject_key = RejectKey::of(&record);
         match insert_record_synced(state, record).await {
             Ok(_) => {
                 state.seen.lock_recover().insert(id);
@@ -794,7 +820,7 @@ async fn retry_parked_lane(state: &Arc<NodeState>, base_url: &str, lane: ParkLan
                     // B5: a permanent re-fail in the super-seal lane (shape
                     // reject, or any non-transient error) → embargo, never
                     // another re-fetch.
-                    state.gossip_rejected.lock_recover().insert(id);
+                    state.gossip_rejected.lock_recover().insert(reject_key);
                 } else if dispose_seal_ingest_failure_probed(state, &probe, attempts + 1) {
                     // disposed (declined, re-parked with aging, or aged out)
                 } else if is_retryable_ingest_rejection(&err_str) {
@@ -805,7 +831,7 @@ async fn retry_parked_lane(state: &Arc<NodeState>, base_url: &str, lane: ParkLan
                         state.gossip_park_aged_out_total.fetch_add(1, Relaxed);
                     }
                 } else {
-                    state.gossip_rejected.lock_recover().insert(id);
+                    state.gossip_rejected.lock_recover().insert(reject_key);
                 }
             }
         }
@@ -2385,7 +2411,8 @@ async fn resolve_orphan_parents(
                     let record_id = record.id.clone();
                     let already_seen = state.seen.lock_recover().contains(&record_id);
                     if already_seen { continue; }
-                    let already_rejected = state.gossip_rejected.lock_recover().contains(&record_id);
+                    let reject_key = RejectKey::of(&record);
+                    let already_rejected = state.gossip_rejected.lock_recover().contains(&reject_key);
                     if already_rejected { continue; }
 
                     let is_seal_class = record.metadata.contains_key(EPOCH_OP_KEY);
@@ -2977,7 +3004,9 @@ fn bootstrap_record_signature_valid(record: &ValidationRecord) -> bool {
     match (&record.creator_sphincs_pk, &record.sphincs_signature) {
         // Complete Profile A dual-sig: verify it.
         (Some(spk), Some(ssig)) => {
-            matches!(crate::crypto::pqc::sphincs_verify(&signable, ssig, spk), Ok(true))
+            let format = crate::crypto::pqc::SignedFormat::Record(record.version);
+            let leg = crate::crypto::pqc::verify_second_leg(format, record.sphincs_algorithm, &signable, ssig, spk);
+            matches!(leg, Ok(true))
         }
         // Incomplete (pk xor sig) — reject, matching ingest's both-or-neither.
         (Some(_), None) | (None, Some(_)) => false,
@@ -3153,6 +3182,14 @@ async fn bootstrap_pull_from_zero(state: &Arc<NodeState>, base_url: &str) -> cra
         // timestamp_pull path already verifies every record it stores, so our
         // own history is known to pass). Ledger validation stays skipped.
         {
+            // FIPS 205 step 5b hold (the ingest predicate): no record from the
+            // FIPS 205 leg era until the flag day. Checked first — a header read
+            // never buys the SLH-DSA verify below.
+            if !super::ingest::record_version_admits(record.version) {
+                info!("bootstrap: holding v{} record {} until the flag day", record.version, &record_id[..record_id.len().min(16)]);
+                skipped += 1;
+                continue;
+            }
             // Signature: run the pure verifier in spawn_blocking (SPHINCS+
             // verify is heavy; a from-zero node has no seal loop to stall, but
             // keep the executor free anyway). Clone is a one-time bootstrap cost.
@@ -3429,7 +3466,8 @@ pub async fn timestamp_pull(state: &Arc<NodeState>, base_url: &str) -> crate::er
             let already_seen = state.seen.lock_recover().contains(&record_id);
             if already_seen { continue; }
             // Skip records already known to be invalid
-            let already_rejected = state.gossip_rejected.lock_recover().contains(&record_id);
+            let reject_key = RejectKey::of(&record);
+            let already_rejected = state.gossip_rejected.lock_recover().contains(&reject_key);
             if already_rejected {
                 state.gossip_rejected_dedup_total.fetch_add(1, Relaxed);
                 continue;
@@ -3458,7 +3496,7 @@ pub async fn timestamp_pull(state: &Arc<NodeState>, base_url: &str) -> crate::er
                     // seal reaching this arm must still never be embargoed.
                     if !dispose_seal_ingest_failure(state, &record, 0) {
                         if !is_retryable_ingest_rejection(&err_str) {
-                            state.gossip_rejected.lock_recover().insert(record_id);
+                            state.gossip_rejected.lock_recover().insert(reject_key);
                         } else {
                             park_retryable(state, &record_id);
                         }
@@ -3639,7 +3677,8 @@ async fn full_pull(state: &Arc<NodeState>, base_url: &str) -> crate::errors::Res
                 let record_id = record.id.clone();
                 let already_seen = state.seen.lock_recover().contains(&record_id);
                 if already_seen { continue; }
-                let already_rejected = state.gossip_rejected.lock_recover().contains(&record_id);
+                let reject_key = RejectKey::of(&record);
+                let already_rejected = state.gossip_rejected.lock_recover().contains(&reject_key);
                 if already_rejected {
                     state.gossip_rejected_dedup_total.fetch_add(1, Relaxed);
                     continue;
@@ -3687,7 +3726,7 @@ async fn full_pull(state: &Arc<NodeState>, base_url: &str) -> crate::errors::Res
                         }
                         if !dispose_seal_ingest_failure(state, &record, 0) {
                             if !is_retryable_ingest_rejection(&err_str) {
-                                state.gossip_rejected.lock_recover().insert(record_id);
+                                state.gossip_rejected.lock_recover().insert(reject_key);
                             } else {
                                 park_retryable(state, &record_id);
                             }
@@ -3869,7 +3908,8 @@ pub async fn delta_pull(state: &Arc<NodeState>, base_url: &str) -> crate::errors
         let record_id = record.id.clone();
         let already_seen = state.seen.lock_recover().contains(&record_id);
         if already_seen { continue; }
-        let already_rejected = state.gossip_rejected.lock_recover().contains(&record_id);
+        let reject_key = RejectKey::of(&record);
+        let already_rejected = state.gossip_rejected.lock_recover().contains(&reject_key);
         if already_rejected {
             state.gossip_rejected_dedup_total.fetch_add(1, Relaxed);
             continue;
@@ -3899,7 +3939,7 @@ pub async fn delta_pull(state: &Arc<NodeState>, base_url: &str) -> crate::errors
                 }
                 if !dispose_seal_ingest_failure(state, &record, 0) {
                     if !is_retryable_ingest_rejection(&err_str) {
-                        state.gossip_rejected.lock_recover().insert(record_id);
+                        state.gossip_rejected.lock_recover().insert(reject_key);
                     } else {
                         park_retryable(state, &record_id);
                     }
@@ -4805,16 +4845,6 @@ async fn process_attestation_pull_batch(
             continue;
         }
 
-        // Skip attestations already known to have bad signatures
-        {
-            let bad = state.attestation_bad_sigs.lock_recover();
-            let key = format!("{record_id}:{witness_hash}");
-            if bad.contains(&key) {
-                if timestamp > batch_max_ts { batch_max_ts = timestamp; }
-                continue;
-            }
-        }
-
         // Skip attestations we already have — avoids expensive
         // Dilithium3 verification for duplicates. On a 1-vCPU node,
         // verifying 500 known attestations wasted ~2.5s per cycle.
@@ -4848,6 +4878,18 @@ async fn process_attestation_pull_batch(
             Ok(s) if !s.is_empty() => s,
             _ => continue,
         };
+
+        // Skip attestations already known to have bad signatures. The key
+        // covers the signature bytes, so a forged copy never blocks the
+        // witness's genuine attestation (H-1).
+        if state
+            .attestation_bad_sigs
+            .lock_recover()
+            .contains(&attestation_bad_sig_key(record_id, witness_hash, &sig))
+        {
+            if timestamp > batch_max_ts { batch_max_ts = timestamp; }
+            continue;
+        }
 
         // Require public key — can't verify without it
         let pk_hex = match att["witness_public_key"].as_str() {
@@ -4929,8 +4971,10 @@ async fn process_attestation_pull_batch(
                 &p.witness_hash[..p.witness_hash.len().min(16)],
                 &p.record_id[..p.record_id.len().min(16)]
             );
-            let mut bad = state.attestation_bad_sigs.lock_recover();
-            bad.insert(format!("{}:{}", p.record_id, p.witness_hash));
+            state
+                .attestation_bad_sigs
+                .lock_recover()
+                .insert(attestation_bad_sig_key(&p.record_id, &p.witness_hash, &p.signature));
             state.attestation_pull_invalid_sig_total
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             batch_invalid_sig += 1;
@@ -6451,7 +6495,7 @@ mod tests {
             .lock()
             .unwrap()
             .contains(&stale.id));
-        assert!(!state.gossip_rejected.lock_recover().contains(&stale.id));
+        assert!(state.gossip_rejected.lock_recover().is_empty());
         assert!(!state
             .gossip_retry
             .lock_recover()
@@ -6467,7 +6511,7 @@ mod tests {
             .lock_recover()
             .iter()
             .any(|(id, _)| id == &fresh.id));
-        assert!(!state.gossip_rejected.lock_recover().contains(&fresh.id));
+        assert!(state.gossip_rejected.lock_recover().is_empty());
 
         // At the attempt cap the id ages out — still never embargoed.
         let aged = seal_meta_record("seal", 502, "z0");
@@ -6481,7 +6525,7 @@ mod tests {
             .lock_recover()
             .iter()
             .any(|(id, _)| id == &aged.id));
-        assert!(!state.gossip_rejected.lock_recover().contains(&aged.id));
+        assert!(state.gossip_rejected.lock_recover().is_empty());
 
         // Parked-then-stale (the `:414` leak): staleness is judged at
         // disposition time, so a seal that went stale while parked declines.
@@ -6496,10 +6540,7 @@ mod tests {
             .lock()
             .unwrap()
             .contains(&went_stale.id));
-        assert!(!state
-            .gossip_rejected
-            .lock_recover()
-            .contains(&went_stale.id));
+        assert!(state.gossip_rejected.lock_recover().is_empty());
 
         // Non-seal → not disposed here; the caller's legacy (B6-preserving)
         // logic applies.
@@ -6520,7 +6561,7 @@ mod tests {
             .lock_recover()
             .iter()
             .any(|(id, _)| id == &zt.id));
-        assert!(!state.gossip_rejected.lock_recover().contains(&zt.id));
+        assert!(state.gossip_rejected.lock_recover().is_empty());
     }
 
     /// R1 (V-Q §8.1): the creator is unauthenticated at park time — any
@@ -6569,7 +6610,7 @@ mod tests {
             "a forged-creator seal parks identically to an honest one, attempts 0"
         );
         // Never embargoed, never stale-declined (8b invariant holds regardless).
-        assert!(!state.gossip_rejected.lock_recover().contains(&forged.id));
+        assert!(state.gossip_rejected.lock_recover().is_empty());
         assert!(!state
             .declined_seal_ids
             .lock()
@@ -6679,7 +6720,7 @@ mod tests {
             "never re-parked — this is what makes the eviction permanent"
         );
         assert!(
-            !state.gossip_rejected.lock_recover().contains(&honest.id),
+            state.gossip_rejected.lock_recover().is_empty(),
             "8b invariant: a stale seal is declined, never embargoed"
         );
     }
@@ -9257,7 +9298,7 @@ mod tests {
             .iter()
             .any(|(id, _)| id == &ss.id));
         assert!(!state.declined_seal_ids.lock().unwrap().contains(&ss.id));
-        assert!(!state.gossip_rejected.lock_recover().contains(&ss.id));
+        assert!(state.gossip_rejected.lock_recover().is_empty());
         // The seal lane is untouched by the super-seal park.
         assert_eq!(state.gossip_retry.lock_recover().len(), GOSSIP_RETRY_CAP);
 
@@ -9269,7 +9310,7 @@ mod tests {
             .lock_recover()
             .iter()
             .any(|(id, _)| id == &aged.id));
-        assert!(!state.gossip_rejected.lock_recover().contains(&aged.id));
+        assert!(state.gossip_rejected.lock_recover().is_empty());
     }
 
     /// R1-X1 Commit 3 (S1): the super-seal lane has its own cap and FIFO
@@ -9296,5 +9337,54 @@ mod tests {
         // Dedup by id within the lane.
         park_retryable_in_lane(&state, ParkLane::SuperSeal, "ss-10", 3);
         assert_eq!(state.super_seal_retry.lock_recover().len(), SUPER_SEAL_RETRY_CAP);
+    }
+
+    /// H-1: the embargo key is the wire bytes, never the id. A flipped byte
+    /// in either signature or in the second-leg key gives a different key, so
+    /// a refused copy cannot shadow the genuine record. A decode round trip
+    /// keeps the key, so every ingress path computes the same one.
+    #[test]
+    fn h1_reject_key_separates_tampered_copies_and_survives_decode() {
+        use crate::identity::{CryptoProfile, EntityType, Identity};
+        let id = Identity::generate(EntityType::Device, CryptoProfile::ProfileA).expect("identity");
+        let mut rec = ValidationRecord::create(
+            b"h1_reject_key",
+            id.public_key.clone(),
+            vec![],
+            crate::record::Classification::Public,
+            None,
+        );
+        id.sign_record(&mut rec).expect("sign");
+        assert!(rec.sphincs_signature.is_some(), "Profile A signs both legs");
+        assert!(rec.creator_sphincs_pk.is_some(), "Profile A carries the second-leg key");
+        let key = RejectKey::of(&rec);
+        assert_eq!(RejectKey::of(&rec), key, "the key is deterministic");
+        let decoded = ValidationRecord::from_bytes(&rec.to_bytes()).expect("decode");
+        assert_eq!(RejectKey::of(&decoded), key, "a decode round trip keeps the key");
+
+        let mut first = rec.clone();
+        first.signature.as_mut().expect("first leg")[0] ^= 0x01;
+        let mut second = rec.clone();
+        second.sphincs_signature.as_mut().expect("second leg")[0] ^= 0x01;
+        let mut second_pk = rec.clone();
+        second_pk.creator_sphincs_pk.as_mut().expect("second-leg key")[0] ^= 0x01;
+        for (what, copy) in [
+            ("first signature", &first),
+            ("second signature", &second),
+            ("second-leg key", &second_pk),
+        ] {
+            assert_eq!(copy.id, rec.id, "{what}: the copy keeps the id");
+            assert_ne!(RejectKey::of(copy), key, "{what}: a tampered copy must not share the key");
+        }
+    }
+
+    /// H-1: a forged attestation signature caches only itself, never the
+    /// witness's genuine attestation for the same record.
+    #[test]
+    fn h1_attestation_bad_sig_key_is_per_signature() {
+        let genuine = attestation_bad_sig_key("rec", "wit", &[1, 2, 3]);
+        assert_eq!(genuine, attestation_bad_sig_key("rec", "wit", &[1, 2, 3]));
+        assert_ne!(genuine, attestation_bad_sig_key("rec", "wit", &[1, 2, 4]));
+        assert!(genuine.starts_with("rec:wit:"));
     }
 }

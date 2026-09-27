@@ -122,6 +122,9 @@ dilithium-rs = "=0.2.0"
 # Renamed so every use names its era: the 0x02 signer and keygen, until the
 # second-leg algorithm replaces them.
 slh_dsa_legacy = { package = "lattice-slh-dsa", version = "=0.3.3" }
+# Final FIPS 205 SLH-DSA: fresh second-leg keys for WIRE_VERSION 8. Keygen only
+# until then; nothing signs with it before the flag day.
+slh_dsa = { package = "lattice-slh-dsa", version = "=0.4.0" }
 drand-verify = { version = "0.6.2", optional = true }
 
 # ─── Native-only deps (not available on wasm32) ─────────────────────────────

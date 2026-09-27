@@ -2217,7 +2217,9 @@ pub struct NodeState {
     pub last_idle_decay_emit_ts: AtomicU64,
     pub last_xzone_reap_emit_ts: AtomicU64,
     /// Negative cache for attestations that failed signature verification.
-    /// Prevents infinite re-pull of known-bad attestations (record_id:witness_hash).
+    /// Prevents infinite re-pull of known-bad attestations. Keyed
+    /// record_id:witness_hash:sha3(signature) (`attestation_bad_sig_key`), so
+    /// a forged signature never blocks the witness's genuine one (H-1).
     pub attestation_bad_sigs: std::sync::Mutex<SeenSet>,
     /// Cumulative attestations rejected by the
     /// `attestation_pull_loop` because Dilithium3 sig-verify failed. Distinct
@@ -2249,9 +2251,11 @@ pub struct NodeState {
     /// (`is_admission_throttle_rejection`), which are time-variant and drop to
     /// neither cache so the G1 spool can resubmit once the window rolls (a
     /// permanent embargo here was a live censorship fork: a cap-refused record
-    /// stuck under `previously_rejected` until restart). In-memory only
-    /// (cleared on restart), pure FIFO eviction at cap 50,000 — no TTL.
-    pub gossip_rejected: std::sync::Mutex<SeenSet>,
+    /// stuck under `previously_rejected` until restart). Keyed on
+    /// `RejectKey` (SHA3-256 of the full wire bytes), never the record id,
+    /// so a tampered copy cannot embargo the genuine record (H-1). In-memory
+    /// only (cleared on restart), pure FIFO eviction at cap 50,000 — no TTL.
+    pub gossip_rejected: std::sync::Mutex<SeenSet<crate::network::gossip::RejectKey>>,
     /// Counter: records skipped due to gossip_rejected cache.
     pub gossip_rejected_dedup_total: AtomicU64,
     /// Retry queue for records whose ingest hit a LEDGER-STATE-DEPENDENT
@@ -3327,6 +3331,9 @@ pub struct NodeState {
     /// past `pq_heavy_read_wait_ms`. Healthy = 0. Sustained growth = a heavy-read
     /// flood OR `pq_heavy_read_concurrency` set too low for real joiner fan-in.
     pub pq_heavy_read_shed_total: Arc<AtomicU64>,
+    /// Signed `/snapshot/state-delta` replies, reused while the state they
+    /// sign is unchanged, so repeat requests do not each pay a SPHINCS+ sign.
+    pub state_delta_sig_cache: crate::network::snapshot::StateDeltaSigCache,
     /// Global concurrency gate on inbound HEAVY-VERIFY verbs (`submit_record`,
     /// `witness`, `receive_attestation`) — the write-side twin of
     /// `pq_heavy_read_semaphore` (internal design notes).
@@ -4534,7 +4541,7 @@ impl NodeState {
             // Sized to match `seen` (50k): a peer can cache-bust a 5k reject set
             // in ~10 min, evicting legit rejections so they re-trigger full
             // Dilithium3 re-verification on re-push. 50k raises that bar 10×.
-            gossip_rejected: std::sync::Mutex::new(SeenSet::new(50_000)),
+            gossip_rejected: std::sync::Mutex::new(SeenSet::bounded(50_000)),
             gossip_rejected_dedup_total: AtomicU64::new(0),
             gossip_retry: std::sync::Mutex::new(std::collections::VecDeque::new()),
             super_seal_retry: std::sync::Mutex::new(std::collections::VecDeque::new()),
@@ -4793,6 +4800,7 @@ impl NodeState {
             pq_verify_waited_total: Arc::new(AtomicU64::new(0)),
             pq_heavy_read_wait_ms,
             pq_heavy_read_shed_total: Arc::new(AtomicU64::new(0)),
+            state_delta_sig_cache: Default::default(),
             deferred_attestations: std::sync::Mutex::new(DeferredAttestationBuf::new()),
             low_stake_deferred: std::sync::Mutex::new(std::collections::HashMap::new()),
             // counters start at 0/INFINITY. Mutation sites in

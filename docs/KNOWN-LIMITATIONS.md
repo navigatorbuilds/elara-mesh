@@ -252,6 +252,26 @@ design-review-first fix after launch:
   design-review-first pass as the other multi-staker items before the network
   admits a non-operator staked identity.
   (Finding ingest / skip_timestamp_defense relay trust.)
+- **A restart restores at most one zone transition.** At boot a node applies
+  only the newest transition whose starting zone count equals its count at
+  boot (`find_latest_unapplied_zone_transition` in `src/network/epoch.rs`). In
+  the default automatic mode that count is 1, so a network that has split
+  from 1 to 2 to 4 zones restarts at 2 and drops the epoch, seal and VRF state
+  of the zones above. The search reads at most the genesis authority's
+  100,000 most recent records, seals included, which at the authority node's
+  current pace is three to four months of seals; an older transition is not
+  found. Unlike the items above, this also affects a single-authority network
+  once it runs more than one zone. Moot with one zone; queued.
+- **A restarting node skips the seals of a staker that has exited.** At boot
+  a node replays only stored seals signed by the genesis authority or a
+  current staker (`admits_replay` in `src/network/epoch.rs`). After a staker
+  unstakes or is slashed to zero, every seal it made is skipped at each later
+  boot: after an unclean halt no chain tip is recovered from them, and a
+  super-seal whose window they cover may never be minted, so those seals fall
+  below the garbage-collection floor uncovered and the seal prune deletes them
+  on any node whose GC scan reaches them (on an archive-profile node, only
+  under disk-cap pressure). Moot until a network has had three stakers,
+  because below that only the genesis authority may seal; queued.
 
 ## 8. Key rotation is specified but not yet operational — do not rely on it
 
@@ -264,6 +284,24 @@ a different account and would strand the original account's stake and trust
 an identity→active-key index consulted during verification), treat your initial
 signing key as long-lived and keep it safe. If a key is compromised, use
 revocation, not rotation.
+
+Revocation has gaps of its own. A node refuses a revoked key's records only
+while its key registry holds the revocation, and the registry does not travel
+everywhere:
+
+- A node that joins from a snapshot learns of a key revocation only if the
+  revocation record itself reaches it. Snapshots carry mandate revocations
+  only, and the state deltas used for catch-up and repair carry none.
+- A node with 2 GB of RAM or less saves its registry only at a clean
+  shutdown, so after a crash it restarts with the registry of its last clean
+  shutdown. If it has none saved, it rebuilds the registry from its 50,000
+  most recent records only.
+
+Such a node accepts records signed with the revoked key.
+`elara_revocations_rejected_total` counts records refused for a revoked key,
+and `elara_key_revocation_count` shows how many revocations a node holds;
+compare it across nodes. Carrying key revocations in snapshots and state
+deltas, and saving the registry durably on every node, is queued.
 
 ## 9. Integer metadata values above `i64::MAX` produce records that cannot verify
 
@@ -713,3 +751,80 @@ witness. The node enforces them as follows.
 
 Enforcing all four in one shared admission check is a consensus change and is
 queued.
+
+## 35. Live apply, restart and full rebuild can give a node different ledgers
+
+A node applies records to its ledger along three paths. Live, it parks each
+ledger operation when the record arrives and applies it when the record
+finalizes (`drain_and_commit_pending` in `src/network/pending_drain.rs`), so
+operations land in finality order. A restart loads the ledger checkpoint and
+replays the stored records newer than it (section 27 describes the cut-off),
+in timestamp order and with no retry (`incremental_ledger_replay` in
+`src/storage/rocks.rs`). A full rebuild (`rebuild_ledger_streaming`, same
+file) replays every stored record in timestamp order and retries once each
+operation that failed on the first pass. The three do not always agree:
+
+- **Order.** An operation that fails against the state in front of it, such
+  as a transfer applied before the transfer that funds it, can succeed on one
+  path and fail on another.
+- **Governance records** reach the ledger only by replay (section 27).
+- **The sole staker's own operations.** Finality excludes the creator's stake
+  (section 18), so on a network with one staker nothing that staker creates
+  finalizes. Its ledger operations stay parked until the node discards them,
+  at most 1,200 seconds later, and reach the live ledger only when the node
+  refused to park them (a duplicate, or a per-identity or global cap), in
+  which case they apply on arrival. A restart may replay them; a full rebuild
+  applies them.
+- **Dropped finality events.** The queue of finality events holds 65,536
+  (`MAX_FINALIZATION_QUEUE` in `src/network/consensus.rs`). An event that
+  arrives when it is full is dropped, and the node applies the parked
+  operation only if it restarts before it discards it, at most 1,200 seconds
+  later; otherwise only a replay can reach it, as above.
+- **Installs.** A node 50 or more epochs behind repairs itself by installing
+  a peer's account state (`apply_state_delta_for_repair` in
+  `src/bin/elara_node.rs`). The install does not mark the records it reflects
+  as applied, so an operation the node had parked, whose effect the installed
+  state already includes, is applied a second time when it finalizes, at any
+  chain size. A snapshot install does the same above one million applied
+  records (section 33), and the manual heal in section 1
+  (`/admin/snapshot_rebootstrap_from`) is a snapshot install.
+- **Genesis pools at boot.** A node that finds no saved genesis state
+  rebuilds it from the genesis authority's records, reading at most the
+  100,000 oldest. Every seal the authority makes counts toward that cap; at
+  the authority node's current pace of one seal every 85 to 100 seconds on
+  average, it is three to four months of seals. Past the cap the authority's
+  newer records are not read, so the changes they make to the genesis pools
+  are missed, with only a log warning.
+
+`elara_pending_ledger_discards_total`,
+`elara_pending_ledger_hard_discards_total` and
+`elara_pending_ledger_fallback_direct_apply_total` count parked operations
+discarded and applied on arrival, and `elara_finalization_queue_overflow_total`
+counts dropped finality events. These counters start from zero when a node
+starts. On the authority node on 2026-09-27, ten hours after it last started,
+all four read zero. Applying each record once, in one order shared by live
+apply, restart and rebuild, is a consensus change and is queued.
+
+## 36. A record's timestamp has no past bound
+
+On every ingest path a node refuses a record whose timestamp is not finite or
+is negative, or is more than 300 seconds ahead of the node's clock
+(`MAX_FUTURE_DRIFT_SECS` in `src/network/ingest.rs`). The timestamp defense
+(`src/network/timestamp_defense.rs`), which does not run for synced records or
+for records relayed by a trusted peer (section 7), also refuses a timestamp
+before 2023-11-14 (`MIN_VALID_TIMESTAMP`) or before the newest parent's. No
+check bounds how far back a timestamp may reach:
+
+- the parent check sees only parents the node holds in memory, and a record
+  whose parents it does not hold is admitted;
+- the defense's own past bound (`PastTooFar`, more than 30 days before the
+  newest parent) never fires, because the parent check runs first and refuses
+  everything it would catch; the metric's help text still lists it;
+- the age threshold (`max_record_age_secs`, 7 days by default) only counts
+  old records in `elara_ingest_old_records_accepted_total`; it refuses none.
+
+So an admitted record can carry a timestamp far older than its arrival. A full
+rebuild applies it at that older position, and a restart does not replay it
+when that timestamp is older than the ledger checkpoint (sections 27 and 35).
+`elara_timestamp_defense_rejected_total` counts the defense's refusals. A
+freshness rule for admitted records is queued.

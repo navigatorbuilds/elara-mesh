@@ -470,6 +470,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5d20789868f4b01b2f2caec9f5c4e0213b41e3e5702a50157d699ae31ced2fcb"
 
 [[package]]
+name = "byteorder"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
+
+[[package]]
 name = "bytes"
 version = "1.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1059,7 +1065,7 @@ dependencies = [
 
 [[package]]
 name = "elara-record"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "dilithium-rs",
  "hex",
@@ -1069,6 +1075,8 @@ dependencies = [
  "serde",
  "serde_json",
  "sha3",
+ "signature",
+ "slh-dsa",
  "thiserror 2.0.18",
  "tracing",
  "uuid",
@@ -1109,6 +1117,7 @@ dependencies = [
  "hyper-util",
  "js-sys",
  "lattice-slh-dsa 0.3.3",
+ "lattice-slh-dsa 0.4.0",
  "libc",
  "mdns-sd",
  "memmap2",
@@ -1150,7 +1159,7 @@ dependencies = [
 
 [[package]]
 name = "elara-verify"
-version = "0.3.3"
+version = "0.4.0"
 dependencies = [
  "base64 0.22.1",
  "clap",
@@ -1476,7 +1485,7 @@ checksum = "6ea2d84b969582b4b1864a92dc5d27cd2b77b622a8d79306834f1be5ba20d84b"
 dependencies = [
  "cfg-if",
  "crunchy",
- "zerocopy",
+ "zerocopy 0.8.42",
 ]
 
 [[package]]
@@ -1568,6 +1577,15 @@ name = "httpdate"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
+
+[[package]]
+name = "hybrid-array"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f2d35805454dc9f8662a98d6d61886ffe26bd465f5960e0e55345c70d5c0d2a9"
+dependencies = [
+ "typenum",
+]
 
 [[package]]
 name = "hyper"
@@ -2441,7 +2459,7 @@ version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "85eae3c4ed2f50dcfe72643da4befc30deadb458a9b590d720cde2f2b1e97da9"
 dependencies = [
- "zerocopy",
+ "zerocopy 0.8.42",
 ]
 
 [[package]]
@@ -3193,6 +3211,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "signature"
+version = "2.3.0-pre.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "054d71959c7051b9042c26af337f05cc930575ed2604d7d3ced3158383e59734"
+dependencies = [
+ "rand_core 0.6.4",
+]
+
+[[package]]
 name = "simd-adler32"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3203,6 +3230,23 @@ name = "slab"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
+
+[[package]]
+name = "slh-dsa"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "069c0368c5352eeea0134fa9bfd45feb28c5c5412719b2db81c12c784adb1aef"
+dependencies = [
+ "digest 0.10.7",
+ "hmac",
+ "hybrid-array",
+ "rand_core 0.6.4",
+ "sha2 0.10.9",
+ "sha3",
+ "signature",
+ "typenum",
+ "zerocopy 0.7.35",
+]
 
 [[package]]
 name = "smallvec"
@@ -4500,11 +4544,32 @@ dependencies = [
 
 [[package]]
 name = "zerocopy"
+version = "0.7.35"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1b9b4fd18abc82b8136838da5d50bae7bdea537c574d8dc1a34ed098d6c166f0"
+dependencies = [
+ "byteorder",
+ "zerocopy-derive 0.7.35",
+]
+
+[[package]]
+name = "zerocopy"
 version = "0.8.42"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2578b716f8a7a858b7f02d5bd870c14bf4ddbbcf3a4c05414ba6503640505e3"
 dependencies = [
- "zerocopy-derive",
+ "zerocopy-derive 0.8.42",
+]
+
+[[package]]
+name = "zerocopy-derive"
+version = "0.7.35"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fa4f8080344d4671fb4e831a13ad1e68092748387dfc4f55e356242fae12ce3e"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
 ]
 
 [[package]]

@@ -1836,6 +1836,32 @@ mod tests {
         }
     }
 
+    /// The v8 preimage, pinned across languages. `decode_record.py` (pure
+    /// stdlib) computed this hash for the sample record re-framed as a v8
+    /// Profile A record: header version 8, second-leg byte 0x04, and the empty
+    /// v6 network id appended. The Rust decode of the same bytes must agree, so
+    /// the two builds of the v8 second-leg commitment cannot drift apart.
+    #[test]
+    fn v8_record_hash_matches_the_python_reference_decoder() {
+        const PYTHON_V8_RECORD_HASH: &str =
+            "2f98d6d077f15af3c73633cc26ef11cff52c0566816d51c518ad2374d70da6a0";
+        let mut wire = sample_wire();
+        let sample = ValidationRecord::from_bytes(&wire).expect("sample decodes");
+        let pk = sample.creator_sphincs_pk.expect("the sample is Profile A");
+        let mut marker = pk.clone();
+        marker.extend_from_slice(&[crate::crypto::ALG_DILITHIUM3, crate::crypto::ALG_SPHINCS_SHA2_192F]);
+        let at = wire
+            .windows(marker.len())
+            .position(|w| w == marker.as_slice())
+            .expect("the algorithm bytes follow the second-leg key");
+        wire[4..6].copy_from_slice(&8u16.to_be_bytes());
+        wire[at + pk.len() + 1] = crate::crypto::ALG_SLH_DSA_SHA2_192F;
+        wire.extend_from_slice(&[0, 0]);
+        let v8 = ValidationRecord::from_bytes(&wire).expect("the re-framed record decodes as v8");
+        assert_eq!(v8.version, 8);
+        assert_eq!(hex::encode(v8.record_hash()), PYTHON_V8_RECORD_HASH);
+    }
+
     /// `decode_record.py` is pure stdlib, so it carries its OWN copy of the
     /// decode window instead of importing the Rust one — and nothing tied the
     /// two. The v7 flag day (2026-08-23) raised `WIRE_VERSION` in Rust only;
@@ -1868,6 +1894,18 @@ mod tests {
             pinned("WIRE_VERSION_MIN"),
             crate::wire::WIRE_VERSION_MIN,
             "decode_record.py WIRE_VERSION_MIN must equal the Rust decode floor"
+        );
+        // The era table decides which second-leg byte decodes and whether the v8
+        // commitment is in the preimage, so it is pinned the same way.
+        assert_eq!(
+            pinned("LEGACY_SECOND_LEG_MAX_RECORD_VERSION"),
+            crate::crypto::pqc::LEGACY_SECOND_LEG_MAX_RECORD_VERSION,
+            "decode_record.py legacy second-leg era must equal the Rust one"
+        );
+        assert_eq!(
+            pinned("FIPS205_SECOND_LEG_MAX_RECORD_VERSION"),
+            crate::crypto::pqc::FIPS205_SECOND_LEG_MAX_RECORD_VERSION,
+            "decode_record.py FIPS 205 second-leg era must equal the Rust one"
         );
     }
 }

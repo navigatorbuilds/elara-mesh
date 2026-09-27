@@ -9,7 +9,9 @@
 //!   @spec Protocol §11.14
 //!   @spec Protocol §7.3
 
+use std::borrow::Borrow;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::hash::Hash;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::Ordering::Relaxed;
@@ -581,18 +583,36 @@ pub fn recheck_dag_deficits(state: &NodeState, max_checks: usize) -> usize {
     open
 }
 
-/// Bounded set for deduplicating seen record IDs. Evicts oldest on overflow.
-pub struct SeenSet {
-    set: HashSet<String>,
-    order: VecDeque<String>,
+/// Bounded FIFO set for dedup and reject caches. Evicts the oldest entry on
+/// overflow. Keys default to record ids; the reject embargo keys on
+/// [`crate::network::gossip::RejectKey`].
+///
+/// Each entry carries the sequence number of its latest insert, and `order`
+/// holds `(seq, key)` slots. A slot whose seq no longer matches the map is
+/// stale (its key was removed, or removed and inserted again) and is skipped
+/// at eviction, so `remove` never lets the set outgrow `capacity` and a
+/// re-inserted key is never evicted through its old slot. Stale slots are
+/// compacted once they outnumber the live ones, which keeps `order` bounded.
+pub struct SeenSet<K = String> {
+    set: HashMap<K, u64>,
+    order: VecDeque<(u64, K)>,
+    next_seq: u64,
     capacity: usize,
 }
 
 impl SeenSet {
     pub fn new(capacity: usize) -> Self {
+        Self::bounded(capacity)
+    }
+}
+
+impl<K: Eq + Hash + Clone> SeenSet<K> {
+    /// A set holding at most `capacity` keys (a zero capacity holds one).
+    pub fn bounded(capacity: usize) -> Self {
         Self {
-            set: HashSet::with_capacity(capacity.min(1024)),
+            set: HashMap::with_capacity(capacity.min(1024)),
             order: VecDeque::with_capacity(capacity.min(1024)),
+            next_seq: 0,
             capacity,
         }
     }
@@ -613,36 +633,55 @@ impl SeenSet {
         self.order.clear();
     }
 
-    /// Insert an ID. Returns `true` if newly seen, `false` if already known.
-    pub fn insert(&mut self, id: String) -> bool {
-        if self.set.contains(&id) {
+    /// Insert a key. Returns `true` if newly seen, `false` if already known.
+    pub fn insert(&mut self, key: K) -> bool {
+        if self.set.contains_key(&key) {
             return false;
         }
-        if self.set.len() >= self.capacity {
-            if let Some(old) = self.order.pop_front() {
+        while self.set.len() >= self.capacity {
+            let Some((seq, old)) = self.order.pop_front() else {
+                break;
+            };
+            if self.set.get(&old) == Some(&seq) {
                 self.set.remove(&old);
             }
         }
-        self.set.insert(id.clone());
-        self.order.push_back(id);
+        let seq = self.next_seq;
+        self.next_seq = self.next_seq.wrapping_add(1);
+        self.set.insert(key.clone(), seq);
+        self.order.push_back((seq, key));
         true
     }
 
-    pub fn contains(&self, id: &str) -> bool {
-        self.set.contains(id)
+    pub fn contains<Q>(&self, key: &Q) -> bool
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        self.set.contains_key(key)
     }
 
-    /// Remove an ID from the set (used during initial sync to allow retry).
-    pub fn remove(&mut self, id: &str) {
-        self.set.remove(id);
-        // Note: we don't remove from `order` VecDeque (O(n)) — the eviction
-        // logic handles stale entries gracefully since set.remove is the gate.
+    /// Remove a key (used during initial sync to allow retry).
+    pub fn remove<Q>(&mut self, key: &Q)
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        if self.set.remove(key).is_some() && self.order.len() > 2 * self.set.len() + 64 {
+            self.compact();
+        }
+    }
+
+    /// Drop the stale slots `remove` left in `order`.
+    fn compact(&mut self) {
+        let set = &self.set;
+        self.order.retain(|(seq, k)| set.get(k) == Some(seq));
     }
 
     /// Iterate live entries — bounded by `capacity`. Used to fold the
     /// declined-seal LRU into the delta_pull bloom (contract §4.4).
-    pub fn iter(&self) -> impl Iterator<Item = &String> {
-        self.set.iter()
+    pub fn iter(&self) -> impl Iterator<Item = &K> {
+        self.set.keys()
     }
 }
 
@@ -927,7 +966,7 @@ pub async fn insert_record(state: &Arc<NodeState>, record: ValidationRecord) -> 
                 // down/restarting), never a content rejection. Render as the
                 // typed transient marker so downstream classifiers
                 // (is_retryable_ingest_rejection) PARK for retry instead of
-                // permanent-caching the rid in gossip_rejected — which is
+                // permanent-caching the record in gossip_rejected — which is
                 // consult-and-skip on every pull driver, i.e. un-repullable.
                 Err(crate::errors::ElaraError::TransientReject(message))
             }
@@ -949,7 +988,7 @@ pub async fn insert_record_with_origin(state: &Arc<NodeState>, record: Validatio
                 // down/restarting), never a content rejection. Render as the
                 // typed transient marker so downstream classifiers
                 // (is_retryable_ingest_rejection) PARK for retry instead of
-                // permanent-caching the rid in gossip_rejected — which is
+                // permanent-caching the record in gossip_rejected — which is
                 // consult-and-skip on every pull driver, i.e. un-repullable.
                 Err(crate::errors::ElaraError::TransientReject(message))
             }
@@ -973,7 +1012,7 @@ pub async fn insert_record_synced(state: &Arc<NodeState>, record: ValidationReco
                 // down/restarting), never a content rejection. Render as the
                 // typed transient marker so downstream classifiers
                 // (is_retryable_ingest_rejection) PARK for retry instead of
-                // permanent-caching the rid in gossip_rejected — which is
+                // permanent-caching the record in gossip_rejected — which is
                 // consult-and-skip on every pull driver, i.e. un-repullable.
                 Err(crate::errors::ElaraError::TransientReject(message))
             }
@@ -1325,6 +1364,22 @@ pub(crate) fn network_id_admits(record_network_id: &str, local_network_id: &str)
     record_network_id.is_empty() || record_network_id == local_network_id
 }
 
+/// FIPS 205 step 5b hold (adversarial read 2026-09-26, Q7): decoding a record
+/// is not admitting it. From 5b the node DECODES wire version 8, where the
+/// second leg becomes the FIPS 205 algorithm (0x04) — but nothing yet binds a
+/// 0x04 key to its identity, so an admitted v8 record carrying a 0x04 leg
+/// under its own key would pass the leg check and register a sticky Profile A
+/// for its creator. The node therefore admits only records of the legacy
+/// second-leg era: exactly its pre-5b behaviour, when v8 failed to decode.
+/// The line is drawn on the record's own signed version against the era
+/// boundary, never on the emission constant (the R2-a tripwire in sync.rs),
+/// so every node draws it in the same place whatever it signs. Stateless
+/// verifiers (elara-verify, Python, WASM) still read v8 — verifiers first.
+/// Step 7 (the flag day) replaces this hold with the activation rule.
+pub(crate) fn record_version_admits(version: u16) -> bool {
+    version <= crate::crypto::pqc::LEGACY_SECOND_LEG_MAX_RECORD_VERSION
+}
+
 async fn insert_record_inner(state: &Arc<NodeState>, mut record: ValidationRecord, origin_hint: Option<u64>, skip_timestamp_defense: bool) -> crate::errors::Result<String> {
     let ingest_t0 = std::time::Instant::now();
     // ── Bounds validation ────────────────────────────────────────────────
@@ -1371,6 +1426,18 @@ async fn insert_record_inner(state: &Arc<NodeState>, mut record: ValidationRecor
             "record network_id mismatch: record={:?} local={:?}",
             record.network_id.chars().take(64).collect::<String>(),
             state.config.network_id.chars().take(64).collect::<String>(),
+        )));
+    }
+
+    // ── FIPS 205 step 5b hold: no record from the FIPS 205 leg era ──────
+    // See `record_version_admits`. A header read, placed before signature
+    // verification, so a v8 flood never buys an SLH-DSA verify. The genesis
+    // bootstrap puller (gossip.rs) carries the same gate.
+    if !record_version_admits(record.version) {
+        return Err(ElaraError::Wire(format!(
+            "record version {} not admitted before the flag day (admitted: up to v{})",
+            record.version,
+            crate::crypto::pqc::LEGACY_SECOND_LEG_MAX_RECORD_VERSION,
         )));
     }
 
@@ -1810,6 +1877,8 @@ async fn insert_record_inner(state: &Arc<NodeState>, mut record: ValidationRecor
     let dil_pk = record.creator_public_key.clone();
     let sphincs_sig = record.sphincs_signature.clone();
     let sphincs_pk = record.creator_sphincs_pk.clone();
+    let second_leg_format = crate::crypto::pqc::SignedFormat::Record(record.version);
+    let sphincs_alg = record.sphincs_algorithm;
     tokio::task::spawn_blocking(move || -> crate::errors::Result<()> {
         if !dilithium3_verify(&signable, &sig, &dil_pk)? {
             return Err(ElaraError::InvalidSignature);
@@ -1828,7 +1897,7 @@ async fn insert_record_inner(state: &Arc<NodeState>, mut record: ValidationRecor
                 .ok_or_else(|| ElaraError::Wire(
                     "SPHINCS+ signature present but no SPHINCS+ public key in record".to_string()
                 ))?;
-            if !crate::crypto::pqc::sphincs_verify(&signable, ssig, spk)? {
+            if !crate::crypto::pqc::verify_second_leg(second_leg_format, sphincs_alg, &signable, ssig, spk)? {
                 return Err(ElaraError::InvalidSignature);
             }
         }
@@ -5356,6 +5425,74 @@ mod tests {
         assert!(!network_id_admits("elara-mainnet-1", ""));
     }
 
+    // ── FIPS 205 step 5b hold (adversarial read 2026-09-26, Q7) ──
+    // The ingest and bootstrap gates call THIS fn, so this tests their decision.
+
+    #[test]
+    fn fips205_5b_hold_admits_only_the_legacy_leg_era() {
+        use super::record_version_admits;
+        use crate::crypto::pqc::LEGACY_SECOND_LEG_MAX_RECORD_VERSION as LEGACY_MAX;
+        use crate::wire::{CURRENT_SIGNING_VERSION, WIRE_VERSION, WIRE_VERSION_MIN};
+        for v in WIRE_VERSION_MIN..=LEGACY_MAX {
+            assert!(record_version_admits(v), "legacy-era v{v} must stay admitted");
+        }
+        // The window the hold exists for: the FIPS 205 era, which the node
+        // decodes but no identity binds a key for yet.
+        for v in LEGACY_MAX + 1..=WIRE_VERSION {
+            assert!(!record_version_admits(v), "FIPS 205-era v{v} must be held");
+        }
+        // The node never emits what it holds. CONSCIOUS EDIT at the flag day:
+        // raising CURRENT_SIGNING_VERSION into the FIPS 205 era fails this on
+        // purpose (a node refusing its own records), because step 7 must
+        // replace the hold with the activation rule, not inherit it.
+        assert!(record_version_admits(CURRENT_SIGNING_VERSION), "the node would refuse its own records");
+    }
+
+    /// Q7 regression: a genuinely signed v8 record whose second leg is the FIPS
+    /// 205 algorithm under its own key is refused at the ingest chokepoint, and
+    /// its creator gains no Profile A.
+    #[tokio::test]
+    async fn fips205_5b_hold_refuses_a_signed_v8_record_at_ingest() {
+        use crate::identity::{CryptoProfile, EntityType, Identity};
+        let state = crate::network::state::build_test_node_state();
+        let id = Identity::generate(EntityType::Ai, CryptoProfile::ProfileB).expect("identity");
+        let leg = crate::crypto::pqc::slh_dsa_keygen().expect("slh-dsa keygen");
+        let mut record = crate::record::ValidationRecord::create(
+            b"fips205_5b_hold_probe",
+            id.public_key.clone(),
+            vec![],
+            crate::record::Classification::Public,
+            None,
+        );
+        record.version = crate::wire::WIRE_VERSION;
+        record.sphincs_algorithm = Some(crate::crypto::ALG_SLH_DSA_SHA2_192F);
+        record.creator_sphincs_pk = Some(leg.public_key.clone());
+        let signable = record.signable_bytes();
+        let ml_dsa = id.sign(&signable).expect("ml-dsa sign");
+        let slh = slh_dsa::sign(&leg.secret_key, &signable, slh_dsa::params::SLH_DSA_SHA2_192F);
+        // The fixture is genuine: both legs verify under the v8 format, so the
+        // hold is the only thing between this record and the ledger.
+        assert!(crate::crypto::pqc::dilithium3_verify(&signable, &ml_dsa, &id.public_key).expect("ml-dsa verify"));
+        assert!(crate::crypto::pqc::verify_second_leg(
+            crate::crypto::pqc::SignedFormat::Record(record.version),
+            record.sphincs_algorithm,
+            &signable,
+            &slh,
+            &leg.public_key,
+        )
+        .expect("second-leg verify"));
+        record.signature = Some(ml_dsa);
+        record.sphincs_signature = Some(slh);
+        let creator = crate::accounting::types::creator_identity_hash(&record);
+
+        let err = super::insert_record_inner_direct(&state, record, None, false)
+            .await
+            .expect_err("a v8 record must be held until the flag day");
+        let msg = format!("{err:?}");
+        assert!(msg.contains("not admitted before the flag day"), "{msg}");
+        assert!(state.ledger.read().await.is_single_sig(&creator), "a held record grants no Profile A");
+    }
+
     // ── T61: daily-cap persistence (internal design notes §2.1) ──
     // Before T61 this counter was rebuilt empty each process start, making
     // `systemctl restart` a self-service quota reset. These pin the round-trip.
@@ -7215,6 +7352,51 @@ mod tests {
         // Removing an id that was never inserted is a no-op (idempotent).
         s.remove("never-inserted");
         assert!(!s.contains("never-inserted"));
+    }
+
+    #[test]
+    fn seen_set_remove_and_reinsert_stay_within_capacity() {
+        // `remove` used to leave the key's FIFO slot behind. The set then
+        // outgrew its capacity by one per remove, the slot queue grew without
+        // bound, and a key removed and inserted again was evicted early
+        // through its old slot. Churn the remove/re-insert pattern the
+        // attestation re-push cycle runs, and check every bound.
+        let mut set = SeenSet::new(4);
+        for round in 0..1_000 {
+            let key = format!("k{}", round % 6);
+            set.insert(key.clone());
+            set.remove(&key);
+            set.insert(key);
+            assert!(set.len() <= 4, "round {round}: len {} over capacity", set.len());
+            assert!(
+                set.order.len() <= 2 * 4 + 64,
+                "round {round}: slot queue grew to {}",
+                set.order.len()
+            );
+        }
+
+        // A re-inserted key ages from its re-insert, not its first insert.
+        let mut set = SeenSet::new(3);
+        set.insert("a".into());
+        set.insert("b".into());
+        set.remove("a");
+        set.insert("a".into());
+        set.insert("c".into());
+        set.insert("d".into());
+        assert!(set.contains("a"), "re-inserted key evicted through its stale slot");
+        assert!(!set.contains("b"), "the oldest live key is the one evicted");
+        assert!(set.contains("c") && set.contains("d"));
+        assert_eq!(set.len(), 3);
+
+        // The same holds for non-string keys.
+        let mut keys: SeenSet<[u8; 32]> = SeenSet::bounded(2);
+        keys.insert([1; 32]);
+        keys.remove(&[1; 32]);
+        keys.insert([1; 32]);
+        keys.insert([2; 32]);
+        keys.insert([3; 32]);
+        assert!(!keys.contains(&[1; 32]) && keys.contains(&[2; 32]) && keys.contains(&[3; 32]));
+        assert_eq!(keys.len(), 2);
     }
 
     #[test]

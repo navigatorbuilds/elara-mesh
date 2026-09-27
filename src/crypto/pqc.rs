@@ -7,6 +7,8 @@
 //! Compatible with PQClean outputs — same FIPS 204 standard.
 //!
 //! SPHINCS+: pure Rust via `lattice-slh-dsa` =0.3.3 (`slh_dsa_legacy`, not FIPS 205).
+//! FIPS 205 SLH-DSA via =0.4.0 (`slh_dsa`): keygen here. It is the record second
+//! leg from wire version 8, verified in `elara_record::pqc`; signing it is plan step 5d.
 //! Works on all platforms.
 //! Profile A = dual-sig (Dilithium3 + SPHINCS+). Profile B = Dilithium3 only.
 
@@ -66,10 +68,15 @@ impl Drop for SphincsKeypair {
 use dilithium::safe_api::DilithiumKeyPair;
 use dilithium::params::DilithiumMode;
 
-// Verify-only primitives (dilithium3_verify, sphincs_verify) live in the permissive
-// elara-record crate so the verifier can embed them without the AGPL node; keygen/sign
-// stay here (secret-key paths). Re-exported so crate::crypto::pqc::* call sites are unchanged.
-pub use elara_record::pqc::{dilithium3_verify, sphincs_verify};
+// Verify-only primitives (dilithium3_verify, sphincs_verify, the verify_second_leg
+// chokepoint) live in the permissive elara-record crate so the verifier can embed them
+// without the AGPL node; keygen/sign stay here (secret-key paths). Re-exported so
+// crate::crypto::pqc::* call sites are unchanged.
+pub use elara_record::pqc::{
+    dilithium3_verify, record_second_leg_algorithm, sphincs_verify, verify_second_leg, SignedFormat,
+    FIPS205_SECOND_LEG_MAX_RECORD_VERSION, LEGACY_SECOND_LEG_MAX_RECORD_VERSION,
+    LEGACY_SECOND_LEG_MAX_SNAPSHOT_SELECTOR,
+};
 
 const MODE: DilithiumMode = DilithiumMode::Dilithium3;
 
@@ -131,37 +138,110 @@ pub fn sphincs_keygen() -> Result<SphincsKeypair> {
 /// signature is verified under `public_key` before it is returned. A secret key
 /// loaded by a backend it was not generated with signs without error, and
 /// nothing else would notice.
+///
+/// Every SPHINCS+ signer funnels through here, so this is also where signing
+/// leaves the async worker it was called on (see `off_async_worker`).
 pub fn sphincs_sign_with_pk(message: &[u8], secret_key: &[u8], public_key: &[u8]) -> Result<Vec<u8>> {
-    let mode = SLH_DSA_SHA2_192F;
-    if secret_key.len() != mode.sk_bytes() || public_key.len() != mode.pk_bytes() {
-        return Err(ElaraError::Crypto("invalid SPHINCS+ keys: wrong length".into()));
+    off_async_worker(|| {
+        let mode = SLH_DSA_SHA2_192F;
+        if secret_key.len() != mode.sk_bytes() || public_key.len() != mode.pk_bytes() {
+            return Err(ElaraError::Crypto("invalid SPHINCS+ keys: wrong length".into()));
+        }
+        // The secret key is SK.seed ‖ SK.prf ‖ PK.seed ‖ PK.root, and the root is
+        // derived from the seeds, so rebuilding the pair from them must reproduce
+        // both keys.
+        let seeds = mode.seed_bytes();
+        let kp = SlhDsaKeyPair::from_seed(mode, &secret_key[..seeds])
+            .map_err(|e| ElaraError::Crypto(format!("invalid SPHINCS+ keys: {e:?}")))?;
+        // Only the public halves can differ: the public key, and the root copy the
+        // secret key carries (its last n bytes). The secret seeds are never compared.
+        if kp.public_key() != public_key || kp.secret_key()[seeds..] != secret_key[seeds..] {
+            return Err(ElaraError::Crypto(
+                "SPHINCS+ key pair does not match its seeds: refusing to sign".into(),
+            ));
+        }
+        let sig = kp.sign(message)
+            .map_err(|e| ElaraError::Crypto(format!("SPHINCS+ sign failed: {e:?}")))?
+            .to_bytes()
+            .to_vec();
+        if !sphincs_verify(message, &sig, public_key)? {
+            return Err(ElaraError::Crypto(
+                "SPHINCS+ signature does not verify under its public key: refusing to emit it".into(),
+            ));
+        }
+        Ok(sig)
+    })
+}
+
+/// Run `f` without stalling the async worker thread it was called on.
+///
+/// Rebuilding the pair, signing and verifying take tens of milliseconds, and
+/// every task queued behind the caller on that worker would wait them out. On
+/// a multi-thread runtime `block_in_place` hands the worker's queue to another
+/// thread for the duration. It panics on a current-thread runtime, and off a
+/// worker (blocking pool, rayon, no runtime) there is nothing to hand off, so
+/// both of those run `f` in place.
+#[cfg(all(feature = "tokio", not(target_arch = "wasm32")))]
+fn off_async_worker<R>(f: impl FnOnce() -> R) -> R {
+    use tokio::runtime::{Handle, RuntimeFlavor};
+    match Handle::try_current() {
+        Ok(h) if h.runtime_flavor() == RuntimeFlavor::MultiThread => tokio::task::block_in_place(f),
+        _ => f(),
     }
-    // The secret key is SK.seed ‖ SK.prf ‖ PK.seed ‖ PK.root, and the root is
-    // derived from the seeds, so rebuilding the pair from them must reproduce
-    // both keys.
-    let seeds = mode.seed_bytes();
-    let kp = SlhDsaKeyPair::from_seed(mode, &secret_key[..seeds])
-        .map_err(|e| ElaraError::Crypto(format!("invalid SPHINCS+ keys: {e:?}")))?;
-    // Only the public halves can differ: the public key, and the root copy the
-    // secret key carries (its last n bytes). The secret seeds are never compared.
-    if kp.public_key() != public_key || kp.secret_key()[seeds..] != secret_key[seeds..] {
-        return Err(ElaraError::Crypto(
-            "SPHINCS+ key pair does not match its seeds: refusing to sign".into(),
-        ));
-    }
-    let sig = kp.sign(message)
-        .map_err(|e| ElaraError::Crypto(format!("SPHINCS+ sign failed: {e:?}")))?
-        .to_bytes()
-        .to_vec();
-    if !sphincs_verify(message, &sig, public_key)? {
-        return Err(ElaraError::Crypto(
-            "SPHINCS+ signature does not verify under its public key: refusing to emit it".into(),
-        ));
-    }
-    Ok(sig)
+}
+
+#[cfg(not(all(feature = "tokio", not(target_arch = "wasm32"))))]
+fn off_async_worker<R>(f: impl FnOnce() -> R) -> R {
+    f()
 }
 
 // sphincs_verify moved to elara-record::pqc (re-exported at the top of this module).
+
+// ─── SLH-DSA-SHA2-192f, FIPS 205 (the second leg from WIRE_VERSION 8) ─────
+
+/// Generate a FIPS 205 SLH-DSA-SHA2-192f key pair from fresh OS randomness.
+///
+/// FIPS 205 §3.1 wants SK.seed, SK.prf and PK.seed to be fresh random values at
+/// every key generation. This takes no input, so no older key's seeds can reach
+/// the new one. The seed buffer is zeroized on the way out, which the crate's own
+/// `generate` does not do. The randomness is the OS generator, not an SP 800-90
+/// generator inside a validated module: the algorithm is FIPS 205's, but that is
+/// all this claims.
+///
+/// These keys sign only the second leg of a version 8 record, and nothing signs
+/// with them yet (plan step 5d).
+pub fn slh_dsa_keygen() -> Result<SphincsKeypair> {
+    let mode = slh_dsa::params::SLH_DSA_SHA2_192F;
+    let mut seed = zeroize::Zeroizing::new(vec![0u8; mode.seed_bytes()]);
+    getrandom::getrandom(&mut seed)
+        .map_err(|e| ElaraError::Crypto(format!("SLH-DSA seed generation failed: {e}")))?;
+    let kp = slh_dsa::safe_api::SlhDsaKeyPair::from_seed(mode, &seed)
+        .map_err(|e| ElaraError::Crypto(format!("SLH-DSA keygen failed: {e:?}")))?;
+    Ok(SphincsKeypair {
+        public_key: kp.public_key().to_vec(),
+        secret_key: kp.secret_key().to_vec(),
+    })
+}
+
+/// The FIPS 205 §3.1 key check for an SLH-DSA-SHA2-192f pair: the public key is
+/// 2n bytes, the secret key 4n, and rebuilding the pair from the secret seeds
+/// gives back the public key and the root copy the secret key carries.
+///
+/// A legacy SPHINCS+ pair fails it: 0.3.3 hashes H and T_l with SHA-256 at
+/// n = 24 where FIPS 205 uses SHA-512, so the same seeds give another root.
+pub fn slh_dsa_check_pair(secret_key: &[u8], public_key: &[u8]) -> Result<()> {
+    let mode = slh_dsa::params::SLH_DSA_SHA2_192F;
+    if secret_key.len() != mode.sk_bytes() || public_key.len() != mode.pk_bytes() {
+        return Err(ElaraError::Crypto("invalid SLH-DSA keys: wrong length".into()));
+    }
+    let seeds = mode.seed_bytes();
+    let kp = slh_dsa::safe_api::SlhDsaKeyPair::from_seed(mode, &secret_key[..seeds])
+        .map_err(|e| ElaraError::Crypto(format!("invalid SLH-DSA keys: {e:?}")))?;
+    if kp.public_key() != public_key || kp.secret_key()[seeds..] != secret_key[seeds..] {
+        return Err(ElaraError::Crypto("SLH-DSA key pair does not match its seeds".into()));
+    }
+    Ok(())
+}
 
 // ─── Public algorithm constants ─────────────────────────────────────────────
 
@@ -169,7 +249,7 @@ pub fn sphincs_sign_with_pk(message: &[u8], secret_key: &[u8], public_key: &[u8]
 // tag space. Re-exported (not shadowed) so node-side callers keep this path
 // AND the Batch-B pin test below validates the CANONICAL values: a crate-side
 // change can no longer slip past a stale local copy (2026-07-12 sweep A8).
-pub use elara_record::pqc::{ALG_DILITHIUM3, ALG_SPHINCS_SHA2_192F};
+pub use elara_record::pqc::{ALG_DILITHIUM3, ALG_SLH_DSA_SHA2_192F, ALG_SPHINCS_SHA2_192F};
 
 /// Dilithium3 / ML-DSA-65 public key size in bytes (FIPS 204).
 pub const DILITHIUM3_PUBLIC_KEY_LEN: usize = 1952;
@@ -266,6 +346,114 @@ mod tests {
         assert!(sphincs_sign_with_pk(b"m", &kp.secret_key, &kp.public_key[..47]).is_err());
     }
 
+    #[test]
+    fn test_slh_dsa_keygen_signs_under_fips205() {
+        let kp = slh_dsa_keygen().unwrap();
+        assert_eq!(kp.public_key.len(), SPHINCS_SHA2_192F_PUBLIC_KEY_LEN);
+        assert_eq!(kp.secret_key.len(), 96);
+        let mode = slh_dsa::params::SLH_DSA_SHA2_192F;
+        let pair =
+            slh_dsa::safe_api::SlhDsaKeyPair::from_bytes(mode, &kp.public_key, &kp.secret_key)
+                .unwrap();
+        let sig = pair.sign(b"m").unwrap();
+        assert_eq!(sig.len(), 35664);
+        use slh_dsa::safe_api::SlhDsaSignature;
+        assert!(SlhDsaSignature::verify(sig.to_bytes(), &kp.public_key, b"m", mode));
+        assert!(!SlhDsaSignature::verify(sig.to_bytes(), &kp.public_key, b"n", mode));
+    }
+
+    #[test]
+    fn test_slh_dsa_keygen_never_repeats() {
+        let a = slh_dsa_keygen().unwrap();
+        let b = slh_dsa_keygen().unwrap();
+        assert_ne!(a.secret_key, b.secret_key);
+        assert_ne!(a.public_key, b.public_key);
+    }
+
+    #[test]
+    fn test_slh_dsa_check_pair_takes_only_its_own_keys() {
+        let kp = slh_dsa_keygen().unwrap();
+        slh_dsa_check_pair(&kp.secret_key, &kp.public_key).unwrap();
+
+        let legacy = sphincs_keygen().unwrap();
+        assert!(slh_dsa_check_pair(&legacy.secret_key, &legacy.public_key).is_err());
+
+        let mut pk = kp.public_key.clone();
+        let mut sk = kp.secret_key.clone();
+        let (skl, pkl) = (sk.len(), pk.len());
+        pk[pkl - 1] ^= 1;
+        assert!(slh_dsa_check_pair(&kp.secret_key, &pk).is_err(), "public root");
+        sk[skl - 1] ^= 1;
+        assert!(slh_dsa_check_pair(&sk, &kp.public_key).is_err(), "secret root copy");
+        assert!(slh_dsa_check_pair(&sk, &pk).is_err(), "same root, not the derived one");
+        assert!(slh_dsa_check_pair(&kp.secret_key[..95], &kp.public_key).is_err());
+        assert!(slh_dsa_check_pair(&kp.secret_key, &kp.public_key[..47]).is_err());
+    }
+
+    #[test]
+    fn test_sphincs_sign_refuses_a_fips205_pair() {
+        // The legacy signer's root recompute is what stops a FIPS 205 key from
+        // signing a legacy 0x02 leg.
+        let kp = slh_dsa_keygen().unwrap();
+        let err = sphincs_sign_with_pk(b"m", &kp.secret_key, &kp.public_key).unwrap_err();
+        assert!(err.to_string().contains("does not match its seeds"), "{err}");
+    }
+
+    /// A sign on the only worker of a multi-thread runtime must hand that
+    /// worker's queue off, so a ticker task keeps running for the whole sign.
+    /// Without the hand-off the ticker cannot run at all (one worker, and
+    /// `block_on`'s own thread runs no spawned task): the count is exactly 0.
+    #[cfg(all(feature = "tokio", not(target_arch = "wasm32")))]
+    #[test]
+    fn sphincs_sign_hands_the_async_worker_off() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::Arc;
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_time()
+            .build()
+            .unwrap();
+        let kp = sphincs_keygen().unwrap();
+        let ticks = Arc::new(AtomicU64::new(0));
+        let advanced = rt.block_on({
+            let ticks = ticks.clone();
+            async move {
+                tokio::spawn({
+                    let ticks = ticks.clone();
+                    async move {
+                        loop {
+                            ticks.fetch_add(1, Ordering::Relaxed);
+                            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                        }
+                    }
+                });
+                // Let the ticker start before the signer takes the worker.
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                tokio::spawn(async move {
+                    let before = ticks.load(Ordering::Relaxed);
+                    sphincs_sign_with_pk(b"m", &kp.secret_key, &kp.public_key).unwrap();
+                    ticks.load(Ordering::Relaxed) - before
+                })
+                .await
+                .unwrap()
+            }
+        });
+        assert!(advanced > 0, "the ticker never ran while signing: the sign held the worker");
+    }
+
+    /// `block_in_place` panics on a current-thread runtime, so the signer must
+    /// sign there in place.
+    #[cfg(all(feature = "tokio", not(target_arch = "wasm32")))]
+    #[test]
+    fn sphincs_sign_on_a_current_thread_runtime_signs_in_place() {
+        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let kp = sphincs_keygen().unwrap();
+        let sig = rt
+            .block_on(async { sphincs_sign_with_pk(b"m", &kp.secret_key, &kp.public_key) })
+            .unwrap();
+        assert!(sphincs_verify(b"m", &sig, &kp.public_key).unwrap());
+    }
+
     /// AUDIT-8: the same 32-byte seed MUST produce the same Dilithium3 keypair
     /// bytes, every call, forever. Before the fix this function silently generated
     /// fresh OS-random keypairs and discarded the seed — callers relying on
@@ -324,17 +512,24 @@ mod tests {
         // any divergence corrupts cross-version signature container parsing.
         assert_eq!(ALG_DILITHIUM3, 1u8, "FIPS 204 ML-DSA-65 algorithm tag must be 1");
         assert_eq!(ALG_SPHINCS_SHA2_192F, 2u8, "SPHINCS+-SHA2-192f algorithm tag must be 2");
+        assert_eq!(ALG_SLH_DSA_SHA2_192F, 4u8, "FIPS 205 SLH-DSA-SHA2-192f algorithm tag must be 4");
 
         // Tag-space distinctness: no two PQC algorithms share an ID.
         assert_ne!(ALG_DILITHIUM3, ALG_SPHINCS_SHA2_192F);
         assert_ne!(ALG_DILITHIUM3, 0u8, "0 reserved for none/unset");
         assert_ne!(ALG_SPHINCS_SHA2_192F, 0u8, "0 reserved for none/unset");
 
-        // Dedup-stability of the full tag tuple.
-        let mut tags = vec![ALG_DILITHIUM3, ALG_SPHINCS_SHA2_192F];
+        // Dedup-stability of the full tag tuple, ML-KEM-768 included: 0x03 is
+        // taken there, which is why the FIPS 205 leg is 0x04.
+        let mut tags = vec![
+            ALG_DILITHIUM3,
+            ALG_SPHINCS_SHA2_192F,
+            crate::crypto::ALG_KYBER768,
+            ALG_SLH_DSA_SHA2_192F,
+        ];
         tags.sort();
         tags.dedup();
-        assert_eq!(tags.len(), 2, "all PQC algorithm tags must be pairwise distinct");
+        assert_eq!(tags.len(), 4, "all PQC algorithm tags must be pairwise distinct");
 
         // Tag ordering invariant: Dilithium3 (primary) < SPHINCS+ (secondary in Profile A).
         assert!(ALG_DILITHIUM3 < ALG_SPHINCS_SHA2_192F,

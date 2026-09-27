@@ -1179,6 +1179,29 @@ pub async fn initial_sync(state: &Arc<NodeState>) -> u32 {
 
 /// Run delta sync from a specific peer URL. Used by fork heal to target
 /// the diverged peer directly instead of picking connected[0].
+/// Drop the records whose exact wire bytes this node refused before. The
+/// cache keys on the bytes, not the id (H-1), so a refused tampered copy
+/// never takes the genuine record out of the batch. Returns the kept
+/// records and how many were dropped.
+fn drop_previously_rejected(
+    state: &NodeState,
+    records: Vec<ValidationRecord>,
+) -> (Vec<ValidationRecord>, u32) {
+    let mut skipped = 0u32;
+    let kept = records
+        .into_iter()
+        .filter(|rec| {
+            let key = gossip::RejectKey::of(rec);
+            let rejected = state.gossip_rejected.lock_recover().contains(&key);
+            if rejected {
+                skipped += 1;
+            }
+            !rejected
+        })
+        .collect();
+    (kept, skipped)
+}
+
 pub async fn initial_sync_from(state: &Arc<NodeState>, base_url: &str) -> u32 {
 
     // ── Snapshot bootstrap: try snapshot first if DAG is empty ──────────
@@ -1311,17 +1334,7 @@ pub async fn initial_sync_from(state: &Arc<NodeState>, base_url: &str) -> u32 {
             // and will never succeed. Without this, delta sync re-pulls and re-tries
             // the same ~20 permanently-stuck records every cycle, makes zero progress,
             // and effectively hangs the sync loop.
-            let mut skipped_rejected = 0u32;
-            let records: Vec<ValidationRecord> = records
-                .into_iter()
-                .filter(|rec| {
-                    let rejected = state.gossip_rejected.lock_recover().contains(&rec.id);
-                    if rejected {
-                        skipped_rejected += 1;
-                    }
-                    !rejected
-                })
-                .collect();
+            let (records, skipped_rejected) = drop_previously_rejected(state, records);
             if skipped_rejected > 0 {
                 info!("delta sync: skipped {skipped_rejected} previously-rejected records");
             }
@@ -1453,7 +1466,8 @@ pub async fn initial_sync_from(state: &Arc<NodeState>, base_url: &str) -> u32 {
                         gossip::park_retryable(state, &rec.id);
                         parked += 1;
                     } else {
-                        state.gossip_rejected.lock_recover().insert(rec.id.clone());
+                        let key = gossip::RejectKey::of(rec);
+                        state.gossip_rejected.lock_recover().insert(key);
                         cached += 1;
                     }
                 }
@@ -2558,6 +2572,35 @@ mod tests {
         assert!(!MerkleTree::verify_seal_proof_for(7, &p));
     }
     use super::*;
+
+    /// H-1: delta sync drops a refused copy by its bytes and keeps the
+    /// genuine record that shares its id.
+    #[test]
+    fn h1_delta_filter_keeps_the_genuine_record_beside_a_refused_copy() {
+        use crate::identity::{CryptoProfile, EntityType, Identity};
+        let state = crate::network::state::build_test_node_state();
+        let id = Identity::generate(EntityType::Device, CryptoProfile::ProfileB).expect("identity");
+        let mut genuine = ValidationRecord::create(
+            b"h1_delta_filter",
+            id.public_key.clone(),
+            vec![],
+            crate::record::Classification::Public,
+            None,
+        );
+        id.sign_record(&mut genuine).expect("sign");
+        let mut tampered = genuine.clone();
+        tampered.signature.as_mut().expect("signature")[0] ^= 0x01;
+        state
+            .gossip_rejected
+            .lock_recover()
+            .insert(gossip::RejectKey::of(&tampered));
+
+        let (kept, skipped) =
+            drop_previously_rejected(&state, vec![tampered, genuine.clone()]);
+        assert_eq!(skipped, 1, "the refused copy is dropped");
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].to_bytes(), genuine.to_bytes(), "the genuine record stays");
+    }
 
     // ── delta-sync cross-page cursor: build_delta_page (I1/I2/C2 pins) ────
 

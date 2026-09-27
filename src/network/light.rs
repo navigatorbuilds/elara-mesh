@@ -1331,6 +1331,8 @@ pub fn pick_checkpoint_skip_epoch(body: &serde_json::Value) -> Option<u64> {
 ///   3. `rec.signature` is present (no unsigned super-seals accepted).
 ///   4. `dilithium3_verify(signable_bytes, signature, creator_public_key)`
 ///      returns `Ok(true)`.
+///   5. The second (SPHINCS+) signature, when present, verifies through the
+///      chokepoint (`check_second_leg`); a half leg refuses.
 ///
 /// This is a PURE function: the caller fetches `wire_bytes` via
 /// `/records/fetch`; the helper only does local decode + crypto so the
@@ -1363,6 +1365,11 @@ pub fn verify_super_seal_record_integrity(
         .map_err(|e| format!("dilithium3 verify error: {e}"))?;
     if !ok {
         return Err("dilithium3 signature invalid".to_string());
+    }
+    match rec.check_second_leg(&signable) {
+        Ok(None) | Ok(Some(true)) => {}
+        Ok(Some(false)) => return Err("second signature (SPHINCS+) invalid".to_string()),
+        Err(e) => return Err(format!("second signature (SPHINCS+): {e}")),
     }
     Ok(())
 }
@@ -2700,6 +2707,40 @@ mod tests {
             err.contains("signature invalid") || err.contains("verify error"),
             "expected sig-invalid error, got: {err}"
         );
+    }
+
+    /// The second (SPHINCS+) signature sits outside the signed bytes, so a
+    /// tampered one keeps the record hash and the Dilithium3 leg intact: only
+    /// the second-leg chokepoint can refuse it.
+    #[test]
+    fn verify_super_seal_integrity_refuses_a_tampered_second_signature() {
+        use crate::identity::{CryptoProfile, EntityType, Identity};
+        use crate::record::{Classification, ValidationRecord};
+        use std::collections::BTreeMap;
+
+        let id = Identity::generate(EntityType::Device, CryptoProfile::ProfileA).unwrap();
+        let mut rec = ValidationRecord::create(
+            b"super-seal-body",
+            id.public_key.clone(),
+            vec![],
+            Classification::Public,
+            Some(BTreeMap::new()),
+        );
+        rec.version = 5;
+        rec.nonce = 7;
+        rec.zone = Some(ZoneId::from_legacy(0));
+        id.sign_record(&mut rec).unwrap();
+        assert!(rec.sphincs_signature.is_some(), "Profile A super-seal carries a second leg");
+        let hash = rec.record_hash();
+        verify_super_seal_record_integrity(hash, &rec.to_bytes())
+            .expect("valid Profile A super-seal must pass");
+
+        if let Some(sig) = rec.sphincs_signature.as_mut() {
+            sig[100] ^= 0x01;
+        }
+        let err = verify_super_seal_record_integrity(hash, &rec.to_bytes())
+            .expect_err("tampered second signature must fail");
+        assert_eq!(err, "second signature (SPHINCS+) invalid");
     }
 
     #[test]

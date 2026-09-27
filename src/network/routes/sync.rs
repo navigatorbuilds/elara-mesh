@@ -328,14 +328,16 @@ pub async fn receive_attestation(
         return Err(ElaraError::InvalidSignature.into());
     }
 
-    // Check negative cache for known-bad attestation signatures
-    {
-        let bad = state.attestation_bad_sigs.lock_recover();
-        let key = format!("{}:{}", body.record_id, body.witness_hash);
-        if bad.contains(&key) {
-            state.attestation_receive_rejected_bad_signature_total.fetch_add(1, Relaxed);
-            return Err(ElaraError::InvalidSignature.into());
-        }
+    // Check negative cache for known-bad attestation signatures, keyed on the
+    // signature bytes so a forged copy never blocks the genuine one (H-1).
+    let bad_key = crate::network::gossip::attestation_bad_sig_key(
+        &body.record_id,
+        &body.witness_hash,
+        &sig_bytes,
+    );
+    if state.attestation_bad_sigs.lock_recover().contains(&bad_key) {
+        state.attestation_receive_rejected_bad_signature_total.fetch_add(1, Relaxed);
+        return Err(ElaraError::InvalidSignature.into());
     }
 
     // Resolve the witness public key. Either the submitter supplies it inline
@@ -389,8 +391,7 @@ pub async fn receive_attestation(
                     "attestation rejected: invalid signature from {}",
                     body.witness_hash.chars().take(16).collect::<String>()
                 );
-                let mut bad = state.attestation_bad_sigs.lock_recover();
-                bad.insert(format!("{}:{}", body.record_id, body.witness_hash));
+                state.attestation_bad_sigs.lock_recover().insert(bad_key);
                 state.attestation_receive_rejected_bad_signature_total.fetch_add(1, Relaxed);
                 return Err(ElaraError::InvalidSignature.into());
             }
@@ -1091,7 +1092,7 @@ pub async fn compute_state_delta(
         (sse, ssh, lsae, lsar, cur)
     };
 
-    let delta = crate::network::snapshot::create_signed_state_delta(
+    let delta = crate::network::snapshot::create_signed_state_delta_cached(
         crate::network::snapshot::StateDeltaInputs {
             since_epoch,
             current_epoch,
@@ -1109,6 +1110,7 @@ pub async fn compute_state_delta(
             total_staked,
             identity: &state.identity,
         },
+        &state.state_delta_sig_cache,
     )?;
 
     debug!(

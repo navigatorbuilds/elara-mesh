@@ -15,6 +15,9 @@ use std::path::Path;
 
 use tracing::info;
 
+#[cfg(not(target_arch = "wasm32"))]
+use super::LockRecover;
+
 use crate::errors::{ElaraError, Result};
 use crate::accounting::bootstrap::BootstrapState;
 use crate::accounting::genesis::GenesisState;
@@ -745,7 +748,8 @@ pub fn verify_signed_snapshot(snapshot: &NodeSnapshot) -> Result<String> {
                     sphincs_pk.len(),
                 )));
             }
-            match crate::identity::Identity::verify_sphincs(&preimage, &sphincs_sig, &sphincs_pk) {
+            let format = crate::crypto::pqc::SignedFormat::Snapshot(snapshot.sig_domain);
+            match crate::crypto::pqc::verify_second_leg(format, None, &preimage, &sphincs_sig, &sphincs_pk) {
                 Ok(true) => {}
                 Ok(false) => return Err(ElaraError::Wire("snapshot SPHINCS+ signature invalid".into())),
                 Err(e) => return Err(ElaraError::Wire(format!("snapshot SPHINCS+ verify error: {e}"))),
@@ -1320,6 +1324,202 @@ pub struct StateDeltaInputs<'a> {
 /// supports it (Profile A).
 #[cfg(not(target_arch = "wasm32"))]
 pub fn create_signed_state_delta(inputs: StateDeltaInputs<'_>) -> Result<StateDelta> {
+    let identity = inputs.identity;
+    let mut delta = build_unsigned_state_delta(inputs, state_delta_now());
+    delta.checksum = compute_state_delta_checksum(&delta);
+    sign_state_delta(&mut delta, identity)?;
+    log_signed_state_delta(&delta, identity);
+    Ok(delta)
+}
+
+/// [`create_signed_state_delta`], reusing the signature `cache` holds when the
+/// content it signed is unchanged, and caching a fresh one otherwise.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn create_signed_state_delta_cached(
+    inputs: StateDeltaInputs<'_>,
+    cache: &StateDeltaSigCache,
+) -> Result<StateDelta> {
+    let identity = inputs.identity;
+    let hint = StateDeltaSigHint::of(&inputs);
+    let now = state_delta_now();
+    let mut delta = build_unsigned_state_delta(inputs, now);
+    if cache.reuse(&hint, now, &mut delta) {
+        return Ok(delta);
+    }
+    delta.checksum = compute_state_delta_checksum(&delta);
+    sign_state_delta(&mut delta, identity)?;
+    cache.insert(hint, &delta);
+    log_signed_state_delta(&delta, identity);
+    Ok(delta)
+}
+
+/// How long a cached state-delta signature is reused. Its `snapshot_timestamp`
+/// is the signing time, so a reply is never older than this.
+#[cfg(not(target_arch = "wasm32"))]
+const STATE_DELTA_SIG_MAX_AGE_SECS: f64 = 60.0;
+
+/// Most signed deltas cached at once (about 78 KB each, the SPHINCS+
+/// signature in hex being most of it).
+#[cfg(not(target_arch = "wasm32"))]
+const STATE_DELTA_SIG_MAX_ENTRIES: usize = 16;
+
+/// Signed state deltas, reused while the content they sign stays the same.
+///
+/// A delta costs a SPHINCS+ signature (tens of milliseconds) and any peer can
+/// ask for one, so repeat requests for an unchanged state reuse the last
+/// signature rather than sign again. An entry is found by the fields that
+/// name the state (epochs, roots, signing keys) and used only if the checksum
+/// of the fresh content, at the cached timestamp, equals the one it signed:
+/// the live ledger can move while the roots stay the same, and then the delta
+/// is signed afresh.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Default)]
+pub struct StateDeltaSigCache {
+    entries: std::sync::Mutex<std::collections::VecDeque<std::sync::Arc<StateDeltaSigEntry>>>,
+    hits: std::sync::atomic::AtomicU64,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct StateDeltaSigEntry {
+    hint: StateDeltaSigHint,
+    snapshot_timestamp: f64,
+    checksum: String,
+    signature: String,
+    sphincs_signature: Option<String>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, PartialEq, Eq)]
+struct StateDeltaSigHint {
+    since_epoch: u64,
+    current_epoch: u64,
+    baseline_available: bool,
+    account_state_root: [u8; 32],
+    merkle_root: [u8; 32],
+    /// Digest of the keys the delta names (the checksum does not cover them).
+    keys: [u8; 32],
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl StateDeltaSigHint {
+    fn of(inputs: &StateDeltaInputs<'_>) -> Self {
+        let identity = inputs.identity;
+        let sphincs_pk = identity.sphincs_public_key().unwrap_or_default();
+        let suite = identity.sphincs_suite().tag();
+        let mut keys = Vec::with_capacity(
+            24 + identity.public_key.len() + sphincs_pk.len() + suite.len(),
+        );
+        for part in [identity.public_key.as_slice(), sphincs_pk, suite.as_bytes()] {
+            keys.extend_from_slice(&(part.len() as u64).to_be_bytes());
+            keys.extend_from_slice(part);
+        }
+        Self {
+            since_epoch: inputs.since_epoch,
+            current_epoch: inputs.current_epoch,
+            baseline_available: inputs.baseline_available,
+            account_state_root: inputs.account_state_root,
+            merkle_root: inputs.merkle_root,
+            keys: crate::crypto::hash::sha3_256(&keys),
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl StateDeltaSigCache {
+    /// Fill `delta`'s timestamp, checksum and signatures from a cached entry
+    /// that signed this same content. `false` leaves `delta` unsigned.
+    fn reuse(&self, hint: &StateDeltaSigHint, now: f64, delta: &mut StateDelta) -> bool {
+        let entry = {
+            let entries = self.entries.lock_recover();
+            entries.iter().find(|e| e.hint == *hint).cloned()
+        };
+        let Some(entry) = entry else { return false };
+        if !(0.0..=STATE_DELTA_SIG_MAX_AGE_SECS).contains(&(now - entry.snapshot_timestamp)) {
+            return false;
+        }
+        delta.snapshot_timestamp = entry.snapshot_timestamp;
+        if compute_state_delta_checksum(delta) != entry.checksum {
+            delta.snapshot_timestamp = now;
+            return false;
+        }
+        delta.checksum = entry.checksum.clone();
+        delta.signature = entry.signature.clone();
+        delta.sphincs_signature = entry.sphincs_signature.clone();
+        self.hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        true
+    }
+
+    /// Cache `delta`'s signatures, replacing any entry for the same state and
+    /// dropping expired ones, then the oldest past the cap.
+    fn insert(&self, hint: StateDeltaSigHint, delta: &StateDelta) {
+        let now = delta.snapshot_timestamp;
+        let entry = std::sync::Arc::new(StateDeltaSigEntry {
+            hint,
+            snapshot_timestamp: now,
+            checksum: delta.checksum.clone(),
+            signature: delta.signature.clone(),
+            sphincs_signature: delta.sphincs_signature.clone(),
+        });
+        let mut entries = self.entries.lock_recover();
+        entries.retain(|e| {
+            e.hint != entry.hint
+                && (0.0..=STATE_DELTA_SIG_MAX_AGE_SECS).contains(&(now - e.snapshot_timestamp))
+        });
+        while entries.len() >= STATE_DELTA_SIG_MAX_ENTRIES {
+            entries.pop_front();
+        }
+        entries.push_back(entry);
+    }
+
+    /// Requests answered from the cache.
+    pub fn hits(&self) -> u64 {
+        self.hits.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+/// Now, quantized to milliseconds: full f64 sub-microsecond precision from
+/// `now_timestamp()` is NOT preserved through serde_json round-trip even
+/// though `to_bits()` hashing is bit-exact. Concretely, values like
+/// `1777525526.9393907` print as their own Display, but
+/// `f64::from_str("1777525526.9393907")` parses to a different bit pattern
+/// (1 ulp off), so the client's checksum recompute fails. 1ms precision is
+/// more than enough for client freshness/staleness logic and round-trips
+/// cleanly. Same problem class as the v3→v4 NodeSnapshot migration.
+#[cfg(not(target_arch = "wasm32"))]
+fn state_delta_now() -> f64 {
+    (crate::record::now_timestamp() * 1000.0).round() / 1000.0
+}
+
+/// Sign `delta` over its checksum: Dilithium3 always, SPHINCS+ when the
+/// identity's second-leg key signs.
+#[cfg(not(target_arch = "wasm32"))]
+fn sign_state_delta(delta: &mut StateDelta, identity: &crate::identity::Identity) -> Result<()> {
+    let preimage = checksum_sig_preimage(DOMAIN_TAG_STATE_DELTA_V1, delta.sig_domain, &delta.checksum)?;
+    delta.signature = identity.sign(&preimage)
+        .map(hex::encode)
+        .map_err(|e| ElaraError::Wire(format!("state-delta Dilithium3 sign: {e}")))?;
+    if let Ok(sphincs_sig) = identity.sign_sphincs(&preimage) {
+        delta.sphincs_signature = Some(hex::encode(sphincs_sig));
+    }
+    Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn log_signed_state_delta(delta: &StateDelta, identity: &crate::identity::Identity) {
+    info!(
+        "signed state-delta: since={} current={} changed={} removed={} root={}... signer={}...",
+        delta.since_epoch,
+        delta.current_epoch,
+        delta.changed_accounts.len(),
+        delta.removed_accounts.len(),
+        &delta.account_state_root[..16.min(delta.account_state_root.len())],
+        &identity.identity_hash[..16],
+    );
+}
+
+/// The unsigned `StateDelta` for `inputs`, stamped `snapshot_timestamp`.
+#[cfg(not(target_arch = "wasm32"))]
+fn build_unsigned_state_delta(inputs: StateDeltaInputs<'_>, snapshot_timestamp: f64) -> StateDelta {
     let StateDeltaInputs {
         since_epoch,
         current_epoch,
@@ -1337,17 +1537,7 @@ pub fn create_signed_state_delta(inputs: StateDeltaInputs<'_>) -> Result<StateDe
         total_staked,
         identity,
     } = inputs;
-    // Quantize to milliseconds: full f64 sub-microsecond precision from
-    // `now_timestamp()` is NOT preserved through serde_json round-trip even
-    // though `to_bits()` hashing is bit-exact. Concretely, values like
-    // `1777525526.9393907` print as their own Display, but
-    // `f64::from_str("1777525526.9393907")` parses to a different bit pattern
-    // (1 ulp off), so the client's checksum recompute fails. 1ms precision is
-    // more than enough for client freshness/staleness logic and round-trips
-    // cleanly. Same problem class as the v3→v4 NodeSnapshot migration.
-    let now = (crate::record::now_timestamp() * 1000.0).round() / 1000.0;
-
-    let mut delta = StateDelta {
+    StateDelta {
         since_epoch,
         current_epoch,
         baseline_available,
@@ -1362,7 +1552,7 @@ pub fn create_signed_state_delta(inputs: StateDeltaInputs<'_>) -> Result<StateDe
         total_accounts,
         total_supply,
         total_staked,
-        snapshot_timestamp: now,
+        snapshot_timestamp,
         signer_identity: identity.identity_hash.clone(),
         signer_public_key: hex::encode(&identity.public_key),
         signer_sphincs_public_key: identity.sphincs_public_key().map(hex::encode),
@@ -1371,30 +1561,7 @@ pub fn create_signed_state_delta(inputs: StateDeltaInputs<'_>) -> Result<StateDe
         sphincs_signature: None,
         protocol_version: crate::network::config::PROTOCOL_VERSION,
         sig_domain: Some(1), // T63 FLAG DAY 2026-08-19: domain-selected sigs live
-    };
-
-    let checksum = compute_state_delta_checksum(&delta);
-    delta.checksum = checksum.clone();
-
-    let preimage = checksum_sig_preimage(DOMAIN_TAG_STATE_DELTA_V1, delta.sig_domain, &checksum)?;
-    delta.signature = identity.sign(&preimage)
-        .map(hex::encode)
-        .map_err(|e| ElaraError::Wire(format!("state-delta Dilithium3 sign: {e}")))?;
-    if let Ok(sphincs_sig) = identity.sign_sphincs(&preimage) {
-        delta.sphincs_signature = Some(hex::encode(sphincs_sig));
     }
-
-    info!(
-        "signed state-delta: since={} current={} changed={} removed={} root={}... signer={}...",
-        since_epoch,
-        current_epoch,
-        delta.changed_accounts.len(),
-        delta.removed_accounts.len(),
-        &delta.account_state_root[..16.min(delta.account_state_root.len())],
-        &identity.identity_hash[..16],
-    );
-
-    Ok(delta)
 }
 
 /// Verify a signed `StateDelta`. Returns the signer identity on success.
@@ -1455,7 +1622,8 @@ pub fn verify_signed_state_delta(delta: &StateDelta) -> Result<String> {
                     sphincs_pk.len(),
                 )));
             }
-            match crate::identity::Identity::verify_sphincs(&preimage, &sphincs_sig, &sphincs_pk) {
+            let format = crate::crypto::pqc::SignedFormat::Snapshot(delta.sig_domain);
+            match crate::crypto::pqc::verify_second_leg(format, None, &preimage, &sphincs_sig, &sphincs_pk) {
                 Ok(true) => {}
                 Ok(false) => return Err(ElaraError::Wire("state-delta SPHINCS+ signature invalid".into())),
                 Err(e) => return Err(ElaraError::Wire(format!("state-delta SPHINCS+ verify error: {e}"))),
@@ -3058,6 +3226,171 @@ mod tests {
             identity: &identity,
         }).unwrap();
         (delta, identity)
+    }
+
+    // ─── State-delta signature cache ─────────────────────────────────
+
+    fn cache_inputs(
+        identity: &crate::identity::Identity,
+        since_epoch: u64,
+        available: u64,
+    ) -> StateDeltaInputs<'_> {
+        let mut changed = BTreeMap::new();
+        changed.insert("acct-a".to_string(), make_account(available, 0));
+        StateDeltaInputs {
+            since_epoch,
+            current_epoch: since_epoch + 10,
+            baseline_available: true,
+            account_state_root: [0xC0u8; 32],
+            merkle_root: [0xDEu8; 32],
+            latest_super_seal_epoch: None,
+            latest_super_seal_record_hash: None,
+            latest_sealed_account_epoch: None,
+            latest_sealed_account_smt_root: None,
+            changed_accounts: changed,
+            removed_accounts: Vec::new(),
+            total_accounts: 1,
+            total_supply: 1_000_000,
+            total_staked: 0,
+            identity,
+        }
+    }
+
+    /// Cache the delta for `inputs` as signed at `ts`. The signatures are
+    /// placeholders: the cache copies them and never checks them.
+    fn cache_entry(cache: &StateDeltaSigCache, inputs: StateDeltaInputs<'_>, ts: f64) {
+        let hint = StateDeltaSigHint::of(&inputs);
+        let mut delta = build_unsigned_state_delta(inputs, ts);
+        delta.checksum = compute_state_delta_checksum(&delta);
+        delta.signature = "dilithium".into();
+        delta.sphincs_signature = Some("sphincs".into());
+        cache.insert(hint, &delta);
+    }
+
+    fn reuse_at(cache: &StateDeltaSigCache, inputs: StateDeltaInputs<'_>, now: f64) -> (bool, StateDelta) {
+        let hint = StateDeltaSigHint::of(&inputs);
+        let mut delta = build_unsigned_state_delta(inputs, now);
+        let hit = cache.reuse(&hint, now, &mut delta);
+        (hit, delta)
+    }
+
+    fn cached_entries(cache: &StateDeltaSigCache) -> usize {
+        cache.entries.lock().unwrap().len()
+    }
+
+    #[test]
+    fn a_repeat_state_delta_reuses_its_signatures() {
+        use crate::identity::{CryptoProfile, EntityType, Identity};
+        let identity = Identity::generate(EntityType::Device, CryptoProfile::ProfileA).unwrap();
+        let cache = StateDeltaSigCache::default();
+        let first = create_signed_state_delta_cached(cache_inputs(&identity, 100, 5), &cache).unwrap();
+        assert_eq!(cache.hits(), 0);
+        let again = create_signed_state_delta_cached(cache_inputs(&identity, 100, 5), &cache).unwrap();
+        assert_eq!(cache.hits(), 1);
+        assert_eq!(again.snapshot_timestamp, first.snapshot_timestamp);
+        assert_eq!(again.checksum, first.checksum);
+        assert_eq!(again.signature, first.signature);
+        assert!(again.sphincs_signature.is_some());
+        assert_eq!(again.sphincs_signature, first.sphincs_signature);
+        assert_eq!(verify_signed_state_delta(&again).unwrap(), identity.identity_hash);
+    }
+
+    #[test]
+    fn a_state_delta_whose_content_moved_is_signed_again() {
+        use crate::identity::{CryptoProfile, EntityType, Identity};
+        let identity = Identity::generate(EntityType::Device, CryptoProfile::ProfileB).unwrap();
+        let cache = StateDeltaSigCache::default();
+        let first = create_signed_state_delta_cached(cache_inputs(&identity, 100, 5), &cache).unwrap();
+        // Same epochs, roots and keys; a balance the roots do not show yet.
+        let moved = create_signed_state_delta_cached(cache_inputs(&identity, 100, 6), &cache).unwrap();
+        assert_eq!(cache.hits(), 0);
+        assert_ne!(moved.checksum, first.checksum);
+        verify_signed_state_delta(&moved).unwrap();
+    }
+
+    #[test]
+    fn a_state_delta_under_other_keys_is_signed_again() {
+        use crate::identity::{CryptoProfile, EntityType, Identity, SphincsSuite};
+        let one = Identity::generate(EntityType::Device, CryptoProfile::ProfileA).unwrap();
+        let two = Identity::generate(EntityType::Device, CryptoProfile::ProfileB).unwrap();
+        let cache = StateDeltaSigCache::default();
+        create_signed_state_delta_cached(cache_inputs(&one, 100, 5), &cache).unwrap();
+        let other = create_signed_state_delta_cached(cache_inputs(&two, 100, 5), &cache).unwrap();
+        assert_eq!(cache.hits(), 0);
+        assert_eq!(verify_signed_state_delta(&other).unwrap(), two.identity_hash);
+
+        // The same keys under another suite are other keys too.
+        let mut json = one.to_json();
+        json.insert("sphincs_suite".into(), SphincsSuite::Fips205.tag().into());
+        let fips = Identity::from_json(&json).unwrap();
+        assert!(
+            StateDeltaSigHint::of(&cache_inputs(&one, 100, 5))
+                != StateDeltaSigHint::of(&cache_inputs(&fips, 100, 5))
+        );
+    }
+
+    #[test]
+    fn a_cached_state_delta_signature_expires() {
+        use crate::identity::{CryptoProfile, EntityType, Identity};
+        let identity = Identity::generate(EntityType::Device, CryptoProfile::ProfileB).unwrap();
+        let cache = StateDeltaSigCache::default();
+        let ts = 1_800_000_000.0;
+        cache_entry(&cache, cache_inputs(&identity, 100, 5), ts);
+
+        let last = ts + STATE_DELTA_SIG_MAX_AGE_SECS;
+        let (hit, delta) = reuse_at(&cache, cache_inputs(&identity, 100, 5), last);
+        assert!(hit);
+        assert_eq!(delta.snapshot_timestamp, ts);
+        assert_eq!(delta.signature, "dilithium");
+        assert_eq!(delta.sphincs_signature.as_deref(), Some("sphincs"));
+
+        let (hit, delta) = reuse_at(&cache, cache_inputs(&identity, 100, 5), last + 1.0);
+        assert!(!hit);
+        assert_eq!(delta.snapshot_timestamp, last + 1.0);
+        assert!(delta.signature.is_empty());
+
+        // A clock that stepped back never serves a delta from its future.
+        assert!(!reuse_at(&cache, cache_inputs(&identity, 100, 5), ts - 1.0).0);
+        assert_eq!(cache.hits(), 1);
+
+        // The next insert drops the expired entry.
+        cache_entry(&cache, cache_inputs(&identity, 200, 5), last + 1.0);
+        assert_eq!(cached_entries(&cache), 1);
+    }
+
+    #[test]
+    fn the_state_delta_signature_cache_is_bounded() {
+        use crate::identity::{CryptoProfile, EntityType, Identity};
+        let identity = Identity::generate(EntityType::Device, CryptoProfile::ProfileB).unwrap();
+        let cache = StateDeltaSigCache::default();
+        let ts = 1_800_000_000.0;
+        let past_cap = STATE_DELTA_SIG_MAX_ENTRIES as u64;
+        for since in 0..=past_cap {
+            cache_entry(&cache, cache_inputs(&identity, since, 5), ts);
+        }
+        assert_eq!(cached_entries(&cache), STATE_DELTA_SIG_MAX_ENTRIES);
+        assert!(!reuse_at(&cache, cache_inputs(&identity, 0, 5), ts).0, "oldest evicted");
+        assert!(reuse_at(&cache, cache_inputs(&identity, past_cap, 5), ts).0);
+
+        // Caching the same state again replaces its entry.
+        cache_entry(&cache, cache_inputs(&identity, past_cap, 5), ts + 1.0);
+        assert_eq!(cached_entries(&cache), STATE_DELTA_SIG_MAX_ENTRIES);
+    }
+
+    #[test]
+    fn a_state_delta_that_misses_keeps_its_own_timestamp() {
+        use crate::identity::{CryptoProfile, EntityType, Identity};
+        let identity = Identity::generate(EntityType::Device, CryptoProfile::ProfileB).unwrap();
+        let cache = StateDeltaSigCache::default();
+        let ts = 1_800_000_000.0;
+        cache_entry(&cache, cache_inputs(&identity, 100, 5), ts);
+        // Same hint, other content: the cached checksum does not match.
+        let (hit, delta) = reuse_at(&cache, cache_inputs(&identity, 100, 6), ts + 5.0);
+        assert!(!hit);
+        assert_eq!(delta.snapshot_timestamp, ts + 5.0);
+        assert!(delta.checksum.is_empty() && delta.signature.is_empty());
+        assert!(delta.sphincs_signature.is_none());
+        assert_eq!(cache.hits(), 0);
     }
 
     #[test]

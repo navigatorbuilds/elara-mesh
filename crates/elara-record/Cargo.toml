@@ -1,6 +1,6 @@
 [package]
 name = "elara-record"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 # Manifest publish-READY (2026-07-11) — extraction complete, repo public. Actual
 # publish = the E3 ceremony (order: elara-smt → elara-record → elara-verify; see
@@ -30,13 +30,19 @@ dilithium-rs = "=0.2.0"
 # SHA2-192f H_msg diverges, tests/acvp_slhdsa192f.rs) and signed every 0x02 leg,
 # so it stays, renamed, as that era's verifier.
 slh_dsa_legacy = { package = "lattice-slh-dsa", version = "=0.3.3" }
+# Final FIPS 205 SLH-DSA, the second leg from WIRE_VERSION 8 on. Nothing signs
+# with it before the flag day; the ACVP tests pin it meanwhile.
+slh_dsa = { package = "lattice-slh-dsa", version = "=0.4.0" }
+
+# A second FIPS 205 implementation for the differential test of the v8 second
+# leg (tests/slhdsa192f_differential.rs). Renamed because its library is also
+# called `slh_dsa`. `signature` is pinned because slh-dsa 0.1.0 does not build
+# against 2.3.0-pre.7. Test-only: nothing in the library links either crate.
+[dev-dependencies]
+rustcrypto_slh_dsa = { package = "slh-dsa", version = "=0.1.0" }
+signature = "=2.3.0-pre.4"
 
 # record::now_timestamp() reads the clock via js_sys::Date on wasm32 (no
 # SystemTime there). Same pin as the node's wasm32 target block.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = "0.3"
-
-[dev-dependencies]
-# Final FIPS 205 SLH-DSA, for the ACVP tests until the second-leg algorithm
-# that replaces 0x02 ships (it becomes a normal dependency then).
-slh_dsa = { package = "lattice-slh-dsa", version = "=0.4.0" }

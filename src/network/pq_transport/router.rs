@@ -890,7 +890,10 @@ async fn handle_submit_record(
             "id": record_id.clone(), "record_id": record_id,
         }));
     }
-    if state.gossip_rejected.lock_recover().contains(&record_id) {
+    // H-1: the embargo keys on the full wire bytes, so a tampered copy never
+    // blocks the genuine record.
+    let reject_key = crate::network::gossip::RejectKey::of(&record);
+    if state.gossip_rejected.lock_recover().contains(&reject_key) {
         state.gossip_rejected_dedup_total
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         return to_body(&json!({
@@ -966,7 +969,14 @@ async fn handle_submit_record(
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 } else if crate::network::gossip::should_permanent_reject(untrusted_push, &reason)
                 {
-                    state.gossip_rejected.lock_recover().insert(record_id.clone());
+                    // A header-less push is a first-hop submit: it ran the
+                    // timestamp defense and rate limits that pulled records
+                    // skip, so its verdict must not embargo these bytes for
+                    // the pull paths (a replayed genuine record would stay
+                    // un-pullable). Dropped, neither embargoed nor parked (H-1).
+                    if sender.is_some() {
+                        state.gossip_rejected.lock_recover().insert(reject_key);
+                    }
                 } else {
                     crate::network::gossip::park_retryable(state, &record_id);
                 }
@@ -1166,15 +1176,12 @@ async fn handle_announce(state: &Arc<NodeState>, body: &[u8]) -> Result<Vec<u8>>
     let mut have = Vec::new();
     let mut to_probe = Vec::new();
 
-    // Fast in-memory partition first: `seen` / `gossip_rejected` are
-    // `Mutex<SeenSet>` (no I/O). Only IDs that miss both caches need a RocksDB
-    // existence check.
+    // Fast in-memory partition first: `seen` is a `Mutex<SeenSet>` (no I/O).
+    // Only IDs that miss it need a RocksDB existence check. The reject embargo
+    // is not consulted: it keys on wire bytes, which an announcement does not
+    // carry (H-1). A rejected record costs one fetch and is refused on arrival.
     for ann in &announcements {
         if state.seen.lock_recover().contains(&ann.record_id) {
-            have.push(ann.record_id.clone());
-        } else if state.gossip_rejected.lock_recover().contains(&ann.record_id) {
-            state.gossip_rejected_dedup_total
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             have.push(ann.record_id.clone());
         } else {
             to_probe.push(ann.record_id.clone());
@@ -1831,14 +1838,16 @@ async fn handle_receive_attestation(
         return Err(ElaraError::InvalidSignature);
     }
 
-    // Negative cache short-circuit.
-    {
-        let bad = state.attestation_bad_sigs.lock_recover();
-        let key = format!("{}:{}", submit.record_id, submit.witness_hash);
-        if bad.contains(&key) {
-            state.attestation_receive_rejected_bad_signature_total.fetch_add(1, Relaxed);
-            return Err(ElaraError::InvalidSignature);
-        }
+    // Negative cache short-circuit, keyed on the signature bytes so a forged
+    // copy never blocks the witness's genuine attestation (H-1).
+    let bad_key = crate::network::gossip::attestation_bad_sig_key(
+        &submit.record_id,
+        &submit.witness_hash,
+        &sig_bytes,
+    );
+    if state.attestation_bad_sigs.lock_recover().contains(&bad_key) {
+        state.attestation_receive_rejected_bad_signature_total.fetch_add(1, Relaxed);
+        return Err(ElaraError::InvalidSignature);
     }
 
     // Resolve witness pubkey from inline field OR identity registry. Reject
@@ -1880,8 +1889,7 @@ async fn handle_receive_attestation(
                     .await
                     .map_err(|e| ElaraError::Network(format!("spawn_blocking: {e}")))??;
             if !sig_ok {
-                let mut bad = state.attestation_bad_sigs.lock_recover();
-                bad.insert(format!("{}:{}", submit.record_id, submit.witness_hash));
+                state.attestation_bad_sigs.lock_recover().insert(bad_key);
                 state.attestation_receive_rejected_bad_signature_total.fetch_add(1, Relaxed);
                 return Err(ElaraError::InvalidSignature);
             }
@@ -4865,6 +4873,99 @@ mod tests {
             push_is_trusted(&state, &stranger).await,
             "a configured seed peer's handshake-authenticated push must be trusted"
         );
+    }
+
+    /// `make_test_state` plus a live state core, so `handle_submit_record`
+    /// takes the production insert path (reject cache, park ring).
+    fn make_test_state_with_core() -> Arc<NodeState> {
+        let state = make_test_state();
+        let handle = crate::network::state_core::spawn_state_core(state.clone());
+        let _ = state.state_core.set(handle);
+        state
+    }
+
+    /// A signed record and a copy of it with one signature byte flipped.
+    fn h1_genuine_and_tampered(payload: &[u8]) -> (ValidationRecord, ValidationRecord) {
+        use crate::identity::{CryptoProfile, EntityType, Identity};
+        let id = Identity::generate(EntityType::Device, CryptoProfile::ProfileB).expect("identity");
+        let mut genuine = ValidationRecord::create(
+            payload,
+            id.public_key.clone(),
+            vec![],
+            crate::record::Classification::Public,
+            None,
+        );
+        id.sign_record(&mut genuine).expect("sign");
+        let mut tampered = genuine.clone();
+        tampered.signature.as_mut().expect("signature")[0] ^= 0x01;
+        (genuine, tampered)
+    }
+
+    /// Push `rec` as a same-process peer, naming a sender or not.
+    async fn h1_push(
+        state: &Arc<NodeState>,
+        rec: &ValidationRecord,
+        sender: Option<&str>,
+    ) -> serde_json::Value {
+        let mut headers = BTreeMap::new();
+        headers.insert("x-elara-network-id".to_string(), "pq-router-test".to_string());
+        if let Some(s) = sender {
+            headers.insert("x-elara-sender".to_string(), s.to_string());
+        }
+        let body = handle_submit_record(state, &headers, &rec.to_bytes(), &[0u8; 32])
+            .await
+            .expect("handler answers");
+        serde_json::from_slice(&body).expect("json body")
+    }
+
+    /// H-1, push naming its sender: the tampered copy is refused and
+    /// embargoed by its bytes, the same bytes answer `previously_rejected`,
+    /// and the genuine record with the same id is still accepted.
+    #[tokio::test]
+    async fn h1_tampered_push_never_embargoes_the_genuine_record() {
+        let state = make_test_state_with_core();
+        let (genuine, tampered) = h1_genuine_and_tampered(b"h1_push_with_sender");
+        let sender = Some("a1".repeat(32));
+        let sender = sender.as_deref();
+
+        let refused = h1_push(&state, &tampered, sender).await;
+        assert_eq!(refused["accepted"], json!(false));
+        assert_eq!(refused["reason"], json!("Invalid signature"), "got {refused}");
+        {
+            let rejected = state.gossip_rejected.lock_recover();
+            assert!(rejected.contains(&crate::network::gossip::RejectKey::of(&tampered)));
+            assert!(!rejected.contains(&crate::network::gossip::RejectKey::of(&genuine)));
+        }
+
+        let again = h1_push(&state, &tampered, sender).await;
+        assert_eq!(again["reason"], json!("previously_rejected"), "got {again}");
+
+        let accepted = h1_push(&state, &genuine, sender).await;
+        assert_eq!(accepted["accepted"], json!(true), "genuine record refused: {accepted}");
+        assert_eq!(accepted["record_id"], json!(genuine.id));
+    }
+
+    /// H-1, header-less push (a first-hop submit): the refusal enters
+    /// neither the embargo nor the park ring, the same bytes are verified
+    /// again, and the genuine record is accepted.
+    #[tokio::test]
+    async fn h1_headerless_refusal_is_dropped_never_embargoed() {
+        let state = make_test_state_with_core();
+        let (genuine, tampered) = h1_genuine_and_tampered(b"h1_push_headerless");
+
+        let refused = h1_push(&state, &tampered, None).await;
+        assert_eq!(refused["reason"], json!("Invalid signature"), "got {refused}");
+        assert!(state.gossip_rejected.lock_recover().is_empty(), "first-hop refusal embargoed");
+        assert!(
+            !state.gossip_retry.lock_recover().iter().any(|(id, _)| *id == tampered.id),
+            "first-hop refusal parked"
+        );
+
+        let again = h1_push(&state, &tampered, None).await;
+        assert_eq!(again["reason"], json!("Invalid signature"), "got {again}");
+
+        let accepted = h1_push(&state, &genuine, None).await;
+        assert_eq!(accepted["accepted"], json!(true), "genuine record refused: {accepted}");
     }
 
     #[tokio::test]

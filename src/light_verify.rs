@@ -332,5 +332,48 @@ mod tests {
         let ve = SealRecordVerifyError::VerifyError("crypto bug".into()).to_string();
         assert!(ve.contains("verify error"), "VerifyError keyword: {ve}");
         assert!(ve.contains("crypto bug"), "VerifyError shows inner msg: {ve}");
+
+        let ss = SealRecordVerifyError::SecondSignature("does not verify".into()).to_string();
+        assert!(ss.contains("second signature"), "SecondSignature keyword: {ss}");
+        assert!(ss.contains("does not verify"), "SecondSignature shows inner msg: {ss}");
+    }
+
+    /// A Profile A seal carries a second (SPHINCS+) signature. It sits outside
+    /// the signed bytes, so a tampered one leaves the record hash and the
+    /// Dilithium3 leg intact: only the second-leg chokepoint can refuse it.
+    #[test]
+    fn anchor_verify_refuses_a_tampered_second_signature() {
+        use crate::identity::{CryptoProfile, EntityType, Identity};
+        use crate::record::{Classification, ValidationRecord};
+        use crate::ZoneId;
+        use std::collections::BTreeMap;
+
+        let id = Identity::generate(EntityType::Device, CryptoProfile::ProfileA).unwrap();
+        let mut rec = ValidationRecord::create(
+            b"epoch-seal-body",
+            id.public_key.clone(),
+            vec![],
+            Classification::Public,
+            Some(BTreeMap::new()),
+        );
+        rec.version = 5;
+        rec.nonce = 11;
+        rec.zone = Some(ZoneId::from_legacy(0));
+        id.sign_record(&mut rec).unwrap();
+        assert!(rec.sphincs_signature.is_some(), "Profile A seal carries a second leg");
+        let hash = rec.record_hash();
+        let anchors = vec![rec.creator_public_key.clone()];
+        verify_seal_record_against_anchor(&rec.to_bytes(), hash, &anchors)
+            .expect("valid Profile A seal must pass");
+
+        if let Some(sig) = rec.sphincs_signature.as_mut() {
+            sig[100] ^= 0x01;
+        }
+        let err = verify_seal_record_against_anchor(&rec.to_bytes(), hash, &anchors)
+            .expect_err("tampered second signature must fail");
+        assert_eq!(
+            err,
+            SealRecordVerifyError::SecondSignature("does not verify".into())
+        );
     }
 }

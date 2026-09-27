@@ -168,11 +168,21 @@ mod pyo3_bindings {
         Ok(PyBytes::new(py, &sig).into())
     }
 
-    /// Verify a SPHINCS+ signature. Returns bool.
+    /// Verify a record's second (SPHINCS+) signature through the one chokepoint. Returns
+    /// bool. `version` and `algorithm` are the record's signed version and algorithm byte;
+    /// the defaults select the legacy verifier, so existing callers are unchanged.
     #[pyfunction]
-    pub fn py_sphincs_verify(message: &[u8], signature: &[u8], public_key: &[u8]) -> PyResult<bool> {
+    #[pyo3(signature = (message, signature, public_key, version=7, algorithm=None))]
+    pub fn py_sphincs_verify(
+        message: &[u8],
+        signature: &[u8],
+        public_key: &[u8],
+        version: u16,
+        algorithm: Option<u8>,
+    ) -> PyResult<bool> {
         // Same RecordError→ElaraError routing as py_dilithium3_verify above.
-        Ok(crypto::pqc::sphincs_verify(message, signature, public_key)
+        let format = crypto::pqc::SignedFormat::Record(version);
+        Ok(crypto::pqc::verify_second_leg(format, algorithm, message, signature, public_key)
             .map_err(crate::errors::ElaraError::from)?)
     }
 
@@ -243,6 +253,17 @@ mod pyo3_bindings {
             creator_public_key,
         )?);
         if let (Some(sph_sk), Some(sph_pk)) = (sphincs_sk, sphincs_pk) {
+            // This path signs a legacy SPHINCS+ leg outside the preimage. From
+            // record version 8 the leg is FIPS 205 and committed, so it refuses.
+            if crypto::pqc::record_second_leg_algorithm(rec.version)
+                != Some(crypto::ALG_SPHINCS_SHA2_192F)
+            {
+                return Err(crate::errors::ElaraError::Crypto(format!(
+                    "record version {} takes no legacy second leg and this binding signs no FIPS 205 one; use Identity::sign_record",
+                    rec.version
+                ))
+                .into());
+            }
             rec.sphincs_signature = Some(crypto::pqc::sphincs_sign_with_pk(
                 &signable, sph_sk, sph_pk,
             )?);
@@ -655,8 +676,10 @@ mod pyo3_bindings {
             .map(|v| v.extract())
             .transpose()?;
 
+        // The dict carries no algorithm byte: a second leg takes the one its
+        // record version fixes (0x02 up to v7, 0x04 at v8, none past it).
         let sphincs_algorithm = if sphincs_signature.is_some() {
-            Some(crypto::ALG_SPHINCS_SHA2_192F)
+            crypto::pqc::record_second_leg_algorithm(version)
         } else {
             None
         };

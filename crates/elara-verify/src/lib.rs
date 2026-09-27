@@ -23,8 +23,9 @@
 //! The flagship verb takes the seal record's wire bytes, the record hash you
 //! expect it to carry, and the Dilithium3 anchor public keys you trust (pinned
 //! out of band). It returns `Ok(())` only if the bytes decode, hash-bind to the
-//! hash you asked for, and carry a signature from one of those anchors — no
-//! network, no node, no private keys.
+//! hash you asked for, and carry a signature from one of those anchors (plus,
+//! when the record carries a second SPHINCS+ signature, one that verifies) —
+//! no network, no node, no private keys.
 //!
 //! ```no_run
 //! use elara_verify::{verify_seal_record_against_anchor, SealRecordVerifyError};
@@ -99,7 +100,9 @@ pub mod wasm_api;
 use serde_json::Value;
 
 use elara_record::hash::{sha3_256, sha3_256_hex};
-use elara_record::pqc::{dilithium3_verify, sphincs_verify};
+use elara_record::pqc::{
+    dilithium3_verify, record_second_leg_algorithm, verify_second_leg, SignedFormat, ALG_SLH_DSA_SHA2_192F,
+};
 use elara_record::record::ValidationRecord;
 // The account-SMT walk is DELEGATED to the network-agreed, cross-engine-pinned
 // `elara_smt` crate (a plain top-level dep, no node stack) — NOT re-implemented
@@ -690,10 +693,11 @@ fn sanitize_field(s: &str, max_chars: usize) -> String {
 /// a different construction than the record's own `version` field declares.
 ///
 /// `signable_bytes()` is version-branched (`>= 5` signs the slot nonce, `>= 6`
-/// prepends the domain tag and network binding), so an emitter running code from
-/// the other side of a wire-version bump signs a preimage this verifier never
-/// rebuilds, and the result is byte-for-byte indistinguishable from a forged
-/// signature. Re-trying the other two constructions separates them: producing a
+/// prepends the domain tag and network binding, `>= 8` appends the second-leg
+/// commitment), so an emitter running code from the other side of a wire-version
+/// bump signs a preimage this verifier never rebuilds, and the result is
+/// byte-for-byte indistinguishable from a forged signature. Re-trying the other
+/// three constructions separates them: producing a
 /// signature valid under ANY construction requires the key, so a hit is a
 /// canonicalisation disagreement and not a forgery. We have paid for this class
 /// once already (the ARCH-4 re-emission bug, where a peer decoder recomputed the
@@ -705,15 +709,17 @@ fn sanitize_field(s: &str, max_chars: usize) -> String {
 /// x402-foundation/wg-identity #21 (2026-09-13), whose own checker refuses to
 /// publish `signature-invalid` on a failed verify alone.
 fn construction_disagreement(record: &ValidationRecord, sig: &[u8]) -> Option<u16> {
-    // Only three constructions are distinct; skip the record's own class.
-    let own = if record.version >= 6 {
+    // Only four constructions are distinct; skip the record's own class.
+    let own = if record.version >= 8 {
+        8
+    } else if record.version >= 6 {
         6
     } else if record.version == 5 {
         5
     } else {
         4
     };
-    [4u16, 5, 6]
+    [4u16, 5, 6, 8]
         .into_iter()
         .filter(|cv| *cv != own)
         .find(|cv| {
@@ -845,14 +851,20 @@ pub fn verify_record(
             detail: "Profile B (single signature)".into(),
         }),
         (Some(ssig), Some(spk)) => {
-            let pass = sphincs_verify(&signable, ssig, spk).unwrap_or(false);
+            let format = SignedFormat::Record(record.version);
+            let leg = verify_second_leg(format, record.sphincs_algorithm, &signable, ssig, spk);
+            // From v8 the leg is FIPS 205 and the first signature's preimage commits
+            // its key; up to v7 it is SPHINCS+ and the key is unsigned.
+            let fips205 = record_second_leg_algorithm(record.version) == Some(ALG_SLH_DSA_SHA2_192F);
             checks.push(Check {
                 name: "profile",
-                status: st(pass),
-                detail: if pass {
-                    "Profile A (dual signature) — SPHINCS+-SHA2-192f also valid, under the key the record carries (not bound to the creator identity)".into()
-                } else {
-                    "Profile A claimed but the SPHINCS+ signature DOES NOT VERIFY".into()
+                status: st(matches!(leg, Ok(true))),
+                detail: match leg {
+                    Ok(true) if fips205 => "Profile A (dual signature) — SLH-DSA-SHA2-192f (FIPS 205) also valid, under the key the record carries, which its signed bytes commit to (not yet bound to the creator identity)".into(),
+                    Ok(true) => "Profile A (dual signature) — SPHINCS+-SHA2-192f also valid, under the key the record carries (not bound to the creator identity)".into(),
+                    Ok(false) if fips205 => "Profile A claimed but the SLH-DSA signature DOES NOT VERIFY".into(),
+                    Ok(false) => "Profile A claimed but the SPHINCS+ signature DOES NOT VERIFY".into(),
+                    Err(e) => format!("Profile A claimed but the second signature cannot be checked: {e}"),
                 },
             });
         }
