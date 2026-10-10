@@ -215,11 +215,16 @@ therefore *not* accepted by the paid tier — including the obvious one:
 `sample-record.json` and `sample-record-TAMPERED.json` both carry SPHINCS+ dual
 signatures and are declined 422. A decline costs you nothing (any response
 `>= 400` cancels settlement), and the CLI above verifies those two offline with
-the same verdict logic, for free.
+the same verdict logic, for free. A paid call whose body holds nothing that can
+be checked, such as `{}` or the field outline the x402 Bazaar catalog shows as
+its example, is declined 422 the same way, and the answer names the body to post.
 
-Usage, stated plainly: the endpoint went live in early September 2026, and the
-only payments settled so far are our own end-to-end tests. It is listed in the
-x402 Bazaar catalog and entered in the Algorand Foundation's x402 Global Challenge.
+Usage, stated plainly: the endpoint went live in early September 2026. As of
+10 October 2026, the payments settled are our own end-to-end tests and 14 calls
+of 0.005 USDC to `/verify/record` from one other payer, between 27 September and
+10 October: vet402, a tool that buys x402 Bazaar listings the way an agent would
+and compares the answer with the listing. The endpoint is listed in the x402
+Bazaar catalog and entered in the Algorand Foundation's x402 Global Challenge.
 
 Its listing is public, so you do not have to take that paragraph on trust: the page at
 <https://navigatorbuilds.github.io/elara-mesh/x402.html> reads our entry straight out of the
